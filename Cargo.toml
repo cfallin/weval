@@ -3,6 +3,7 @@ name = "weval"
 version = "0.1.0"
 authors = ["Chris Fallin <chris@cfallin.org>"]
 license = "Apache-2.0 WITH LLVM-Exception"
+edition = "2021"
 
 [dependencies]
 anyhow = "*"
