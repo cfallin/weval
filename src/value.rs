@@ -26,3 +26,12 @@ pub enum Value {
     Concrete(WasmVal),
     Runtime,
 }
+
+impl Value {
+    pub fn meet(a: Value, b: Value) -> Value {
+        match (a, b) {
+            (Value::Concrete(a), Value::Concrete(b)) if a == b => Value::Concrete(a),
+            _ => Value::Runtime,
+        }
+    }
+}

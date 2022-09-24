@@ -1,7 +1,7 @@
 //! Static module image summary.
 
 use crate::value::WasmVal;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use walrus::{
     ActiveData, ActiveDataLocation, DataKind, GlobalId, GlobalKind, InitExpr, Memory, MemoryId,
     Module,
@@ -9,8 +9,9 @@ use walrus::{
 
 #[derive(Clone, Debug)]
 pub struct Image {
-    pub memories: HashMap<MemoryId, MemImage>,
-    pub globals: HashMap<GlobalId, WasmVal>,
+    pub memories: BTreeMap<MemoryId, MemImage>,
+    pub globals: BTreeMap<GlobalId, WasmVal>,
+    pub stack_pointer: Option<GlobalId>,
 }
 
 #[derive(Clone, Debug)]
@@ -34,6 +35,8 @@ pub fn build_image(module: &Module) -> anyhow::Result<Image> {
                 _ => None,
             })
             .collect(),
+        // HACK: assume first global is shadow stack pointer.
+        stack_pointer: module.globals.iter().next().map(|g| g.id()),
     })
 }
 
