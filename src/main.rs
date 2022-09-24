@@ -4,8 +4,9 @@ use walrus::Module;
 
 mod directive;
 mod eval;
-mod heap;
+mod image;
 mod state;
+mod value;
 
 #[derive(Clone, Debug, StructOpt)]
 struct Options {
@@ -22,14 +23,14 @@ fn main() -> anyhow::Result<()> {
     let opts = Options::from_args();
     let mut module = Module::from_file(&opts.input_module)?;
 
-    // Build heap summaries.
-    let heaps = heap::build_summaries(&module)?;
+    // Build module image.
+    let im = image::build_image(&module)?;
 
     // Collect directives.
-    let directives = directive::collect(&module, &heaps)?;
+    let directives = directive::collect(&module, &im)?;
 
     // Partially evaluate.
-    let result = eval::partially_evaluate(&mut module, &heaps, &directives[..])?;
+    let result = eval::partially_evaluate(&mut module, &im, &directives[..])?;
 
     module.emit_wasm_file(&opts.output_module)?;
 

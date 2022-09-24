@@ -1,6 +1,6 @@
 //! Partial-evaluation directives.
 
-use crate::heap::Summaries;
+use crate::image::Image;
 use walrus::{FunctionId, Module};
 
 pub struct Directive {
@@ -13,6 +13,6 @@ pub struct Directive {
     func_index_out_addr: u32,
 }
 
-pub fn collect(module: &Module, heaps: &Summaries) -> anyhow::Result<Vec<Directive>> {
+pub fn collect(module: &Module, im: &Image) -> anyhow::Result<Vec<Directive>> {
     Ok(vec![])
 }
