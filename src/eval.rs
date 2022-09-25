@@ -15,8 +15,12 @@
 
 use crate::directive::Directive;
 use crate::image::Image;
+use crate::state::State;
 use std::collections::HashMap;
-use walrus::{ActiveData, ActiveDataLocation, DataKind, Module};
+use walrus::{
+    ir::InstrSeq, ir::InstrSeqId, ActiveData, ActiveDataLocation, DataKind, Function,
+    FunctionBuilder, FunctionKind, Module,
+};
 
 /// Partially evaluates according to the given directives.
 pub fn partially_evaluate(
@@ -55,5 +59,32 @@ pub fn partially_evaluate(
 }
 
 fn partially_evaluate_func(module: &mut Module, im: &Image, directive: &Directive) -> Option<u32> {
+    let lf = match &module.funcs.get(directive.func).kind {
+        FunctionKind::Local(lf) => lf,
+        _ => return None,
+    };
+    let (param_tys, result_tys) = module.types.params_results(lf.ty());
+    let param_tys = param_tys.to_vec();
+    let result_tys = result_tys.to_vec();
+
+    let mut builder = FunctionBuilder::new(&mut module.types, &param_tys[..], &result_tys[..]);
+    let mut state = State::initial(module, im, directive.func, directive.const_params.clone());
+    let into_seq = builder.func_body_id();
+    let _exit_state = partially_evaluate_seq(im, &mut builder, &state, lf.entry_block(), into_seq);
+
     None
+}
+
+fn partially_evaluate_seq(
+    im: &Image,
+    builder: &mut FunctionBuilder,
+    state: &State,
+    seq: InstrSeqId,
+    into_seq: InstrSeqId,
+) -> State {
+    for i in 0..builder.instr_seq(seq).instrs().len() {
+        let instr = builder.instr_seq(seq).instrs()[i].0.clone();
+        builder.instr_seq(into_seq).instr(instr);
+    }
+    state.clone()
 }
