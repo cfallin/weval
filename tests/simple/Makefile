@@ -7,7 +7,10 @@ CXXFLAGS := -I../../include -std=c++17 -O2 -g
 all: $(NAME).wasm
 
 $(NAME).wasm: $(NAME).o
-	$(CXX) -o $@ $^
+	$(CXX) $(CXXFLAGS) -o $@ $^
+
+$(NAME).o: $(NAME).cpp ../../include/weval.h
+	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
 .PHONY: clean
 clean:
