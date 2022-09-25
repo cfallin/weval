@@ -12,6 +12,7 @@ pub struct Image {
     pub memories: BTreeMap<MemoryId, MemImage>,
     pub globals: BTreeMap<GlobalId, WasmVal>,
     pub stack_pointer: Option<GlobalId>,
+    pub main_heap: Option<MemoryId>,
 }
 
 #[derive(Clone, Debug)]
@@ -37,6 +38,8 @@ pub fn build_image(module: &Module) -> anyhow::Result<Image> {
             .collect(),
         // HACK: assume first global is shadow stack pointer.
         stack_pointer: module.globals.iter().next().map(|g| g.id()),
+        // HACK: assume first memory is main heap.
+        main_heap: module.memories.iter().next().map(|m| m.id()),
     })
 }
 
@@ -66,4 +69,19 @@ fn maybe_mem_image(module: &Module, mem: &Memory) -> Option<MemImage> {
     }
 
     Some(MemImage { image, len })
+}
+
+pub fn update(module: &mut Module, im: &Image) {
+    for (mem_id, mem) in &im.memories {
+        for data_id in &module.memories.get(*mem_id).data_segments {
+            module.data.delete(*data_id);
+        }
+        module.data.add(
+            DataKind::Active(ActiveData {
+                memory: *mem_id,
+                location: ActiveDataLocation::Absolute(0),
+            }),
+            mem.image.clone(),
+        );
+    }
 }

@@ -20,17 +20,23 @@ struct Options {
 }
 
 fn main() -> anyhow::Result<()> {
+    let _ = env_logger::try_init();
     let opts = Options::from_args();
+
+    // Load module.
     let mut module = Module::from_file(&opts.input_module)?;
 
     // Build module image.
-    let im = image::build_image(&module)?;
+    let mut im = image::build_image(&module)?;
 
     // Collect directives.
     let directives = directive::collect(&module, &im)?;
 
     // Partially evaluate.
-    let result = eval::partially_evaluate(&mut module, &im, &directives[..])?;
+    eval::partially_evaluate(&mut module, &mut im, &directives[..])?;
+
+    // Update memories in module.
+    image::update(&mut module, &im);
 
     module.emit_wasm_file(&opts.output_module)?;
 
