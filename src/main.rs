@@ -30,7 +30,8 @@ fn main() -> anyhow::Result<()> {
     let mut im = image::build_image(&module)?;
 
     // Collect directives.
-    let directives = directive::collect(&module, &im)?;
+    let directives = directive::collect(&module, &mut im)?;
+    println!("Directives: {:?}", directives);
 
     // Partially evaluate.
     eval::partially_evaluate(&mut module, &mut im, &directives[..])?;

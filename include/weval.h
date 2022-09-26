@@ -3,9 +3,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef __cplusplus
-#include <type_traits>
-#endif
 
 /* ------------------------------------------------------------------------- */
 /* partial-evaluation async requests and queues                              */
@@ -24,8 +21,16 @@ struct weval_req_t {
     weval_func_t* specialized;
 };
 
+typedef enum {
+    weval_req_arg_i32 = 0,
+    weval_req_arg_i64 = 1,
+    weval_req_arg_f32 = 2,
+    weval_req_arg_f64 = 3,
+} weval_req_arg_type;
+
 struct weval_req_arg_t {
-    uint64_t specialize;
+    uint32_t specialize;
+    uint32_t ty;
     union {
         uint32_t i32;
         uint64_t i64;
@@ -135,6 +140,7 @@ template<>
 struct StoreArg<uint32_t> {
     void operator()(weval_req_arg_t* arg, uint32_t value) {
         arg->specialize = 1;
+        arg->ty = weval_req_arg_i32;
         arg->u.i32 = value;
     }
 };
@@ -142,6 +148,7 @@ template<>
 struct StoreArg<uint64_t> {
     void operator()(weval_req_arg_t* arg, uint64_t value) {
         arg->specialize = 1;
+        arg->ty = weval_req_arg_i64;
         arg->u.i64 = value;
     }
 };
@@ -149,6 +156,7 @@ template<>
 struct StoreArg<float> {
     void operator()(weval_req_arg_t* arg, float value) {
         arg->specialize = 1;
+        arg->ty = weval_req_arg_f32;
         arg->u.f32 = value;
     }
 };
@@ -156,6 +164,7 @@ template<>
 struct StoreArg<double> {
     void operator()(weval_req_arg_t* arg, double value) {
         arg->specialize = 1;
+        arg->ty = weval_req_arg_f64;
         arg->u.f64 = value;
     }
 };
@@ -164,6 +173,7 @@ struct StoreArg<T*> {
     void operator()(weval_req_arg_t* arg, T* value) {
         static_assert(sizeof(T*) == 4, "Only 32-bit Wasm supported");
         arg->specialize = 1;
+        arg->ty = weval_req_arg_i32;
         arg->u.i32 = reinterpret_cast<uint32_t>(value);
     }
 };
@@ -172,6 +182,7 @@ struct StoreArg<const T*> {
     void operator()(weval_req_arg_t* arg, const T* value) {
         static_assert(sizeof(const T*) == 4, "Only 32-bit Wasm supported");
         arg->specialize = 1;
+        arg->ty = weval_req_arg_i32;
         arg->u.i32 = reinterpret_cast<uint32_t>(value);
     }
 };
