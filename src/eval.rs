@@ -17,10 +17,11 @@ use crate::directive::Directive;
 use crate::image::Image;
 use crate::intrinsics::Intrinsics;
 use crate::state::State;
+use crate::value::Value;
 use std::collections::HashMap;
 use walrus::{
-    ir::InstrSeq, ir::InstrSeqId, ActiveData, ActiveDataLocation, DataKind, Function,
-    FunctionBuilder, FunctionKind, Module,
+    ir::Instr, ir::InstrSeq, ir::InstrSeqId, ActiveData, ActiveDataLocation, DataKind, Function,
+    FunctionBuilder, FunctionKind, LocalFunction, Module,
 };
 
 /// Partially evaluates according to the given directives.
@@ -32,7 +33,7 @@ pub fn partially_evaluate(
     let intrinsics = Intrinsics::find(module);
     let mut mem_updates = HashMap::new();
     for directive in directives {
-        if let Some(idx) = partially_evaluate_func(module, im, &intrinsics, directive) {
+        if let Some(idx) = partially_evaluate_func(module, im, &intrinsics, directive)? {
             // Update memory image.
             mem_updates.insert(directive.func_index_out_addr, idx);
         }
@@ -62,44 +63,105 @@ pub fn partially_evaluate(
 
 fn partially_evaluate_func(
     module: &mut Module,
-    im: &Image,
+    image: &Image,
     intrinsics: &Intrinsics,
     directive: &Directive,
-) -> Option<u32> {
+) -> anyhow::Result<Option<u32>> {
     let lf = match &module.funcs.get(directive.func).kind {
         FunctionKind::Local(lf) => lf,
-        _ => return None,
+        _ => return Ok(None),
     };
     let (param_tys, result_tys) = module.types.params_results(lf.ty());
     let param_tys = param_tys.to_vec();
     let result_tys = result_tys.to_vec();
 
     let mut builder = FunctionBuilder::new(&mut module.types, &param_tys[..], &result_tys[..]);
-    let mut state = State::initial(module, im, directive.func, directive.const_params.clone());
-    let into_seq = builder.func_body_id();
-    let _exit_state = partially_evaluate_seq(
-        im,
-        intrinsics,
-        &mut builder,
-        &state,
-        lf.entry_block(),
-        into_seq,
+    let state = State::initial(
+        module,
+        image,
+        directive.func,
+        directive.const_params.clone(),
     );
+    let from_seq = lf.entry_block();
+    let into_seq = builder.func_body_id();
+    let mut ctx = EvalCtx {
+        generic_fn: lf,
+        builder: &mut builder,
+        intrinsics,
+        image,
+        seq_map: HashMap::new(),
+        inbound_state: HashMap::new(),
+    };
 
-    None
+    let (exit_state, exit_op_stack) = ctx.eval_seq(&state, from_seq, into_seq, &[])?;
+    drop(exit_state);
+    drop(exit_op_stack);
+
+    let specialized_fn = builder.finish(lf.args.clone(), &mut module.funcs);
+
+    Ok(Some(specialized_fn.index() as u32))
 }
 
-fn partially_evaluate_seq(
-    im: &Image,
-    intrinsics: &Intrinsics,
-    builder: &mut FunctionBuilder,
-    state: &State,
-    seq: InstrSeqId,
-    into_seq: InstrSeqId,
-) -> State {
-    for i in 0..builder.instr_seq(seq).instrs().len() {
-        let instr = builder.instr_seq(seq).instrs()[i].0.clone();
-        builder.instr_seq(into_seq).instr(instr);
+struct EvalCtx<'a> {
+    generic_fn: &'a LocalFunction,
+    builder: &'a mut FunctionBuilder,
+    intrinsics: &'a Intrinsics,
+    image: &'a Image,
+    seq_map: HashMap<InstrSeqId, InstrSeqId>,
+    inbound_state: HashMap<InstrSeqId, Vec<State>>,
+}
+
+impl<'a> EvalCtx<'a> {
+    fn eval_seq(
+        &mut self,
+        state: &State,
+        from_seq: InstrSeqId,
+        into_seq: InstrSeqId,
+        stack: &[Value],
+    ) -> anyhow::Result<(State, Vec<Value>)> {
+        let mut state = state.clone();
+        if let Some(states) = self.inbound_state.remove(&from_seq) {
+            for s in &states {
+                state.meet_with(s);
+            }
+        }
+        self.seq_map.insert(from_seq, into_seq);
+
+        let mut stack = stack.iter().cloned().collect::<Vec<_>>();
+        for (instr, _) in &self.generic_fn.block(from_seq).instrs {
+            match instr {
+                Instr::Block(b) => {}
+                Instr::Loop(l) => {}
+                Instr::Call(c) => {}
+                Instr::CallIndirect(ci) => {}
+                Instr::LocalGet(lg) => {}
+                Instr::LocalSet(ls) => {}
+                Instr::LocalTee(lt) => {}
+                Instr::GlobalGet(gg) => {}
+                Instr::GlobalSet(gs) => {}
+                Instr::Const(c) => {}
+                Instr::Binop(b) => {}
+                Instr::Unop(u) => {}
+                Instr::Select(s) => {}
+                Instr::Unreachable(u) => {}
+                Instr::Br(b) => {}
+                Instr::BrIf(bi) => {}
+                Instr::IfElse(ie) => {}
+                Instr::BrTable(bt) => {}
+                Instr::Drop(d) => {}
+                Instr::Return(r) => {}
+                Instr::MemorySize(ms) => {}
+                Instr::MemoryGrow(mg) => {}
+                Instr::Load(l) => {}
+                Instr::Store(s) => {}
+                _ => {
+                    anyhow::bail!("Unsupported instruction: {:?}", instr);
+                }
+            }
+        }
+
+        self.seq_map.remove(&from_seq);
+        // TODO: trim stack according to block's return type
+        Ok((state, stack))
     }
-    state.clone()
 }
