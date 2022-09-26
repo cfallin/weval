@@ -5,6 +5,7 @@ use walrus::Module;
 mod directive;
 mod eval;
 mod image;
+mod intrinsics;
 mod state;
 mod value;
 

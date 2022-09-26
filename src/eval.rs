@@ -15,6 +15,7 @@
 
 use crate::directive::Directive;
 use crate::image::Image;
+use crate::intrinsics::Intrinsics;
 use crate::state::State;
 use std::collections::HashMap;
 use walrus::{
@@ -28,9 +29,10 @@ pub fn partially_evaluate(
     im: &mut Image,
     directives: &[Directive],
 ) -> anyhow::Result<()> {
+    let intrinsics = Intrinsics::find(module);
     let mut mem_updates = HashMap::new();
     for directive in directives {
-        if let Some(idx) = partially_evaluate_func(module, im, directive) {
+        if let Some(idx) = partially_evaluate_func(module, im, &intrinsics, directive) {
             // Update memory image.
             mem_updates.insert(directive.func_index_out_addr, idx);
         }
@@ -58,7 +60,12 @@ pub fn partially_evaluate(
     }
 }
 
-fn partially_evaluate_func(module: &mut Module, im: &Image, directive: &Directive) -> Option<u32> {
+fn partially_evaluate_func(
+    module: &mut Module,
+    im: &Image,
+    intrinsics: &Intrinsics,
+    directive: &Directive,
+) -> Option<u32> {
     let lf = match &module.funcs.get(directive.func).kind {
         FunctionKind::Local(lf) => lf,
         _ => return None,
@@ -70,13 +77,21 @@ fn partially_evaluate_func(module: &mut Module, im: &Image, directive: &Directiv
     let mut builder = FunctionBuilder::new(&mut module.types, &param_tys[..], &result_tys[..]);
     let mut state = State::initial(module, im, directive.func, directive.const_params.clone());
     let into_seq = builder.func_body_id();
-    let _exit_state = partially_evaluate_seq(im, &mut builder, &state, lf.entry_block(), into_seq);
+    let _exit_state = partially_evaluate_seq(
+        im,
+        intrinsics,
+        &mut builder,
+        &state,
+        lf.entry_block(),
+        into_seq,
+    );
 
     None
 }
 
 fn partially_evaluate_seq(
     im: &Image,
+    intrinsics: &Intrinsics,
     builder: &mut FunctionBuilder,
     state: &State,
     seq: InstrSeqId,

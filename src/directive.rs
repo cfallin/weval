@@ -1,8 +1,9 @@
 //! Partial-evaluation directives.
 
 use crate::image::Image;
+use crate::intrinsics::find_global_data_by_exported_func;
 use crate::value::{Value, WasmVal};
-use walrus::{ExportItem, FunctionId, FunctionKind, Module};
+use walrus::{FunctionId, Module};
 
 #[derive(Clone, Debug)]
 pub struct Directive {
@@ -13,35 +14,6 @@ pub struct Directive {
     /// Place the ID of the resulting specialized function at the
     /// given address in memory.
     pub func_index_out_addr: u32,
-}
-
-fn find_exported_func(module: &Module, name: &str) -> Option<FunctionId> {
-    module
-        .exports
-        .iter()
-        .find(|ex| &ex.name == name)
-        .and_then(|ex| match &ex.item {
-            &ExportItem::Function(f) => Some(f),
-            _ => None,
-        })
-}
-
-fn find_global_data_by_exported_func(module: &Module, name: &str) -> Option<u32> {
-    let f = find_exported_func(module, name)?;
-    let lf = match &module.funcs.get(f).kind {
-        FunctionKind::Local(lf) => lf,
-        _ => return None,
-    };
-    let body = lf.block(lf.entry_block());
-    if body.len() == 1 && body[0].0.is_const() {
-        match body[0].0.unwrap_const().value {
-            walrus::ir::Value::I32(i) => {
-                return Some(i as u32);
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>> {
@@ -67,8 +39,8 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
     while head != 0 {
         directives.push(decode_weval_req(module, im, head)?);
         let next = im.read_heap_u32(head)?;
-        im.write_heap_u32(head, freelist);
-        im.write_heap_u32(freelist_head_addr, head);
+        im.write_heap_u32(head, freelist)?;
+        im.write_heap_u32(freelist_head_addr, head)?;
         freelist = head;
         head = next;
     }
