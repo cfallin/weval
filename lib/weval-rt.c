@@ -3,16 +3,30 @@
 weval_req_t* weval_req_pending_head;
 weval_req_t* weval_req_freelist_head;
 
-__attribute__((noinline))
-__attribute__((export_name("weval.assume.const.memory")))
-const void* weval_assume_const_memory(const void* p) {
-    return p;
+static int __hook = 0;
+
+__attribute__((export_name("weval.hook")))
+void set_hook() {
+    __hook = 1;
 }
 
-__attribute__((noinline))
+
 __attribute__((export_name("weval.assume.const")))
-uint64_t weval_assume_const(uint64_t x) {
-    return x;
+uint64_t weval_assume_const(uint64_t value) {
+    if (__hook) {
+        return 0;
+    } else {
+        return value;
+    }
+}
+
+__attribute__((export_name("weval.assume.const.memory")))
+const void* weval_assume_const_memory(const void* value) {
+    if (__hook) {
+        return 0;
+    } else {
+        return value;
+    }
 }
 
 __attribute__((export_name("weval.pending.head")))

@@ -62,7 +62,10 @@ static void weval_free() {
 extern "C" {
 #endif
 
+void marker(int magic);
+__attribute__((noinline))
 const void* weval_assume_const_memory(const void* p);
+__attribute__((noinline))
 uint64_t weval_assume_const(uint64_t p);
 
 #ifdef __cplusplus
