@@ -82,8 +82,8 @@ fn partially_evaluate_func(
         directive.func,
         directive.const_params.clone(),
     );
-    let from_seq = lf.entry_block();
-    let into_seq = builder.func_body_id();
+    let from_seq = OrigSeqId(lf.entry_block());
+    let into_seq = OutSeqId(builder.func_body_id());
     let mut ctx = EvalCtx {
         generic_fn: lf,
         builder: &mut builder,
@@ -93,42 +93,57 @@ fn partially_evaluate_func(
         inbound_state: HashMap::new(),
     };
 
-    let (exit_state, exit_op_stack) = ctx.eval_seq(&state, from_seq, into_seq, &[])?;
+    let exit_state = ctx.eval_seq(&state, from_seq, into_seq)?;
+    // TODO: implicit return if `exit_state.fallthrough` is `Some`.
     drop(exit_state);
-    drop(exit_op_stack);
 
     let specialized_fn = builder.finish(lf.args.clone(), &mut module.funcs);
 
     Ok(Some(specialized_fn.index() as u32))
 }
 
+/// Newtype around seq IDs in original (generic) function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct OrigSeqId(InstrSeqId);
+/// Newtype around seq IDs in output (specialized) function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct OutSeqId(InstrSeqId);
+
 struct EvalCtx<'a> {
     generic_fn: &'a LocalFunction,
     builder: &'a mut FunctionBuilder,
     intrinsics: &'a Intrinsics,
     image: &'a Image,
-    seq_map: HashMap<InstrSeqId, InstrSeqId>,
-    inbound_state: HashMap<InstrSeqId, Vec<State>>,
+    /// Map from seq ID in original function to specialized function.
+    seq_map: HashMap<OrigSeqId, OutSeqId>,
+    /// Pending state for a not-yet-visited (original func) seq ID.
+    inbound_state: HashMap<OrigSeqId, State>,
+}
+
+/// Evaluation result.
+struct EvalResult {
+    /// The output state for fallthrough. `None` if unreachable.
+    fallthrough: Option<State>,
+    /// Any taken-edge states.
+    taken: HashMap<InstrSeqId, State>,
 }
 
 impl<'a> EvalCtx<'a> {
     fn eval_seq(
         &mut self,
         state: &State,
-        from_seq: InstrSeqId,
-        into_seq: InstrSeqId,
-        stack: &[Value],
-    ) -> anyhow::Result<(State, Vec<Value>)> {
+        from_seq: OrigSeqId,
+        into_seq: OutSeqId,
+    ) -> anyhow::Result<EvalResult> {
         let mut state = state.clone();
-        if let Some(states) = self.inbound_state.remove(&from_seq) {
-            for s in &states {
-                state.meet_with(s);
-            }
+        if let Some(in_edge_state) = self.inbound_state.remove(&from_seq) {
+            state.meet_with(&in_edge_state);
         }
         self.seq_map.insert(from_seq, into_seq);
 
-        let mut stack = stack.iter().cloned().collect::<Vec<_>>();
-        for (instr, _) in &self.generic_fn.block(from_seq).instrs {
+        let mut taken = HashMap::new();
+
+        for (instr, _) in &self.generic_fn.block(from_seq.0).instrs {
             match instr {
                 Instr::Block(b) => {}
                 Instr::Loop(l) => {}
@@ -161,7 +176,12 @@ impl<'a> EvalCtx<'a> {
         }
 
         self.seq_map.remove(&from_seq);
+
         // TODO: trim stack according to block's return type
-        Ok((state, stack))
+
+        Ok(EvalResult {
+            fallthrough: Some(state),
+            taken,
+        })
     }
 }

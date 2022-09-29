@@ -13,6 +13,8 @@ pub struct State {
     globals: BTreeMap<GlobalId, Value>,
     /// Local values.
     locals: BTreeMap<LocalId, Value>,
+    /// Operand stack.
+    stack: Vec<Value>,
 }
 
 fn map_meet_with<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
@@ -50,6 +52,7 @@ impl State {
             mem_overlay: BTreeMap::new(),
             globals,
             locals,
+            stack: vec![],
         }
     }
 
