@@ -21,7 +21,7 @@ use crate::value::Value;
 use std::collections::HashMap;
 use walrus::{
     ir::Instr, ir::InstrSeq, ir::InstrSeqId, ActiveData, ActiveDataLocation, DataKind, Function,
-    FunctionBuilder, FunctionKind, LocalFunction, Module,
+    FunctionBuilder, FunctionKind, LocalFunction, Module, ModuleTypes,
 };
 
 /// Partially evaluates according to the given directives.
@@ -90,10 +90,10 @@ fn partially_evaluate_func(
         intrinsics,
         image,
         seq_map: HashMap::new(),
-        inbound_state: HashMap::new(),
+        tys: &module.types,
     };
 
-    let exit_state = ctx.eval_seq(&state, from_seq, into_seq)?;
+    let exit_state = ctx.eval_seq(state, from_seq, into_seq)?;
     // TODO: implicit return if `exit_state.fallthrough` is `Some`.
     drop(exit_state);
 
@@ -116,38 +116,91 @@ struct EvalCtx<'a> {
     image: &'a Image,
     /// Map from seq ID in original function to specialized function.
     seq_map: HashMap<OrigSeqId, OutSeqId>,
-    /// Pending state for a not-yet-visited (original func) seq ID.
-    inbound_state: HashMap<OrigSeqId, State>,
+    tys: &'a ModuleTypes,
 }
 
 /// Evaluation result.
+#[derive(Clone, Debug)]
 struct EvalResult {
     /// The output state for fallthrough. `None` if unreachable.
     fallthrough: Option<State>,
     /// Any taken-edge states.
-    taken: HashMap<InstrSeqId, State>,
+    taken: HashMap<OrigSeqId, State>,
+}
+
+impl EvalResult {
+    fn merge_sub_seq(&mut self, sub_seq: EvalResult, this_seq: OrigSeqId) {
+        let state = self
+            .fallthrough
+            .as_mut()
+            .expect("Cannot merge into unreachable state");
+        if let Some(fallthrough) = sub_seq.fallthrough {
+            state.meet_with(&fallthrough);
+        }
+        for (taken_target, taken_state) in sub_seq.taken {
+            if taken_target == this_seq {
+                state.meet_with(&taken_state);
+            } else if let Some(our_taken_state) = self.taken.get_mut(&taken_target) {
+                our_taken_state.meet_with(&taken_state);
+            } else {
+                self.taken.insert(taken_target, taken_state);
+            }
+        }
+    }
 }
 
 impl<'a> EvalCtx<'a> {
     fn eval_seq(
         &mut self,
-        state: &State,
+        state: State,
         from_seq: OrigSeqId,
         into_seq: OutSeqId,
     ) -> anyhow::Result<EvalResult> {
-        let mut state = state.clone();
-        if let Some(in_edge_state) = self.inbound_state.remove(&from_seq) {
-            state.meet_with(&in_edge_state);
-        }
         self.seq_map.insert(from_seq, into_seq);
 
-        let mut taken = HashMap::new();
+        let mut result = EvalResult {
+            fallthrough: Some(state),
+            taken: HashMap::new(),
+        };
 
         for (instr, _) in &self.generic_fn.block(from_seq.0).instrs {
             match instr {
-                Instr::Block(b) => {}
-                Instr::Loop(l) => {}
-                Instr::Call(c) => {}
+                Instr::Block(b) => {
+                    // Create a new output seq and recursively eval.
+                    let ty = self.generic_fn.block(b.seq).ty;
+                    let sub_from_seq = OrigSeqId(b.seq);
+                    let sub_into_seq = OutSeqId(self.builder.dangling_instr_seq(ty).id());
+                    let sub_state = result
+                        .fallthrough
+                        .as_mut()
+                        .unwrap()
+                        .enter_block(ty, &self.tys);
+                    let sub_result = self.eval_seq(sub_state, sub_from_seq, sub_into_seq)?;
+
+                    // TODO: alter EvalResult below before returning,
+                    // and at any point we branch: truncate to just
+                    // results and keep in a separate "results
+                    // returned stack". Modify our own state here,
+                    // before merging, with empty/unknown values
+                    // ("top"). Then we can merge.  TODO: state's
+                    // abstraction of value stack is "tail only": can
+                    // be incomplete (not include some prefix). We
+                    // merge by zipping in reverse.
+                    todo!("merge results back onto stack");
+                    
+                    self.builder
+                        .instr_seq(into_seq.0)
+                        .instr(Instr::Block(walrus::ir::Block {
+                            seq: sub_into_seq.0,
+                        }));
+                    result.merge_sub_seq(sub_result, from_seq);
+                }
+                Instr::Loop(l) => {
+                    todo!("Loops are special")
+                }
+                Instr::Call(c) => {
+                    // TODO: enqueue a directive for a specialized function?
+                }
                 Instr::CallIndirect(ci) => {}
                 Instr::LocalGet(lg) => {}
                 Instr::LocalSet(ls) => {}

@@ -3,7 +3,7 @@
 use crate::image::Image;
 use crate::value::{Value, WasmVal};
 use std::collections::BTreeMap;
-use walrus::{FunctionId, FunctionKind, GlobalId, LocalId, Module};
+use walrus::{FunctionId, FunctionKind, GlobalId, InstrSeqType, LocalId, Module, ModuleTypes};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct State {
@@ -60,5 +60,38 @@ impl State {
         map_meet_with(&mut self.mem_overlay, &other.mem_overlay);
         map_meet_with(&mut self.globals, &other.globals);
         map_meet_with(&mut self.locals, &other.locals);
+        assert_eq!(self.stack.len(), other.stack.len());
+        for (this_stack, other_stack) in self.stack.iter_mut().zip(other.stack.iter()) {
+            *this_stack = Value::meet(*this_stack, *other_stack);
+        }
+    }
+
+    pub fn enter_block(&mut self, ty: InstrSeqType, tys: &ModuleTypes) -> State {
+        match ty {
+            InstrSeqType::Simple(_) => self.clone(),
+            InstrSeqType::MultiValue(ty) => {
+                let ty = tys.get(ty);
+                let n_params = ty.params().len();
+                let mut ret = self.clone();
+                // Split off params.
+                let param_vals = self.stack.split_off(self.stack.len() - n_params);
+                ret.stack = param_vals;
+                ret
+            }
+        }
+    }
+
+    pub fn leave_block(&mut self, ty: InstrSeqType, tys: &ModuleTypes) {
+        match ty {
+            InstrSeqType::Simple(None) => {}
+            InstrSeqType::Simple(Some(ret_ty)) => {
+                assert_eq!(self.stack.len(), 1);
+            }
+            InstrSeqType::MultiValue(ty) => {
+                let ty = tys.get(ty);
+                let n_rets = ty.results().len();
+                assert_eq!(n_rets, self.stack.len());
+            }
+        }
     }
 }
