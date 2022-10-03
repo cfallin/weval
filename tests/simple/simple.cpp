@@ -31,7 +31,7 @@ struct Inst {
 #define LOCAL_SIZE 32
 
 struct State {
-    int pc;
+    uint32_t pc;
     uint32_t opstack[OPSTACK_SIZE];
     int opstack_len;
     uint32_t locals[LOCAL_SIZE];
@@ -41,7 +41,8 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     insts = weval::assume_const_memory(insts);
 
     while (true) {
-        const Inst* inst = &insts[state->pc++];
+        uint32_t pc = weval::loop_pc(state->pc++);
+        const Inst* inst = &insts[pc];
         switch (inst->opcode) {
             case PushConst:
                 if (state->opstack_len + 1 > OPSTACK_SIZE) {

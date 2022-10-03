@@ -129,7 +129,8 @@ struct EvalResult {
 }
 
 impl EvalResult {
-    fn merge_sub_seq(&mut self, sub_seq: EvalResult, this_seq: OrigSeqId) {
+    /// Returns `true` if merged-into seq was branched to.
+    fn merge_subblock(&mut self, sub_seq: EvalResult, this_seq: OrigSeqId) -> bool {
         let state = self
             .fallthrough
             .as_mut()
@@ -137,8 +138,10 @@ impl EvalResult {
         if let Some(fallthrough) = sub_seq.fallthrough {
             state.meet_with(&fallthrough);
         }
+        let mut this_seq_taken = false;
         for (taken_target, taken_state) in sub_seq.taken {
             if taken_target == this_seq {
+                this_seq_taken = true;
                 state.meet_with(&taken_state);
             } else if let Some(our_taken_state) = self.taken.get_mut(&taken_target) {
                 our_taken_state.meet_with(&taken_state);
@@ -146,6 +149,7 @@ impl EvalResult {
                 self.taken.insert(taken_target, taken_state);
             }
         }
+        this_seq_taken
     }
 }
 
@@ -174,26 +178,30 @@ impl<'a> EvalCtx<'a> {
                         .fallthrough
                         .as_mut()
                         .unwrap()
-                        .enter_block(ty, &self.tys);
+                        .subblock_state(ty, &self.tys);
                     let sub_result = self.eval_seq(sub_state, sub_from_seq, sub_into_seq)?;
+                    let block_used = result.merge_subblock(sub_result, from_seq);
 
-                    // TODO: alter EvalResult below before returning,
-                    // and at any point we branch: truncate to just
-                    // results and keep in a separate "results
-                    // returned stack". Modify our own state here,
-                    // before merging, with empty/unknown values
-                    // ("top"). Then we can merge.  TODO: state's
-                    // abstraction of value stack is "tail only": can
-                    // be incomplete (not include some prefix). We
-                    // merge by zipping in reverse.
-                    todo!("merge results back onto stack");
-                    
-                    self.builder
-                        .instr_seq(into_seq.0)
-                        .instr(Instr::Block(walrus::ir::Block {
-                            seq: sub_into_seq.0,
-                        }));
-                    result.merge_sub_seq(sub_result, from_seq);
+                    if block_used {
+                        // This `block` was actually branched to, so
+                        // we need to keep it.
+                        self.builder
+                            .instr_seq(into_seq.0)
+                            .instr(Instr::Block(walrus::ir::Block {
+                                seq: sub_into_seq.0,
+                            }));
+                    } else {
+                        // This `block` was not actually branched to,
+                        // so we can remove it and just inline the
+                        // resulting instructions directly (i.e.,
+                        // discard the layering).
+                        let instrs =
+                            std::mem::take(self.builder.instr_seq(sub_into_seq.0).instrs_mut());
+                        self.builder
+                            .instr_seq(into_seq.0)
+                            .instrs_mut()
+                            .extend(instrs.into_iter());
+                    }
                 }
                 Instr::Loop(l) => {
                     todo!("Loops are special")
@@ -230,11 +238,6 @@ impl<'a> EvalCtx<'a> {
 
         self.seq_map.remove(&from_seq);
 
-        // TODO: trim stack according to block's return type
-
-        Ok(EvalResult {
-            fallthrough: Some(state),
-            taken,
-        })
+        Ok(result)
     }
 }

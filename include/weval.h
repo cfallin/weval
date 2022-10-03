@@ -72,6 +72,10 @@ __attribute__((noinline))
 const void* weval_assume_const_memory(const void* p);
 __attribute__((noinline))
 uint64_t weval_assume_const(uint64_t p);
+__attribute__((noinline))
+uint32_t weval_loop_pc32(uint32_t pc);
+__attribute__((noinline))
+uint64_t weval_loop_pc64(uint64_t pc);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -102,6 +106,12 @@ T* assume_const(T* t) {
 template<typename T>
 const T* assume_const(const T* t) {
     return (T*)weval_assume_const((uint64_t)t);
+}
+uint32_t loop_pc(uint32_t pc) {
+    return weval_loop_pc32(pc);
+}
+uint64_t loop_pc(uint64_t pc) {
+    return weval_loop_pc64(pc);
 }
 
 }  // namespace weval

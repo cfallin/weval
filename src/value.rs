@@ -23,13 +23,18 @@ impl std::convert::From<walrus::ir::Value> for WasmVal {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Value {
+    /// "top" default value; undefined.
+    Top,
+    /// A value known at specialization time.
     Concrete(WasmVal),
+    /// A value only computed at runtime.
     Runtime,
 }
 
 impl Value {
     pub fn meet(a: Value, b: Value) -> Value {
         match (a, b) {
+            (Value::Top, x) | (x, Value::Top) => x,
             (Value::Concrete(a), Value::Concrete(b)) if a == b => Value::Concrete(a),
             _ => Value::Runtime,
         }

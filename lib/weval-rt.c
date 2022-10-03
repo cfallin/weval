@@ -29,6 +29,24 @@ const void* weval_assume_const_memory(const void* value) {
     }
 }
 
+__attribute__((export_name("weval.loop.pc32")))
+uint32_t weval_loop_pc32(uint32_t pc) {
+    if (__hook) {
+        return 0;
+    } else {
+        return pc;
+    }
+}
+
+__attribute__((export_name("weval.loop.pc64")))
+uint64_t weval_loop_pc64(uint64_t pc) {
+    if (__hook) {
+        return 0;
+    } else {
+        return pc;
+    }
+}
+
 __attribute__((export_name("weval.pending.head")))
 weval_req_t** __weval_pending_head() {
     return &weval_req_pending_head;

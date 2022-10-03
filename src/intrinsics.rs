@@ -5,6 +5,8 @@ use walrus::{ExportItem, FunctionId, FunctionKind, Module};
 pub struct Intrinsics {
     assume_const: Option<FunctionId>,
     assume_const_memory: Option<FunctionId>,
+    loop_pc32: Option<FunctionId>,
+    loop_pc64: Option<FunctionId>,
 }
 
 impl Intrinsics {
@@ -12,6 +14,8 @@ impl Intrinsics {
         Intrinsics {
             assume_const: find_exported_func(module, "weval.assume.const"),
             assume_const_memory: find_exported_func(module, "weval.assume.const.memory"),
+            loop_pc32: find_exported_func(module, "weval.loop.pc32"),
+            loop_pc64: find_exported_func(module, "weval.loop.pc32"),
         }
     }
 }

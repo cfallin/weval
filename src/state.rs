@@ -3,7 +3,7 @@
 use crate::image::Image;
 use crate::value::{Value, WasmVal};
 use std::collections::BTreeMap;
-use walrus::{FunctionId, FunctionKind, GlobalId, InstrSeqType, LocalId, Module, ModuleTypes};
+use walrus::{ir::InstrSeqType, FunctionId, FunctionKind, GlobalId, LocalId, Module, ModuleTypes};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct State {
@@ -13,7 +13,9 @@ pub struct State {
     globals: BTreeMap<GlobalId, Value>,
     /// Local values.
     locals: BTreeMap<LocalId, Value>,
-    /// Operand stack.
+    /// Operand stack. May be partial: describes the suffix of the
+    /// operand stack. This allows meets to work more easily when a
+    /// block returns results to its parent block.
     stack: Vec<Value>,
 }
 
@@ -25,7 +27,7 @@ fn map_meet_with<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
         if let Some(other_val) = other.get(k) {
             *val = Value::meet(*val, *other_val);
         } else {
-            *val = Value::Runtime;
+            *val = Value::Top;
         }
     }
     for other_k in other.keys() {
@@ -60,13 +62,23 @@ impl State {
         map_meet_with(&mut self.mem_overlay, &other.mem_overlay);
         map_meet_with(&mut self.globals, &other.globals);
         map_meet_with(&mut self.locals, &other.locals);
-        assert_eq!(self.stack.len(), other.stack.len());
+
+        // Meet stacks. Zip stacks backward, since they describe the
+        // suffix of the stack. Grow our stack to the size of
+        // `other`'s stack at least, filling in Top values as needed.
+        if self.stack.len() < other.stack.len() {
+            let diff = other.stack.len() - self.stack.len();
+            self.stack.resize(other.stack.len(), Value::Top);
+            self.stack.rotate_right(diff);
+        }
         for (this_stack, other_stack) in self.stack.iter_mut().zip(other.stack.iter()) {
             *this_stack = Value::meet(*this_stack, *other_stack);
         }
     }
 
-    pub fn enter_block(&mut self, ty: InstrSeqType, tys: &ModuleTypes) -> State {
+    /// Create a clone of the state to flow into a block, taking args
+    /// from the parent block's stack.
+    pub fn subblock_state(&mut self, ty: InstrSeqType, tys: &ModuleTypes) -> State {
         match ty {
             InstrSeqType::Simple(_) => self.clone(),
             InstrSeqType::MultiValue(ty) => {
@@ -77,20 +89,6 @@ impl State {
                 let param_vals = self.stack.split_off(self.stack.len() - n_params);
                 ret.stack = param_vals;
                 ret
-            }
-        }
-    }
-
-    pub fn leave_block(&mut self, ty: InstrSeqType, tys: &ModuleTypes) {
-        match ty {
-            InstrSeqType::Simple(None) => {}
-            InstrSeqType::Simple(Some(ret_ty)) => {
-                assert_eq!(self.stack.len(), 1);
-            }
-            InstrSeqType::MultiValue(ty) => {
-                let ty = tys.get(ty);
-                let n_rets = ty.results().len();
-                assert_eq!(n_rets, self.stack.len());
             }
         }
     }
