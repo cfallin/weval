@@ -17,11 +17,12 @@ use crate::directive::Directive;
 use crate::image::Image;
 use crate::intrinsics::Intrinsics;
 use crate::state::State;
-use crate::value::Value;
+use crate::value::{Value, WasmVal};
 use std::collections::HashMap;
 use walrus::{
-    ir::Instr, ir::InstrSeq, ir::InstrSeqId, ActiveData, ActiveDataLocation, DataKind, Function,
-    FunctionBuilder, FunctionKind, LocalFunction, Module, ModuleTypes,
+    ir::BinaryOp, ir::Instr, ir::InstrSeq, ir::InstrSeqId, ir::UnaryOp, ActiveData,
+    ActiveDataLocation, DataKind, Function, FunctionBuilder, FunctionKind, LocalFunction, Module,
+    ModuleFunctions, ModuleTypes,
 };
 
 /// Partially evaluates according to the given directives.
@@ -91,6 +92,7 @@ fn partially_evaluate_func(
         image,
         seq_map: HashMap::new(),
         tys: &module.types,
+        funcs: &module.funcs,
     };
 
     let exit_state = ctx.eval_seq(state, from_seq, into_seq)?;
@@ -117,6 +119,7 @@ struct EvalCtx<'a> {
     /// Map from seq ID in original function to specialized function.
     seq_map: HashMap<OrigSeqId, OutSeqId>,
     tys: &'a ModuleTypes,
+    funcs: &'a ModuleFunctions,
 }
 
 /// Evaluation result.
@@ -151,6 +154,12 @@ impl EvalResult {
         }
         this_seq_taken
     }
+
+    pub fn cur(&mut self) -> &mut State {
+        self.fallthrough
+            .as_mut()
+            .expect("Should be in reachable code when calling cur()")
+    }
 }
 
 impl<'a> EvalCtx<'a> {
@@ -174,11 +183,7 @@ impl<'a> EvalCtx<'a> {
                     let ty = self.generic_fn.block(b.seq).ty;
                     let sub_from_seq = OrigSeqId(b.seq);
                     let sub_into_seq = OutSeqId(self.builder.dangling_instr_seq(ty).id());
-                    let sub_state = result
-                        .fallthrough
-                        .as_mut()
-                        .unwrap()
-                        .subblock_state(ty, &self.tys);
+                    let sub_state = result.cur().subblock_state(ty, &self.tys);
                     let sub_result = self.eval_seq(sub_state, sub_from_seq, sub_into_seq)?;
                     let block_used = result.merge_subblock(sub_result, from_seq);
 
@@ -208,23 +213,104 @@ impl<'a> EvalCtx<'a> {
                 }
                 Instr::Call(c) => {
                     // TODO: enqueue a directive for a specialized function?
+                    // TODO: potentially invalidate operand stack caching?
+
+                    // For now, just emit the instruction directly,
+                    // providing `Runtime` return values.
+                    let callee = c.func;
+                    let callee_type = self.funcs.get(callee).ty();
+                    let (callee_args, callee_rets) = self.tys.params_results(callee_type);
+                    result.cur().popn(callee_args.len());
+                    self.builder.instr_seq(into_seq.0).call(callee);
+                    result.cur().pushn(callee_rets.len(), Value::Runtime);
                 }
-                Instr::CallIndirect(ci) => {}
-                Instr::LocalGet(lg) => {}
-                Instr::LocalSet(ls) => {}
-                Instr::LocalTee(lt) => {}
-                Instr::GlobalGet(gg) => {}
-                Instr::GlobalSet(gs) => {}
-                Instr::Const(c) => {}
-                Instr::Binop(b) => {}
-                Instr::Unop(u) => {}
-                Instr::Select(s) => {}
-                Instr::Unreachable(u) => {}
+                Instr::CallIndirect(ci) => {
+                    // TODO: we can devirtualize when we have a concrete value.
+
+                    let callee_type = ci.ty;
+                    let callee_table = ci.table;
+                    let (callee_args, callee_rets) = self.tys.params_results(callee_type);
+                    result.cur().popn(callee_args.len());
+                    self.builder
+                        .instr_seq(into_seq.0)
+                        .call_indirect(callee_type, callee_table);
+                    result.cur().pushn(callee_rets.len(), Value::Runtime);
+                }
+                Instr::LocalGet(lg) => {
+                    self.builder.instr_seq(into_seq.0).local_get(lg.local);
+                    let value = result
+                        .cur()
+                        .locals
+                        .get(&lg.local)
+                        .cloned()
+                        .unwrap_or(Value::Runtime);
+                    result.cur().stack.push(value);
+                }
+                Instr::LocalSet(ls) => {
+                    self.builder.instr_seq(into_seq.0).local_set(ls.local);
+                    let value = result.cur().stack.pop().unwrap();
+                    result.cur().locals.insert(ls.local, value);
+                }
+                Instr::LocalTee(lt) => {
+                    self.builder.instr_seq(into_seq.0).local_tee(lt.local);
+                    let value = result.cur().stack.last().cloned().unwrap();
+                    result.cur().locals.insert(lt.local, value);
+                }
+                Instr::GlobalGet(gg) => {
+                    self.builder.instr_seq(into_seq.0).global_get(gg.global);
+                    let value = result
+                        .cur()
+                        .globals
+                        .get(&gg.global)
+                        .cloned()
+                        .unwrap_or(Value::Runtime);
+                    result.cur().stack.push(value);
+                }
+                Instr::GlobalSet(gs) => {
+                    self.builder.instr_seq(into_seq.0).global_set(gs.global);
+                    let value = result.cur().stack.pop().unwrap();
+                    result.cur().globals.insert(gs.global, value);
+                }
+                Instr::Const(c) => {
+                    self.builder.instr_seq(into_seq.0).const_(c.value);
+                    let value = WasmVal::from(c.value);
+                    result.cur().stack.push(Value::Concrete(value));
+                }
+                Instr::Binop(b) => {
+                    self.builder.instr_seq(into_seq.0).binop(b.op);
+                    let arg0 = result.cur().stack.pop().unwrap();
+                    let arg1 = result.cur().stack.pop().unwrap();
+                    let ret = interpret_binop(b.op, arg0, arg1);
+                    result.cur().stack.push(ret);
+                }
+                Instr::Unop(u) => {
+                    self.builder.instr_seq(into_seq.0).unop(u.op);
+                    let arg = result.cur().stack.pop().unwrap();
+                    let ret = interpret_unop(u.op, arg);
+                    result.cur().stack.push(ret);
+                }
+                Instr::Select(s) => {
+                    self.builder.instr_seq(into_seq.0).select(s.ty);
+                    let selector = result.cur().stack.pop().unwrap();
+                    let b = result.cur().stack.pop().unwrap();
+                    let a = result.cur().stack.pop().unwrap();
+                    if let Value::Concrete(v) = selector {
+                        result.cur().stack.push(if v.is_truthy() { a } else { b });
+                    } else {
+                        result.cur().stack.push(Value::Runtime);
+                    }
+                }
+                Instr::Unreachable(u) => {
+                    self.builder.instr_seq(into_seq.0).unreachable();
+                }
                 Instr::Br(b) => {}
                 Instr::BrIf(bi) => {}
                 Instr::IfElse(ie) => {}
                 Instr::BrTable(bt) => {}
-                Instr::Drop(d) => {}
+                Instr::Drop(d) => {
+                    self.builder.instr_seq(into_seq.0).drop();
+                    result.cur().stack.pop();
+                }
                 Instr::Return(r) => {}
                 Instr::MemorySize(ms) => {}
                 Instr::MemoryGrow(mg) => {}
@@ -240,4 +326,32 @@ impl<'a> EvalCtx<'a> {
 
         Ok(result)
     }
+}
+
+fn interpret_unop(op: UnaryOp, arg: Value) -> Value {
+    if let Value::Concrete(v) = arg {
+        match op {
+            UnaryOp::I32Eqz => Value::Concrete(if v.integer_value().unwrap() == 0 {
+                WasmVal::I32(1)
+            } else {
+                WasmVal::I32(0)
+            }),
+            UnaryOp::I32Clz => Value::Runtime,
+            UnaryOp::I32Ctz => Value::Runtime,
+            UnaryOp::I64Eqz => Value::Concrete(if v.integer_value().unwrap() == 0 {
+                WasmVal::I64(1)
+            } else {
+                WasmVal::I64(0)
+            }),
+            UnaryOp::I64Clz => Value::Runtime,
+            UnaryOp::I64Ctz => Value::Runtime,
+            _ => Value::Runtime,
+        }
+    } else {
+        Value::Runtime
+    }
+}
+
+fn interpret_binop(op: BinaryOp, arg0: Value, arg1: Value) -> Value {
+    Value::Runtime
 }

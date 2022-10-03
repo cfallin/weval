@@ -8,15 +8,15 @@ use walrus::{ir::InstrSeqType, FunctionId, FunctionKind, GlobalId, LocalId, Modu
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct State {
     /// Memory overlay. We store only aligned u32s here.
-    mem_overlay: BTreeMap<u32, Value>,
+    pub mem_overlay: BTreeMap<u32, Value>,
     /// Global values.
-    globals: BTreeMap<GlobalId, Value>,
+    pub globals: BTreeMap<GlobalId, Value>,
     /// Local values.
-    locals: BTreeMap<LocalId, Value>,
+    pub locals: BTreeMap<LocalId, Value>,
     /// Operand stack. May be partial: describes the suffix of the
     /// operand stack. This allows meets to work more easily when a
     /// block returns results to its parent block.
-    stack: Vec<Value>,
+    pub stack: Vec<Value>,
 }
 
 fn map_meet_with<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
@@ -84,12 +84,28 @@ impl State {
             InstrSeqType::MultiValue(ty) => {
                 let ty = tys.get(ty);
                 let n_params = ty.params().len();
+                let n_rets = ty.results().len();
                 let mut ret = self.clone();
                 // Split off params.
                 let param_vals = self.stack.split_off(self.stack.len() - n_params);
                 ret.stack = param_vals;
+                // Create `Top` values for result in this (fallthrough) state.
+                for _ in 0..n_rets {
+                    self.stack.push(Value::Top);
+                }
                 ret
             }
         }
+    }
+
+    /// Pop N values.
+    pub fn popn(&mut self, n: usize) {
+        assert!(self.stack.len() >= n);
+        self.stack.truncate(self.stack.len() - n);
+    }
+
+    /// Push N copies of the given value.
+    pub fn pushn(&mut self, n: usize, val: Value) {
+        self.stack.resize(self.stack.len() + n, val);
     }
 }

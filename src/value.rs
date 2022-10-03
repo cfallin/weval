@@ -21,6 +21,25 @@ impl std::convert::From<walrus::ir::Value> for WasmVal {
     }
 }
 
+impl WasmVal {
+    pub fn is_truthy(self) -> bool {
+        match self {
+            WasmVal::I32(i) => i != 0,
+            // Only boolean-ish types (i32) can be evaluated for
+            // truthiness.
+            _ => panic!("Type error: non-i32 used in boolean-ish context"),
+        }
+    }
+
+    pub fn integer_value(self) -> Option<u64> {
+        match self {
+            WasmVal::I32(i) => Some(i as u64),
+            WasmVal::I64(i) => Some(i),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Value {
     /// "top" default value; undefined.
