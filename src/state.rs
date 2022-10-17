@@ -1,7 +1,7 @@
 //! State tracking.
 
 use crate::image::Image;
-use crate::value::{Value, WasmVal};
+use crate::value::{Value, ValueTags};
 use std::collections::BTreeMap;
 use walrus::{ir::InstrSeqType, FunctionId, FunctionKind, GlobalId, LocalId, Module, ModuleTypes};
 
@@ -17,24 +17,34 @@ pub struct State {
     /// operand stack. This allows meets to work more easily when a
     /// block returns results to its parent block.
     pub stack: Vec<Value>,
+    /// Loop stack, with a known PC per loop level.
+    pub loop_pcs: Vec<Option<u64>>,
 }
 
 fn map_meet_with<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
     this: &mut BTreeMap<K, Value>,
     other: &BTreeMap<K, Value>,
-) {
+) -> bool {
+    let mut changed = false;
     for (k, val) in this.iter_mut() {
         if let Some(other_val) = other.get(k) {
-            *val = Value::meet(*val, *other_val);
+            let met = Value::meet(*val, *other_val);
+            changed |= (met != *val);
+            *val = met;
         } else {
             *val = Value::Top;
+            // N.B.: not changed: Top should not have an effect (every
+            // non-present key is conceptually already Top).
         }
     }
     for other_k in other.keys() {
         if !this.contains_key(other_k) {
-            this.insert(*other_k, Value::Runtime);
+            // `Runtime` is a "bottom" value in the semilattice.
+            this.insert(*other_k, Value::Runtime(ValueTags::default()));
+            changed = true;
         }
     }
+    changed
 }
 
 impl State {
@@ -47,7 +57,7 @@ impl State {
         let globals = im
             .globals
             .iter()
-            .map(|(id, val)| (*id, Value::Concrete(*val)))
+            .map(|(id, val)| (*id, Value::Concrete(*val, ValueTags::default())))
             .collect();
 
         State {
@@ -55,13 +65,15 @@ impl State {
             globals,
             locals,
             stack: vec![],
+            loop_pcs: vec![],
         }
     }
 
-    pub fn meet_with(&mut self, other: &State) {
-        map_meet_with(&mut self.mem_overlay, &other.mem_overlay);
-        map_meet_with(&mut self.globals, &other.globals);
-        map_meet_with(&mut self.locals, &other.locals);
+    pub fn meet_with(&mut self, other: &State) -> bool {
+        let mut changed = false;
+        changed |= map_meet_with(&mut self.mem_overlay, &other.mem_overlay);
+        changed |= map_meet_with(&mut self.globals, &other.globals);
+        changed |= map_meet_with(&mut self.locals, &other.locals);
 
         // Meet stacks. Zip stacks backward, since they describe the
         // suffix of the stack. Grow our stack to the size of
@@ -70,10 +82,17 @@ impl State {
             let diff = other.stack.len() - self.stack.len();
             self.stack.resize(other.stack.len(), Value::Top);
             self.stack.rotate_right(diff);
+            changed = true;
         }
         for (this_stack, other_stack) in self.stack.iter_mut().zip(other.stack.iter()) {
-            *this_stack = Value::meet(*this_stack, *other_stack);
+            let val = *this_stack;
+            let met = Value::meet(*this_stack, *other_stack);
+            if met != val {
+                *this_stack = met;
+                changed = true;
+            }
         }
+        changed
     }
 
     /// Create a clone of the state to flow into a block, taking args

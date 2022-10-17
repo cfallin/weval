@@ -1,38 +1,67 @@
 //! Discovery of intrinsics.
 
-use walrus::{ExportItem, FunctionId, FunctionKind, Module};
+use walrus::{ExportItem, FunctionId, FunctionKind, Module, Type, ValType};
 
 pub struct Intrinsics {
-    assume_const: Option<FunctionId>,
-    assume_const_memory: Option<FunctionId>,
-    loop_pc32: Option<FunctionId>,
-    loop_pc64: Option<FunctionId>,
+    pub assume_const_memory: Option<FunctionId>,
+    pub loop_pc32: Option<FunctionId>,
+    pub loop_pc64: Option<FunctionId>,
 }
 
 impl Intrinsics {
     pub fn find(module: &Module) -> Intrinsics {
         Intrinsics {
-            assume_const: find_exported_func(module, "weval.assume.const"),
-            assume_const_memory: find_exported_func(module, "weval.assume.const.memory"),
-            loop_pc32: find_exported_func(module, "weval.loop.pc32"),
-            loop_pc64: find_exported_func(module, "weval.loop.pc32"),
+            assume_const_memory: find_exported_func(
+                module,
+                "weval.assume.const.memory",
+                &[ValType::I32],
+                &[ValType::I32],
+            ),
+            loop_pc32: find_exported_func(
+                module,
+                "weval.loop.pc32",
+                &[ValType::I32],
+                &[ValType::I32],
+            ),
+            loop_pc64: find_exported_func(
+                module,
+                "weval.loop.pc64",
+                &[ValType::I64],
+                &[ValType::I64],
+            ),
         }
     }
 }
 
-pub fn find_exported_func(module: &Module, name: &str) -> Option<FunctionId> {
+fn export_sig_matches(
+    module: &Module,
+    f: FunctionId,
+    in_tys: &[ValType],
+    out_tys: &[ValType],
+) -> bool {
+    let sig_ty = module.funcs.get(f).ty();
+    let (params, results) = module.types.params_results(sig_ty);
+    params == in_tys && results == out_tys
+}
+
+pub fn find_exported_func(
+    module: &Module,
+    name: &str,
+    in_tys: &[ValType],
+    out_tys: &[ValType],
+) -> Option<FunctionId> {
     module
         .exports
         .iter()
         .find(|ex| &ex.name == name)
         .and_then(|ex| match &ex.item {
-            &ExportItem::Function(f) => Some(f),
+            &ExportItem::Function(f) if export_sig_matches(module, f, in_tys, out_tys) => Some(f),
             _ => None,
         })
 }
 
 pub fn find_global_data_by_exported_func(module: &Module, name: &str) -> Option<u32> {
-    let f = find_exported_func(module, name)?;
+    let f = find_exported_func(module, name, &[], &[ValType::I32])?;
     let lf = match &module.funcs.get(f).kind {
         FunctionKind::Local(lf) => lf,
         _ => return None,

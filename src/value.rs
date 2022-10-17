@@ -45,17 +45,67 @@ pub enum Value {
     /// "top" default value; undefined.
     Top,
     /// A value known at specialization time.
-    Concrete(WasmVal),
+    ///
+    /// May have special "tags" attached, to mark that e.g. derived
+    /// values can be used as pointers to read
+    /// const-at-specialization-time memory.
+    Concrete(WasmVal, ValueTags),
     /// A value only computed at runtime.
-    Runtime,
+    Runtime(ValueTags),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ValueTags(u32);
+
+/// Constructors for value tags.
+impl ValueTags {
+    /// All values reached in memory through this value as a pointer
+    /// are constant at specialization time.
+    pub const fn const_memory() -> Self {
+        ValueTags(1)
+    }
+}
+
+/// Operators on value tags.
+impl std::ops::BitOr<ValueTags> for ValueTags {
+    type Output = ValueTags;
+    fn bitor(self, rhs: ValueTags) -> ValueTags {
+        ValueTags(self.0 | rhs.0)
+    }
+}
+impl ValueTags {
+    pub fn contains(&self, tags: ValueTags) -> bool {
+        (self.0 & tags.0) == tags.0
+    }
+    pub fn meet(&self, other: ValueTags) -> ValueTags {
+        ValueTags(self.0 & other.0)
+    }
 }
 
 impl Value {
+    pub fn tags(&self) -> ValueTags {
+        match self {
+            &Value::Top => ValueTags::default(),
+            &Value::Concrete(_, t) => t,
+            &Value::Runtime(t) => t,
+        }
+    }
+
+    pub fn with_tags(&self, new_tags: ValueTags) -> Value {
+        match self {
+            &Value::Top => Value::Top,
+            &Value::Concrete(k, t) => Value::Concrete(k, t | new_tags),
+            &Value::Runtime(t) => Value::Runtime(t | new_tags),
+        }
+    }
+
     pub fn meet(a: Value, b: Value) -> Value {
         match (a, b) {
             (Value::Top, x) | (x, Value::Top) => x,
-            (Value::Concrete(a), Value::Concrete(b)) if a == b => Value::Concrete(a),
-            _ => Value::Runtime,
+            (Value::Concrete(a, t1), Value::Concrete(b, t2)) if a == b => {
+                Value::Concrete(a, t1.meet(t2))
+            }
+            (a, b) => Value::Runtime(a.tags().meet(b.tags())),
         }
     }
 }

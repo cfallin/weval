@@ -17,8 +17,9 @@ use crate::directive::Directive;
 use crate::image::Image;
 use crate::intrinsics::Intrinsics;
 use crate::state::State;
-use crate::value::{Value, WasmVal};
-use std::collections::HashMap;
+use crate::value::{Value, ValueTags, WasmVal};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use walrus::{
     ir::BinaryOp, ir::Instr, ir::InstrSeq, ir::InstrSeqId, ir::UnaryOp, ActiveData,
     ActiveDataLocation, DataKind, Function, FunctionBuilder, FunctionKind, LocalFunction, Module,
@@ -128,7 +129,7 @@ struct EvalResult {
     /// The output state for fallthrough. `None` if unreachable.
     fallthrough: Option<State>,
     /// Any taken-edge states.
-    taken: HashMap<OrigSeqId, State>,
+    taken: Vec<(OrigSeqId, State)>,
 }
 
 impl EvalResult {
@@ -146,10 +147,8 @@ impl EvalResult {
             if taken_target == this_seq {
                 this_seq_taken = true;
                 state.meet_with(&taken_state);
-            } else if let Some(our_taken_state) = self.taken.get_mut(&taken_target) {
-                our_taken_state.meet_with(&taken_state);
             } else {
-                self.taken.insert(taken_target, taken_state);
+                self.taken.push((taken_target, taken_state));
             }
         }
         this_seq_taken
@@ -209,20 +208,171 @@ impl<'a> EvalCtx<'a> {
                     }
                 }
                 Instr::Loop(l) => {
-                    todo!("Loops are special")
+                    // Create the initial sub-block state.
+                    let ty = self.generic_fn.block(l.seq).ty;
+                    let sub_from_seq = OrigSeqId(l.seq);
+                    let mut sub_state = result.cur().subblock_state(ty, &self.tys);
+                    sub_state.loop_pcs.push(None);
+
+                    // Create a map of PC -> iters.
+                    #[derive(Debug)]
+                    struct IterState {
+                        input: State,
+                        code: Option<OutSeqId>,
+                        output: Option<EvalResult>,
+                        next_pcs: HashSet<PC>,
+                    }
+                    type PC = Option<u64>;
+                    let mut iters: HashMap<PC, IterState> = HashMap::new();
+
+                    iters.insert(
+                        None,
+                        IterState {
+                            input: sub_state,
+                            code: None,
+                            output: None,
+                            next_pcs: HashSet::new(),
+                        },
+                    );
+                    let mut workqueue: Vec<PC> = vec![];
+                    let mut workqueue_set: HashSet<PC> = HashSet::new();
+                    workqueue.push(None);
+                    workqueue_set.insert(None);
+
+                    while let Some(iter_pc) = workqueue.pop() {
+                        workqueue_set.remove(&iter_pc);
+
+                        // Get the current (input-state, output-code, output-state) for this PC.
+                        let iter_state = iters.get_mut(&iter_pc).unwrap();
+                        let in_state = iter_state.input.clone();
+
+                        // Allocate an InstrSeq for the output, or
+                        // reuse the one that was used last time we
+                        // evaluated this iter.
+                        let sub_into_seq = match iter_state.code {
+                            Some(seq) => {
+                                self.builder.instr_seq(seq.0).instrs_mut().clear();
+                                seq
+                            }
+                            None => {
+                                let new_seq = OutSeqId(self.builder.dangling_instr_seq(ty).id());
+                                iter_state.code = Some(new_seq);
+                                new_seq
+                            }
+                        };
+
+                        // Evaluate the loop body.
+                        let sub_result = self.eval_seq(in_state, sub_from_seq, sub_into_seq)?;
+
+                        // Examine taken edges out of the sub_result
+                        // for any other iters we need to add to the
+                        // workqueue.
+                        sub_result.taken.retain(|(to_seq, to_state)| {
+                            if to_seq.0 != l.seq {
+                                true
+                            } else {
+                                // Pick the PC out of the taken-state.
+                                let taken_pc = to_state.loop_pcs.last().cloned().unwrap();
+
+                                iters.get_mut(&iter_pc).unwrap().next_pcs.insert(taken_pc);
+
+                                // If there's an existing entry in
+                                // `iters`, meet the state into it; if
+                                // input state changed, re-enqueue the
+                                // iter for processing. Otherwise, add a
+                                // new entry and enqueue for processing.
+                                let needs_enqueue = match iters.entry(taken_pc) {
+                                    Entry::Occupied(o) => {
+                                        let changed = o.get_mut().input.meet_with(&to_state);
+                                        // Re-enqueue only if input state changed.
+                                        changed
+                                    }
+                                    Entry::Vacant(v) => {
+                                        v.insert(IterState {
+                                            input: to_state.clone(),
+                                            code: None,
+                                            output: None,
+                                            next_pcs: HashSet::new(),
+                                        });
+                                        true
+                                    }
+                                };
+
+                                if needs_enqueue {
+                                    if workqueue_set.insert(taken_pc) {
+                                        workqueue.push(taken_pc);
+                                    }
+                                }
+
+                                false
+                            }
+                        });
+
+                        // Save the output state.
+                        iter_state.output = Some(sub_result);
+                    }
+
+                    // Stitch together stamped-out specialized
+                    // iterations, resolving branches to specific
+                    // other iters and breaks out of the
+                    // loop. Encapsulate the whole thing in a block
+                    // and replace fallthroughs from individual iters
+                    // with breaks out of the block.
+                    todo!();
+
+                    // Merge all out-states from iters: into our own
+                    // current fallthrough when an iter falls through
+                    // (*not* when it branches to the loop seqid), and
+                    // into takens for all others. Note that we should
+                    // assert that we've handled branches to the loop
+                    // label in the process above.
                 }
                 Instr::Call(c) => {
                     // TODO: enqueue a directive for a specialized function?
                     // TODO: potentially invalidate operand stack caching?
 
-                    // For now, just emit the instruction directly,
-                    // providing `Runtime` return values.
-                    let callee = c.func;
-                    let callee_type = self.funcs.get(callee).ty();
-                    let (callee_args, callee_rets) = self.tys.params_results(callee_type);
-                    result.cur().popn(callee_args.len());
-                    self.builder.instr_seq(into_seq.0).call(callee);
-                    result.cur().pushn(callee_rets.len(), Value::Runtime);
+                    // Determine if this is an intrinsic; handle specially if so.
+                    if Some(c.func) == self.intrinsics.assume_const_memory {
+                        // Add the tag to the value, but omit the call
+                        // to the intrinsic in the specialized
+                        // function.
+                        let arg = result.cur().stack.pop().unwrap();
+                        result
+                            .cur()
+                            .stack
+                            .push(arg.with_tags(ValueTags::const_memory()));
+                    } else if Some(c.func) == self.intrinsics.loop_pc32 {
+                        // Set the known PC for the innermost loop in our state, if any.
+                        if let &Value::Concrete(WasmVal::I32(new_pc), _) =
+                            result.cur().stack.last().unwrap()
+                        {
+                            if let Some(pc) = result.cur().loop_pcs.last_mut() {
+                                *pc = Some(new_pc as u64);
+                            }
+                        }
+                        // Omit the actual intrinsic call, and leave the value on the stack.
+                    } else if Some(c.func) == self.intrinsics.loop_pc64 {
+                        // Set the known PC for the innermost loop in our state, if any.
+                        if let &Value::Concrete(WasmVal::I64(new_pc), _) =
+                            result.cur().stack.last().unwrap()
+                        {
+                            if let Some(pc) = result.cur().loop_pcs.last_mut() {
+                                *pc = Some(new_pc);
+                            }
+                        }
+                        // Omit the actual intrinsic call, and leave the value on the stack.
+                    } else {
+                        // For now, just emit the instruction directly,
+                        // providing `Runtime` return values.
+                        let callee = c.func;
+                        let callee_type = self.funcs.get(callee).ty();
+                        let (callee_args, callee_rets) = self.tys.params_results(callee_type);
+                        result.cur().popn(callee_args.len());
+                        self.builder.instr_seq(into_seq.0).call(callee);
+                        result
+                            .cur()
+                            .pushn(callee_rets.len(), Value::Runtime(ValueTags::default()));
+                    }
                 }
                 Instr::CallIndirect(ci) => {
                     // TODO: we can devirtualize when we have a concrete value.
@@ -234,7 +384,9 @@ impl<'a> EvalCtx<'a> {
                     self.builder
                         .instr_seq(into_seq.0)
                         .call_indirect(callee_type, callee_table);
-                    result.cur().pushn(callee_rets.len(), Value::Runtime);
+                    result
+                        .cur()
+                        .pushn(callee_rets.len(), Value::Runtime(ValueTags::default()));
                 }
                 Instr::LocalGet(lg) => {
                     self.builder.instr_seq(into_seq.0).local_get(lg.local);
@@ -243,7 +395,7 @@ impl<'a> EvalCtx<'a> {
                         .locals
                         .get(&lg.local)
                         .cloned()
-                        .unwrap_or(Value::Runtime);
+                        .unwrap_or(Value::Runtime(ValueTags::default()));
                     result.cur().stack.push(value);
                 }
                 Instr::LocalSet(ls) => {
@@ -263,7 +415,7 @@ impl<'a> EvalCtx<'a> {
                         .globals
                         .get(&gg.global)
                         .cloned()
-                        .unwrap_or(Value::Runtime);
+                        .unwrap_or(Value::Runtime(ValueTags::default()));
                     result.cur().stack.push(value);
                 }
                 Instr::GlobalSet(gs) => {
@@ -274,7 +426,10 @@ impl<'a> EvalCtx<'a> {
                 Instr::Const(c) => {
                     self.builder.instr_seq(into_seq.0).const_(c.value);
                     let value = WasmVal::from(c.value);
-                    result.cur().stack.push(Value::Concrete(value));
+                    result
+                        .cur()
+                        .stack
+                        .push(Value::Concrete(value, ValueTags::default()));
                 }
                 Instr::Binop(b) => {
                     self.builder.instr_seq(into_seq.0).binop(b.op);
@@ -294,10 +449,13 @@ impl<'a> EvalCtx<'a> {
                     let selector = result.cur().stack.pop().unwrap();
                     let b = result.cur().stack.pop().unwrap();
                     let a = result.cur().stack.pop().unwrap();
-                    if let Value::Concrete(v) = selector {
+                    if let Value::Concrete(v, _) = selector {
                         result.cur().stack.push(if v.is_truthy() { a } else { b });
                     } else {
-                        result.cur().stack.push(Value::Runtime);
+                        result
+                            .cur()
+                            .stack
+                            .push(Value::Runtime(ValueTags::default()));
                     }
                 }
                 Instr::Unreachable(u) => {
@@ -329,29 +487,35 @@ impl<'a> EvalCtx<'a> {
 }
 
 fn interpret_unop(op: UnaryOp, arg: Value) -> Value {
-    if let Value::Concrete(v) = arg {
+    if let Value::Concrete(v, _) = arg {
         match op {
-            UnaryOp::I32Eqz => Value::Concrete(if v.integer_value().unwrap() == 0 {
-                WasmVal::I32(1)
-            } else {
-                WasmVal::I32(0)
-            }),
-            UnaryOp::I32Clz => Value::Runtime,
-            UnaryOp::I32Ctz => Value::Runtime,
-            UnaryOp::I64Eqz => Value::Concrete(if v.integer_value().unwrap() == 0 {
-                WasmVal::I64(1)
-            } else {
-                WasmVal::I64(0)
-            }),
-            UnaryOp::I64Clz => Value::Runtime,
-            UnaryOp::I64Ctz => Value::Runtime,
-            _ => Value::Runtime,
+            UnaryOp::I32Eqz => Value::Concrete(
+                if v.integer_value().unwrap() == 0 {
+                    WasmVal::I32(1)
+                } else {
+                    WasmVal::I32(0)
+                },
+                ValueTags::default(),
+            ),
+            UnaryOp::I32Clz => Value::Runtime(ValueTags::default()),
+            UnaryOp::I32Ctz => Value::Runtime(ValueTags::default()),
+            UnaryOp::I64Eqz => Value::Concrete(
+                if v.integer_value().unwrap() == 0 {
+                    WasmVal::I64(1)
+                } else {
+                    WasmVal::I64(0)
+                },
+                ValueTags::default(),
+            ),
+            UnaryOp::I64Clz => Value::Runtime(ValueTags::default()),
+            UnaryOp::I64Ctz => Value::Runtime(ValueTags::default()),
+            _ => Value::Runtime(ValueTags::default()),
         }
     } else {
-        Value::Runtime
+        Value::Runtime(ValueTags::default())
     }
 }
 
 fn interpret_binop(op: BinaryOp, arg0: Value, arg1: Value) -> Value {
-    Value::Runtime
+    Value::Runtime(ValueTags::default())
 }
