@@ -21,9 +21,8 @@ use crate::value::{Value, ValueTags, WasmVal};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use walrus::{
-    ir::BinaryOp, ir::Instr, ir::InstrSeq, ir::InstrSeqId, ir::UnaryOp, ActiveData,
-    ActiveDataLocation, DataKind, Function, FunctionBuilder, FunctionKind, LocalFunction, Module,
-    ModuleFunctions, ModuleTypes,
+    ir::BinaryOp, ir::Instr, ir::InstrSeqId, ir::UnaryOp, FunctionBuilder, FunctionKind,
+    LocalFunction, Module, ModuleFunctions, ModuleTypes,
 };
 
 /// Partially evaluates according to the given directives.
@@ -172,7 +171,7 @@ impl<'a> EvalCtx<'a> {
 
         let mut result = EvalResult {
             fallthrough: Some(state),
-            taken: HashMap::new(),
+            taken: vec![],
         };
 
         for (instr, _) in &self.generic_fn.block(from_seq.0).instrs {
@@ -262,7 +261,7 @@ impl<'a> EvalCtx<'a> {
                         };
 
                         // Evaluate the loop body.
-                        let sub_result = self.eval_seq(in_state, sub_from_seq, sub_into_seq)?;
+                        let mut sub_result = self.eval_seq(in_state, sub_from_seq, sub_into_seq)?;
 
                         // Examine taken edges out of the sub_result
                         // for any other iters we need to add to the
@@ -282,7 +281,7 @@ impl<'a> EvalCtx<'a> {
                                 // iter for processing. Otherwise, add a
                                 // new entry and enqueue for processing.
                                 let needs_enqueue = match iters.entry(taken_pc) {
-                                    Entry::Occupied(o) => {
+                                    Entry::Occupied(mut o) => {
                                         let changed = o.get_mut().input.meet_with(&to_state);
                                         // Re-enqueue only if input state changed.
                                         changed
@@ -308,7 +307,10 @@ impl<'a> EvalCtx<'a> {
                             }
                         });
 
-                        // Save the output state.
+                        // Save the output state. (Look up in hashmap
+                        // again to avoid holding the borrow over the
+                        // above.)
+                        let iter_state = iters.get_mut(&iter_pc).unwrap();
                         iter_state.output = Some(sub_result);
                     }
 

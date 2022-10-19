@@ -1,6 +1,6 @@
 //! Discovery of intrinsics.
 
-use walrus::{ExportItem, FunctionId, FunctionKind, Module, Type, ValType};
+use walrus::{ExportItem, FunctionId, FunctionKind, Module, ValType};
 
 pub struct Intrinsics {
     pub assume_const_memory: Option<FunctionId>,

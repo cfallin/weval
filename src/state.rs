@@ -29,7 +29,7 @@ fn map_meet_with<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
     for (k, val) in this.iter_mut() {
         if let Some(other_val) = other.get(k) {
             let met = Value::meet(*val, *other_val);
-            changed |= (met != *val);
+            changed |= met != *val;
             *val = met;
         } else {
             *val = Value::Top;

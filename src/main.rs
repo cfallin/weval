@@ -8,6 +8,7 @@ mod image;
 mod intrinsics;
 mod state;
 mod value;
+mod stackify;
 
 #[derive(Clone, Debug, StructOpt)]
 struct Options {
