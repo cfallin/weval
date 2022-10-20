@@ -187,11 +187,6 @@ impl<B: Block> Stackifier<B> {
                 }
             }
         }
-        let mut block_count = HashMap::new();
-        for target in forward_targets {
-            let header = innermost_loop[target.index()];
-            *block_count.entry(header).or_insert(0) += 1;
-        }
 
         Ok(Stackifier {
             rpo,
@@ -201,6 +196,7 @@ impl<B: Block> Stackifier<B> {
             innermost_loop,
             loop_parent,
             forward_targets,
+            labels: HashMap::new(),
         })
     }
 
@@ -208,7 +204,11 @@ impl<B: Block> Stackifier<B> {
         // Compute auxiliary data structures.
         let mut this = Self::new(cfg)?;
 
-        Ok(this.stackify_range(RPOIndex(0), RPOIndex((this.rpo.order.len() - 1) as u32))[0])
+        Ok(this
+            .stackify_range(RPOIndex(0), RPOIndex((this.rpo.order.len() - 1) as u32))
+            .into_iter()
+            .next()
+            .unwrap())
     }
 
     fn get_label(&mut self) -> Label {
@@ -223,12 +223,17 @@ impl<B: Block> Stackifier<B> {
             assert!(loop_end <= last);
 
             // Create labels for the loop and all forward targets.
-            self.labels.insert(self.get_label(), first);
-            let forward_targets = self.forward_targets.remove(&first).unwrap_or_default();
-            let mut forward_targets: Vec<RPOIndex> = forward_targets.into_iter.collect();
+            let label = self.get_label();
+            self.labels.insert(first, label);
+            let forward_targets = self
+                .forward_targets
+                .remove(&Some(first))
+                .unwrap_or_default();
+            let mut forward_targets: Vec<RPOIndex> = forward_targets.into_iter().collect();
             forward_targets.sort();
             for &target in &forward_targets {
-                self.labels.insert(self.get_label(), target);
+                let label = self.get_label();
+                self.labels.insert(target, label);
             }
 
             // Stackify the body, recursively.
@@ -236,7 +241,7 @@ impl<B: Block> Stackifier<B> {
         }
         // Otherwise, if this is the top level, do we have top-level
         // forward-edge targets?
-        else if rpo_index.index() == 0 {
+        else if first.index() == 0 {
             todo!()
         }
         // Otherwise, just a sequence of individual nodes.
