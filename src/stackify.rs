@@ -54,20 +54,20 @@ impl CFG {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RPOIndex(u32);
+struct RPOIndex(u32);
 impl RPOIndex {
-    pub fn index(self) -> usize {
+    fn index(self) -> usize {
         self.0 as usize
     }
 }
 
-pub struct RPO {
+struct RPO {
     order: Vec<InstrSeqId>,
     rev: HashMap<InstrSeqId, RPOIndex>,
 }
 
 impl RPO {
-    pub fn new(cfg: &CFG) -> RPO {
+    fn compute(cfg: &CFG) -> RPO {
         let mut postorder = vec![];
         let mut visited = HashSet::new();
         visited.insert(cfg.entry);
@@ -118,5 +118,18 @@ impl RPO {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Label(u32);
+/// Start and end marks for loops.
+#[derive(Debug)]
+struct Marks {}
+
+pub fn stackify(
+    builder: &mut FunctionBuilder,
+    seqs: impl IntoIterator<Item = InstrSeqId>,
+    entry: InstrSeqId,
+) -> InstrSeqId {
+    let seqs: HashSet<InstrSeqId> = seqs.into_iter().collect();
+    let cfg = CFG::compute(builder, entry, &seqs);
+    let rpo = RPO::compute(&cfg);
+
+    todo!()
+}
