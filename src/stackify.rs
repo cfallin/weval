@@ -21,7 +21,7 @@ impl CFG {
         let mut visited = HashSet::new();
         while let Some(seq) = workqueue.pop() {
             visited.insert(seq);
-            let mut this_succs = succs.entry(seq).or_insert_with(|| HashSet::new());
+            let this_succs = succs.entry(seq).or_insert_with(|| HashSet::new());
             let mut visit_succ = |succ| {
                 if seqs.contains(&succ) {
                     this_succs.insert(succ);
