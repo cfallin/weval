@@ -44,7 +44,7 @@
 //! successors of block 2.
 
 use std::collections::{HashMap, HashSet};
-use walrus::ir::{Instr, InstrSeqId};
+use walrus::ir::{self, Instr, InstrSeqId, InstrSeqType};
 use walrus::{FunctionBuilder, InstrSeqBuilder};
 
 struct CFG<'a> {
@@ -324,10 +324,126 @@ pub fn stackify(
     let rpo = RPO::compute(&cfg);
     let marks = Marks::compute(&cfg, &rpo)?;
 
-    // TODO: iterate through blocks, building up seqs.
+    let mut target_rewrites: HashMap<InstrSeqId, InstrSeqId> = HashMap::new();
+    let empty_ty = InstrSeqType::Simple(None);
+    let top = builder.dangling_instr_seq(empty_ty).id();
+    let mut cur = top;
+    let mut stack: Vec<(RPOIndex, InstrSeqId)> = vec![];
 
-    // TODO: rewrite targets: forward edges need to branch to seqid of
-    // block that ends just before actual target.
+    // Create a top-level block.
+    let toplevel_block = builder.dangling_instr_seq(empty_ty).id();
+    builder.instr_seq(top).instr(Instr::Block(ir::Block {
+        seq: toplevel_block,
+    }));
+    cur = toplevel_block;
 
-    todo!()
+    for (rpo_seq, seq) in rpo.iter_with_index() {
+        // Pop back up to seq if any regions ended.
+        while let Some(entry) = stack.last() {
+            if entry.0 >= rpo_seq {
+                break;
+            }
+            cur = entry.1;
+            stack.pop();
+        }
+
+        if let Some(block_marks) = marks.0.get(&rpo_seq) {
+            for mark in block_marks {
+                match mark {
+                    &Mark::Loop { last_inclusive } => {
+                        // Create loop. Add rewrite target from `seq`
+                        // to newly created seq. Add stack entry.
+                        let subseq = builder.dangling_instr_seq(empty_ty).id();
+                        target_rewrites.insert(seq, subseq);
+                        builder
+                            .instr_seq(cur)
+                            .instr(Instr::Loop(ir::Loop { seq: subseq }));
+                        stack.push((last_inclusive, cur));
+                        cur = subseq;
+                    }
+                    &Mark::Block { last_inclusive } => {
+                        // Create block. Add rewrite target from block
+                        // following `last_inclusive` to newly created
+                        // seq. Add stack entry.
+                        let subseq = builder.dangling_instr_seq(empty_ty).id();
+                        let following = rpo.order[last_inclusive.index() + 1];
+                        target_rewrites.insert(following, subseq);
+                        builder
+                            .instr_seq(cur)
+                            .instr(Instr::Block(ir::Block { seq: subseq }));
+                        stack.push((last_inclusive, cur));
+                        cur = subseq;
+                    }
+                }
+            }
+        }
+
+        copy_instrs(builder, &mut target_rewrites, seq, cur);
+    }
+
+    Ok(top)
+}
+
+fn copy_instrs(
+    builder: &mut FunctionBuilder,
+    target_rewrites: &mut HashMap<InstrSeqId, InstrSeqId>,
+    from: InstrSeqId,
+    into: InstrSeqId,
+) {
+    let rewrite = |rewrites: &HashMap<InstrSeqId, InstrSeqId>, block: InstrSeqId| {
+        rewrites.get(&block).copied().unwrap_or(block)
+    };
+    for i in 0..builder.instr_seq(from).instrs().len() {
+        // Copy instruction, rewriting targets.
+        let instr = builder.instr_seq(from).instrs()[i].clone().0;
+        let instr = match instr {
+            Instr::Br(br) => Instr::Br(ir::Br {
+                block: rewrite(target_rewrites, br.block),
+            }),
+            Instr::BrIf(brif) => Instr::BrIf(ir::BrIf {
+                block: rewrite(target_rewrites, brif.block),
+            }),
+            Instr::BrTable(brtable) => {
+                let blocks = brtable
+                    .blocks
+                    .iter()
+                    .map(|&block| rewrite(target_rewrites, block))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                let default = rewrite(target_rewrites, brtable.default);
+                Instr::BrTable(ir::BrTable { blocks, default })
+            }
+            Instr::Loop(lp) => {
+                let subseq = builder.dangling_instr_seq(InstrSeqType::Simple(None)).id();
+                target_rewrites.insert(lp.seq, subseq);
+                copy_instrs(builder, target_rewrites, lp.seq, subseq);
+                Instr::Loop(ir::Loop { seq: subseq })
+            }
+            Instr::Block(block) => {
+                let subseq = builder.dangling_instr_seq(InstrSeqType::Simple(None)).id();
+                target_rewrites.insert(block.seq, subseq);
+                copy_instrs(builder, target_rewrites, block.seq, subseq);
+                Instr::Block(ir::Block { seq: subseq })
+            }
+            Instr::IfElse(ifelse) => {
+                let sub_consequent = builder.dangling_instr_seq(InstrSeqType::Simple(None)).id();
+                target_rewrites.insert(ifelse.consequent, sub_consequent);
+                let sub_alternative = builder.dangling_instr_seq(InstrSeqType::Simple(None)).id();
+                target_rewrites.insert(ifelse.alternative, sub_alternative);
+                copy_instrs(builder, target_rewrites, ifelse.consequent, sub_consequent);
+                copy_instrs(
+                    builder,
+                    target_rewrites,
+                    ifelse.alternative,
+                    sub_alternative,
+                );
+                Instr::IfElse(ir::IfElse {
+                    consequent: sub_consequent,
+                    alternative: sub_alternative,
+                })
+            }
+            i => i,
+        };
+        builder.instr_seq(into).instr(instr);
+    }
 }
