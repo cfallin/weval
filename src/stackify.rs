@@ -1,5 +1,47 @@
 //! Stackify implementation to produce structured control flow from an
 //! arbitrary CFG.
+//!
+//! Note on algorithm:
+//!
+//! - We sort in RPO, then mark loops, then place blocks within loops
+//!   or at top level to give forward edges appropriate targets.
+//!
+//!  - The RPO sort order we choose is quite special: we need loop
+//!    bodies to be placed contiguously, without blocks that do not
+//!    belong to the loop in the middle. Otherwise we may not be able
+//!    to properly nest a block to allow a forward edge.
+//!
+//! Consider the following CFG:
+//!
+//! ```plain
+//!           1
+//!           |
+//!           2 <-.
+//!         / |   |
+//!        |  3 --'
+//!        |  |
+//!        `> 4
+//!           |
+//!           5
+//! ```
+//!
+//! A normal RPO sort may produce 1, 2, 4, 5, 3 or 1, 2, 3, 4, 5
+//! depending on which child order it chooses from block 2. (If it
+//! visits 3 first, it will emit it first in postorder hence it comes
+//! last.)
+//!
+//! One way of ensuring we get the right order would be to compute the
+//! loop nest and make note of loops when choosing children to visit,
+//! but we really would rather not do that, since we don't otherwise
+//! have the infrastructure to compute that or the need for it.
+//!
+//! Instead, we keep a "pending" list: as we have nodes on the stack
+//! during postorder traversal, we keep a list of other children that
+//! we will visit once we get back to a given level. If another node
+//! is pending, and is a successor we are considering, we visit it
+//! *first* in postorder, so it is last in RPO. This is a way to
+//! ensure that (e.g.) block 4 above is visited first when considering
+//! successors of block 2.
 
 use std::collections::{HashMap, HashSet};
 use walrus::ir::{Instr, InstrSeqId};
@@ -83,8 +125,17 @@ impl RPO {
     fn compute(cfg: &CFG<'_>) -> RPO {
         let mut postorder = vec![];
         let mut visited = HashSet::new();
+        let mut pending = vec![];
+        let mut pending_idx = HashMap::new();
         visited.insert(cfg.entry);
-        Self::visit(cfg, cfg.entry, &mut visited, &mut postorder);
+        Self::visit(
+            cfg,
+            cfg.entry,
+            &mut visited,
+            &mut pending,
+            &mut pending_idx,
+            &mut postorder,
+        );
         postorder.reverse();
 
         let mut rev = HashMap::new();
@@ -102,11 +153,47 @@ impl RPO {
         cfg: &CFG<'_>,
         block: InstrSeqId,
         visited: &mut HashSet<InstrSeqId>,
+        pending: &mut Vec<InstrSeqId>,
+        pending_idx: &mut HashMap<InstrSeqId, usize>,
         postorder: &mut Vec<InstrSeqId>,
     ) {
-        for succ in cfg.succs(block) {
+        // `pending` is a Vec, not a Set; we prioritize based on
+        // position (first in pending go first in postorder -> last in
+        // RPO). A case with nested loops to show why this matters:
+        //
+        // TODO example
+
+        let pending_top = pending.len();
+        pending.extend(cfg.succs(block));
+
+        // Sort new entries in `pending` by index at which they appear
+        // earlier. Those that don't appear in `pending` at all should
+        // be visited last (to appear in RPO first), so we want `None`
+        // values to sort first here (hence the "unwrap or MAX"
+        // idiom).  Then those that appear earlier in `pending` should
+        // be visited earlier here to appear later in RPO, so they
+        // sort later.
+        pending[pending_top..]
+            .sort_by_key(|entry| pending_idx.get(entry).copied().unwrap_or(usize::MAX));
+
+        // Above we placed items in order they are to be visited;
+        // below we pop off the end, so we reverse here.
+        pending[pending_top..].reverse();
+
+        // Now update indices in `pending_idx`: insert entries for
+        // those seqs not yet present.
+        for i in pending_top..pending.len() {
+            pending_idx.entry(pending[i]).or_insert(i);
+        }
+
+        for _ in 0..(pending.len() - pending_top) {
+            let succ = pending.pop().unwrap();
+            if pending_idx.get(&succ) == Some(&pending.len()) {
+                pending_idx.remove(&succ);
+            }
+
             if visited.insert(succ) {
-                Self::visit(cfg, succ, visited, postorder);
+                Self::visit(cfg, succ, visited, pending, pending_idx, postorder);
             }
         }
         postorder.push(block);
@@ -133,10 +220,13 @@ impl RPO {
 #[derive(Debug)]
 struct Marks(HashMap<RPOIndex, Vec<Mark>>);
 
-#[derive(Debug)]
+// Sorting-order note: Loop comes second, so Blocks sort first with
+// smaller regions first. Thus, *reverse* sort order places loops
+// outermost then larger blocks before smaller blocks.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Mark {
-    Loop { last_inclusive: RPOIndex },
     Block { last_inclusive: RPOIndex },
+    Loop { last_inclusive: RPOIndex },
 }
 
 impl Marks {
@@ -208,11 +298,17 @@ impl Marks {
                     let mark = Mark::Block {
                         last_inclusive: rpo_succ.prev(),
                     };
+                    start_marks.push(mark);
                 }
             }
         }
 
         // Sort markers at each block.
+        for marklist in marks.values_mut() {
+            marklist.sort();
+            marklist.dedup();
+            marklist.reverse();
+        }
 
         Ok(Marks(marks))
     }
