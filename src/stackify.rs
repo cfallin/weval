@@ -381,6 +381,8 @@ pub fn stackify(
         copy_instrs(builder, &mut target_rewrites, seq, cur);
     }
 
+    todo!("fallthrough from each block should break out of toplevel block")
+
     Ok(top)
 }
 
