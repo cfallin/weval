@@ -108,4 +108,15 @@ impl Value {
             (a, b) => Value::Runtime(a.tags().meet(b.tags())),
         }
     }
+
+    pub fn is_const_u32(&self) -> Option<u32> {
+        match self {
+            &Value::Concrete(WasmVal::I32(k), _) => Some(k),
+            _ => None,
+        }
+    }
+
+    pub fn is_const_truthy(&self) -> Option<bool> {
+        self.is_const_u32().map(|k| k != 0)
+    }
 }

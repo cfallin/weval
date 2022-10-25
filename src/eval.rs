@@ -22,8 +22,8 @@ use crate::value::{Value, ValueTags, WasmVal};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use walrus::{
-    ir::BinaryOp, ir::Instr, ir::InstrSeqId, ir::UnaryOp, FunctionBuilder, FunctionKind,
-    LocalFunction, Module, ModuleFunctions, ModuleTypes,
+    ir::BinaryOp, ir::Instr, ir::InstrSeqId, ir::InstrSeqType, ir::UnaryOp, FunctionBuilder,
+    FunctionKind, LocalFunction, Module, ModuleFunctions, ModuleTypes,
 };
 
 /// Partially evaluates according to the given directives.
@@ -184,6 +184,9 @@ impl<'a> EvalCtx<'a> {
         };
 
         for (instr, _) in &self.generic_fn.block(from_seq.0).instrs {
+            if result.fallthrough.is_none() {
+                break;
+            }
             match instr {
                 Instr::Block(b) => {
                     // Create a new output seq and recursively eval.
@@ -312,8 +315,11 @@ impl<'a> EvalCtx<'a> {
                                         [taken.instr]
                                         .0,
                                     |target| {
-                                        debug_assert_eq!(target, l.seq);
-                                        dest_seq
+                                        if target == l.seq {
+                                            dest_seq
+                                        } else {
+                                            target
+                                        }
                                     },
                                 );
 
@@ -496,19 +502,233 @@ impl<'a> EvalCtx<'a> {
                 Instr::Unreachable(u) => {
                     self.builder.instr_seq(into_seq.0).unreachable();
                 }
-                Instr::Br(b) => {}
-                Instr::BrIf(bi) => {}
-                Instr::IfElse(ie) => {}
-                Instr::BrTable(bt) => {}
+                Instr::Br(b) => {
+                    // Don't handle block args for now.
+                    let ty = self.generic_fn.block(b.block).ty;
+                    assert_eq!(ty, InstrSeqType::Simple(None));
+
+                    let instr = self.builder.instr_seq(into_seq.0).instrs().len();
+                    self.builder
+                        .instr_seq(into_seq.0)
+                        .instr(Instr::Br(walrus::ir::Br {
+                            block: self.seq_map.get(&OrigSeqId(b.block)).cloned().unwrap().0,
+                        }));
+
+                    let state = result.cur().clone();
+                    result.taken.push(TakenEdge {
+                        target: OrigSeqId(b.block),
+                        state,
+                        seq: into_seq,
+                        instr,
+                    });
+
+                    result.fallthrough = None;
+                }
+                Instr::BrIf(brif) => {
+                    // Don't handle block args for now.
+                    let ty = self.generic_fn.block(brif.block).ty;
+                    assert_eq!(ty, InstrSeqType::Simple(None));
+
+                    // Pop the value off the stack. If known, we can
+                    // either ignore this branch (if zero) or treat it
+                    // like an unconditional one (if one). Otherwise,
+                    // if runtime value, emit a br_if.
+                    let cond = result.cur().stack.pop().unwrap();
+                    let (instr, did_branch) = match cond.is_const_truthy() {
+                        Some(true) => {
+                            // Unconditional branch. Drop cond value
+                            // that would have been used by br_if,
+                            // then emit a br.
+                            self.builder.instr_seq(into_seq.0).drop();
+                            let instr = self.builder.instr_seq(into_seq.0).instrs().len();
+                            self.builder
+                                .instr_seq(into_seq.0)
+                                .instr(Instr::Br(walrus::ir::Br {
+                                    block: self
+                                        .seq_map
+                                        .get(&OrigSeqId(brif.block))
+                                        .cloned()
+                                        .unwrap()
+                                        .0,
+                                }));
+
+                            result.fallthrough = None;
+
+                            (instr, true)
+                        }
+                        Some(false) => {
+                            // Never-taken branch: just emit a `drop`
+                            // to drop the constant-zero value on the
+                            // stack.
+                            self.builder.instr_seq(into_seq.0).drop();
+
+                            (0, false)
+                        }
+                        None => {
+                            // Known at runtime only: emit a br_if.
+                            let instr = self.builder.instr_seq(into_seq.0).instrs().len();
+                            self.builder.instr_seq(into_seq.0).instr(Instr::BrIf(
+                                walrus::ir::BrIf {
+                                    block: self
+                                        .seq_map
+                                        .get(&OrigSeqId(brif.block))
+                                        .cloned()
+                                        .unwrap()
+                                        .0,
+                                },
+                            ));
+
+                            (instr, true)
+                        }
+                    };
+
+                    if did_branch {
+                        let state = result.cur().clone();
+                        result.taken.push(TakenEdge {
+                            target: OrigSeqId(brif.block),
+                            state,
+                            seq: into_seq,
+                            instr,
+                        });
+                    }
+                }
+                Instr::BrTable(bt) => {
+                    let selector = result.cur().stack.pop().unwrap();
+
+                    if let Some(k) = selector.is_const_u32() {
+                        // Known constant selector: drop, then emit an uncond br.
+                        self.builder.instr_seq(into_seq.0).drop();
+                        let instr = self.builder.instr_seq(into_seq.0).instrs().len();
+                        let target = if (k as usize) < bt.blocks.len() {
+                            bt.blocks[k as usize]
+                        } else {
+                            bt.default
+                        };
+                        let block = self.seq_map.get(&OrigSeqId(target)).cloned().unwrap().0;
+                        self.builder
+                            .instr_seq(into_seq.0)
+                            .instr(Instr::Br(walrus::ir::Br { block }));
+                        let state = result.cur().clone();
+                        result.taken.push(TakenEdge {
+                            target: OrigSeqId(target),
+                            state,
+                            seq: into_seq,
+                            instr,
+                        });
+                        result.fallthrough = None;
+                    } else {
+                        let instr = self.builder.instr_seq(into_seq.0).instrs().len();
+                        let blocks = bt
+                            .blocks
+                            .iter()
+                            .map(|&block| self.seq_map.get(&OrigSeqId(block)).cloned().unwrap().0)
+                            .collect::<Vec<InstrSeqId>>()
+                            .into_boxed_slice();
+                        let default = self.seq_map.get(&OrigSeqId(bt.default)).cloned().unwrap().0;
+                        self.builder
+                            .instr_seq(into_seq.0)
+                            .instr(Instr::BrTable(walrus::ir::BrTable { blocks, default }));
+
+                        for &block in bt.blocks.iter() {
+                            let state = result.cur().clone();
+                            result.taken.push(TakenEdge {
+                                target: OrigSeqId(block),
+                                state,
+                                seq: into_seq,
+                                instr,
+                            });
+                        }
+                        let state = result.cur().clone();
+                        result.taken.push(TakenEdge {
+                            target: OrigSeqId(bt.default),
+                            state,
+                            seq: into_seq,
+                            instr,
+                        });
+                    }
+                }
+                Instr::IfElse(ie) => {
+                    let ty = self.generic_fn.block(ie.consequent).ty;
+                    debug_assert_eq!(ty, self.generic_fn.block(ie.alternative).ty);
+                    // Don't handle block args for now.
+                    assert_eq!(ty, InstrSeqType::Simple(None));
+
+                    let cond = result.cur().stack.pop().unwrap();
+
+                    let (consequent_from_seq, alternative_from_seq) = match cond.is_const_truthy() {
+                        Some(true) => (Some(OrigSeqId(ie.consequent)), None),
+                        Some(false) => (None, Some(OrigSeqId(ie.alternative))),
+                        None => (
+                            Some(OrigSeqId(ie.consequent)),
+                            Some(OrigSeqId(ie.alternative)),
+                        ),
+                    };
+
+                    let mut f =
+                        |sub_from_seq: Option<OrigSeqId>| -> anyhow::Result<Option<OutSeqId>> {
+                            sub_from_seq
+                                .map(|sub_from_seq| {
+                                    let sub_into_seq =
+                                        OutSeqId(self.builder.dangling_instr_seq(ty).id());
+                                    let sub_sub_state = result.cur().subblock_state(ty, &self.tys);
+                                    let sub_sub_result =
+                                        self.eval_seq(sub_sub_state, sub_from_seq, sub_into_seq)?;
+                                    result.merge_subblock(sub_sub_result, from_seq);
+                                    Ok(sub_into_seq)
+                                })
+                                .transpose()
+                        };
+
+                    let consequent_into_seq = f(consequent_from_seq)?;
+                    let alternative_into_seq = f(alternative_from_seq)?;
+
+                    match (consequent_into_seq, alternative_into_seq) {
+                        (Some(t), Some(f)) => {
+                            self.builder.instr_seq(into_seq.0).instr(Instr::IfElse(
+                                walrus::ir::IfElse {
+                                    consequent: t.0,
+                                    alternative: f.0,
+                                },
+                            ));
+                        }
+                        (Some(seq), None) | (None, Some(seq)) => {
+                            self.builder.instr_seq(into_seq.0).drop();
+                            self.builder
+                                .instr_seq(into_seq.0)
+                                .instr(Instr::Block(walrus::ir::Block { seq: seq.0 }));
+                        }
+                        (None, None) => unreachable!(),
+                    }
+                }
                 Instr::Drop(d) => {
                     self.builder.instr_seq(into_seq.0).drop();
                     result.cur().stack.pop();
                 }
-                Instr::Return(r) => {}
-                Instr::MemorySize(ms) => {}
-                Instr::MemoryGrow(mg) => {}
-                Instr::Load(l) => {}
-                Instr::Store(s) => {}
+                Instr::Return(r) => {
+                    result.cur().stack.pop();
+                    self.builder.instr_seq(into_seq.0).return_();
+                }
+                Instr::MemorySize(ms) => {
+                    self.builder.instr_seq(into_seq.0).memory_size(ms.memory);
+                    result
+                        .cur()
+                        .stack
+                        .push(Value::Runtime(ValueTags::default()));
+                }
+                Instr::MemoryGrow(mg) => {
+                    result.cur().stack.pop();
+                    self.builder.instr_seq(into_seq.0).memory_grow(mg.memory);
+                    result
+                        .cur()
+                        .stack
+                        .push(Value::Runtime(ValueTags::default()));
+                }
+                Instr::Load(l) => {
+                    todo!("handle const-eval-time loads, and loads from renamed stack")
+                }
+                Instr::Store(s) => {
+                    todo!("handle stores to renamed stack")
+                }
                 _ => {
                     anyhow::bail!("Unsupported instruction: {:?}", instr);
                 }
