@@ -16,6 +16,7 @@
 use crate::directive::Directive;
 use crate::image::Image;
 use crate::intrinsics::Intrinsics;
+use crate::stackify::{rewrite_br_targets, stackify};
 use crate::state::State;
 use crate::value::{Value, ValueTags, WasmVal};
 use std::collections::hash_map::Entry;
@@ -128,7 +129,15 @@ struct EvalResult {
     /// The output state for fallthrough. `None` if unreachable.
     fallthrough: Option<State>,
     /// Any taken-edge states.
-    taken: Vec<(OrigSeqId, State)>,
+    taken: Vec<TakenEdge>,
+}
+
+#[derive(Clone, Debug)]
+struct TakenEdge {
+    target: OrigSeqId,
+    state: State,
+    seq: OutSeqId,
+    instr: usize,
 }
 
 impl EvalResult {
@@ -142,12 +151,12 @@ impl EvalResult {
             state.meet_with(&fallthrough);
         }
         let mut this_seq_taken = false;
-        for (taken_target, taken_state) in sub_seq.taken {
-            if taken_target == this_seq {
+        for taken in sub_seq.taken {
+            if taken.target == this_seq {
                 this_seq_taken = true;
-                state.meet_with(&taken_state);
+                state.meet_with(&taken.state);
             } else {
-                self.taken.push((taken_target, taken_state));
+                self.taken.push(taken);
             }
         }
         this_seq_taken
@@ -266,12 +275,12 @@ impl<'a> EvalCtx<'a> {
                         // Examine taken edges out of the sub_result
                         // for any other iters we need to add to the
                         // workqueue.
-                        sub_result.taken.retain(|(to_seq, to_state)| {
-                            if to_seq.0 != l.seq {
+                        sub_result.taken.retain(|taken| {
+                            if taken.target.0 != l.seq {
                                 true
                             } else {
                                 // Pick the PC out of the taken-state.
-                                let taken_pc = to_state.loop_pcs.last().cloned().unwrap();
+                                let taken_pc = taken.state.loop_pcs.last().cloned().unwrap();
 
                                 iters.get_mut(&iter_pc).unwrap().next_pcs.insert(taken_pc);
 
@@ -280,22 +289,33 @@ impl<'a> EvalCtx<'a> {
                                 // input state changed, re-enqueue the
                                 // iter for processing. Otherwise, add a
                                 // new entry and enqueue for processing.
-                                let needs_enqueue = match iters.entry(taken_pc) {
+                                let (dest_seq, needs_enqueue) = match iters.entry(taken_pc) {
                                     Entry::Occupied(mut o) => {
-                                        let changed = o.get_mut().input.meet_with(&to_state);
+                                        let changed = o.get_mut().input.meet_with(&taken.state);
                                         // Re-enqueue only if input state changed.
-                                        changed
+                                        (o.get().code.unwrap().0, changed)
                                     }
                                     Entry::Vacant(v) => {
+                                        let code = self.builder.dangling_instr_seq(ty).id();
                                         v.insert(IterState {
-                                            input: to_state.clone(),
-                                            code: None,
+                                            input: taken.state.clone(),
+                                            code: Some(OutSeqId(code)),
                                             output: None,
                                             next_pcs: HashSet::new(),
                                         });
-                                        true
+                                        (code, true)
                                     }
                                 };
+
+                                rewrite_br_targets(
+                                    &mut self.builder.instr_seq(taken.seq.0).instrs_mut()
+                                        [taken.instr]
+                                        .0,
+                                    |target| {
+                                        debug_assert_eq!(target, l.seq);
+                                        dest_seq
+                                    },
+                                );
 
                                 if needs_enqueue {
                                     if workqueue_set.insert(taken_pc) {
@@ -320,7 +340,12 @@ impl<'a> EvalCtx<'a> {
                     // loop. Encapsulate the whole thing in a block
                     // and replace fallthroughs from individual iters
                     // with breaks out of the block.
-                    todo!();
+                    let entry = iters.get(&None).unwrap().code.unwrap().0;
+                    let body = stackify(
+                        self.builder,
+                        iters.values().map(|iter| iter.code.unwrap().0),
+                        entry,
+                    )?;
 
                     // Merge all out-states from iters: into our own
                     // current fallthrough when an iter falls through
@@ -328,6 +353,14 @@ impl<'a> EvalCtx<'a> {
                     // into takens for all others. Note that we should
                     // assert that we've handled branches to the loop
                     // label in the process above.
+                    for (_, state) in iters.into_iter() {
+                        result.merge_subblock(state.output.unwrap(), from_seq);
+                    }
+
+                    // Emit a block with the stackified body.
+                    self.builder
+                        .instr_seq(into_seq.0)
+                        .instr(Instr::Block(walrus::ir::Block { seq: body }));
                 }
                 Instr::Call(c) => {
                     // TODO: enqueue a directive for a specialized function?

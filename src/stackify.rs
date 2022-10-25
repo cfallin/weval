@@ -45,7 +45,7 @@
 
 use std::collections::{HashMap, HashSet};
 use walrus::ir::{self, Instr, InstrSeqId, InstrSeqType};
-use walrus::{FunctionBuilder, InstrSeqBuilder};
+use walrus::FunctionBuilder;
 
 struct CFG<'a> {
     entry: InstrSeqId,
@@ -330,13 +330,6 @@ pub fn stackify(
     let mut cur = top;
     let mut stack: Vec<(RPOIndex, InstrSeqId)> = vec![];
 
-    // Create a top-level block.
-    let toplevel_block = builder.dangling_instr_seq(empty_ty).id();
-    builder.instr_seq(top).instr(Instr::Block(ir::Block {
-        seq: toplevel_block,
-    }));
-    cur = toplevel_block;
-
     for (rpo_seq, seq) in rpo.iter_with_index() {
         // Pop back up to seq if any regions ended.
         while let Some(entry) = stack.last() {
@@ -379,11 +372,30 @@ pub fn stackify(
         }
 
         copy_instrs(builder, &mut target_rewrites, seq, cur);
+
+        // Fallthrough: break out of the topmost block.
+        builder.instr_seq(cur).instr(Instr::Br(ir::Br { block: top }));
     }
 
-    todo!("fallthrough from each block should break out of toplevel block")
-
     Ok(top)
+}
+
+pub fn rewrite_br_targets<F: Fn(InstrSeqId) -> InstrSeqId>(instr: &mut Instr, f: F) {
+    match instr {
+        &mut Instr::Br(ref mut br) => {
+            br.block = f(br.block);
+        }
+        &mut Instr::BrIf(ref mut brif) => {
+            brif.block = f(brif.block);
+        }
+        &mut Instr::BrTable(ref mut brtable) => {
+            for block in brtable.blocks.iter_mut() {
+                *block = f(*block);
+            }
+            brtable.default = f(brtable.default);
+        }
+        _ => {}
+    }
 }
 
 fn copy_instrs(
@@ -397,24 +409,9 @@ fn copy_instrs(
     };
     for i in 0..builder.instr_seq(from).instrs().len() {
         // Copy instruction, rewriting targets.
-        let instr = builder.instr_seq(from).instrs()[i].clone().0;
+        let mut instr = builder.instr_seq(from).instrs()[i].clone().0;
+        rewrite_br_targets(&mut instr, |target| rewrite(target_rewrites, target));
         let instr = match instr {
-            Instr::Br(br) => Instr::Br(ir::Br {
-                block: rewrite(target_rewrites, br.block),
-            }),
-            Instr::BrIf(brif) => Instr::BrIf(ir::BrIf {
-                block: rewrite(target_rewrites, brif.block),
-            }),
-            Instr::BrTable(brtable) => {
-                let blocks = brtable
-                    .blocks
-                    .iter()
-                    .map(|&block| rewrite(target_rewrites, block))
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice();
-                let default = rewrite(target_rewrites, brtable.default);
-                Instr::BrTable(ir::BrTable { blocks, default })
-            }
             Instr::Loop(lp) => {
                 let subseq = builder.dangling_instr_seq(InstrSeqType::Simple(None)).id();
                 target_rewrites.insert(lp.seq, subseq);
