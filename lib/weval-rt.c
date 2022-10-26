@@ -14,7 +14,9 @@ void set_hook() {
 __attribute__((export_name("weval.assume.const")))
 uint64_t weval_assume_const(uint64_t value) {
     if (__hook) {
-        return 0;
+        // Return a different constant than below so that whole-wasm opts don't
+        // merge this function body with others.
+        return 1;
     } else {
         return value;
     }
@@ -32,7 +34,7 @@ const void* weval_assume_const_memory(const void* value) {
 __attribute__((export_name("weval.loop.pc32")))
 uint32_t weval_loop_pc32(uint32_t pc) {
     if (__hook) {
-        return 0;
+        return 2;
     } else {
         return pc;
     }
@@ -41,7 +43,7 @@ uint32_t weval_loop_pc32(uint32_t pc) {
 __attribute__((export_name("weval.loop.pc64")))
 uint64_t weval_loop_pc64(uint64_t pc) {
     if (__hook) {
-        return 0;
+        return 3;
     } else {
         return pc;
     }
