@@ -22,8 +22,9 @@ use crate::value::{Value, ValueTags, WasmVal};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use walrus::{
-    ir::BinaryOp, ir::Instr, ir::InstrSeqId, ir::InstrSeqType, ir::UnaryOp, FunctionBuilder,
-    FunctionKind, LocalFunction, Module, ModuleFunctions, ModuleTypes,
+    ir::BinaryOp, ir::ExtendedLoad, ir::Instr, ir::InstrSeqId, ir::InstrSeqType, ir::LoadKind,
+    ir::UnaryOp, FunctionBuilder, FunctionKind, LocalFunction, Module, ModuleFunctions,
+    ModuleTypes,
 };
 
 /// Partially evaluates according to the given directives.
@@ -97,7 +98,9 @@ fn partially_evaluate_func(
     };
 
     let exit_state = ctx.eval_seq(state, from_seq, into_seq)?;
-    // TODO: implicit return if `exit_state.fallthrough` is `Some`.
+    if exit_state.fallthrough.is_some() {
+        builder.instr_seq(into_seq.0).return_();
+    }
     drop(exit_state);
 
     let specialized_fn = builder.finish(lf.args.clone(), &mut module.funcs);
@@ -724,10 +727,102 @@ impl<'a> EvalCtx<'a> {
                         .push(Value::Runtime(ValueTags::default()));
                 }
                 Instr::Load(l) => {
-                    todo!("handle const-eval-time loads, and loads from renamed stack")
+                    // Get the address from the stack.
+                    let addr = result.cur().stack.pop().unwrap();
+                    let offset = l.arg.offset;
+                    let size = (l.kind.width() / 8) as u32;
+
+                    // Is it a known constant, with the `const_memory`
+                    // `ValueTag`? If so, we can read bytes from the
+                    // heap image to satisfy this load.
+                    let value = match addr {
+                        Value::Concrete(WasmVal::I32(base), tags)
+                            if tags.contains(ValueTags::const_memory())
+                                && self.image.can_read(l.memory, base + offset, size) =>
+                        {
+                            match l.kind {
+                                LoadKind::I32 { .. } => Value::Concrete(
+                                    WasmVal::I32(self.image.read_u32(l.memory, base + offset)?),
+                                    tags,
+                                ),
+                                LoadKind::I64 { .. } => Value::Concrete(
+                                    WasmVal::I64(self.image.read_u64(l.memory, base + offset)?),
+                                    tags,
+                                ),
+                                LoadKind::I32_8 { kind } => {
+                                    let u8val = self.image.read_u8(l.memory, base + offset)?;
+                                    let ext = match kind {
+                                        ExtendedLoad::SignExtend => (u8val as i8) as i32 as u32,
+                                        ExtendedLoad::ZeroExtend
+                                        | ExtendedLoad::ZeroExtendAtomic => u8val as u32,
+                                    };
+                                    Value::Concrete(WasmVal::I32(ext), tags)
+                                }
+                                LoadKind::I32_16 { kind } => {
+                                    let u16val = self.image.read_u16(l.memory, base + offset)?;
+                                    let ext = match kind {
+                                        ExtendedLoad::SignExtend => (u16val as i16) as i32 as u32,
+                                        ExtendedLoad::ZeroExtend
+                                        | ExtendedLoad::ZeroExtendAtomic => u16val as u32,
+                                    };
+                                    Value::Concrete(WasmVal::I32(ext), tags)
+                                }
+                                LoadKind::I64_8 { kind } => {
+                                    let u8val = self.image.read_u8(l.memory, base + offset)?;
+                                    let ext = match kind {
+                                        ExtendedLoad::SignExtend => (u8val as i8) as i64 as u64,
+                                        ExtendedLoad::ZeroExtend
+                                        | ExtendedLoad::ZeroExtendAtomic => u8val as u64,
+                                    };
+                                    Value::Concrete(WasmVal::I64(ext), tags)
+                                }
+                                LoadKind::I64_16 { kind } => {
+                                    let u16val = self.image.read_u16(l.memory, base + offset)?;
+                                    let ext = match kind {
+                                        ExtendedLoad::SignExtend => (u16val as i16) as i64 as u64,
+                                        ExtendedLoad::ZeroExtend
+                                        | ExtendedLoad::ZeroExtendAtomic => u16val as u64,
+                                    };
+                                    Value::Concrete(WasmVal::I64(ext), tags)
+                                }
+                                LoadKind::I64_32 { kind } => {
+                                    let u32val = self.image.read_u32(l.memory, base + offset)?;
+                                    let ext = match kind {
+                                        ExtendedLoad::SignExtend => (u32val as i32) as i64 as u64,
+                                        ExtendedLoad::ZeroExtend
+                                        | ExtendedLoad::ZeroExtendAtomic => u32val as u64,
+                                    };
+                                    Value::Concrete(WasmVal::I64(ext), tags)
+                                }
+                                LoadKind::F32 => Value::Concrete(
+                                    WasmVal::F32(self.image.read_u32(l.memory, base + offset)?),
+                                    tags,
+                                ),
+                                LoadKind::F64 => Value::Concrete(
+                                    WasmVal::F64(self.image.read_u64(l.memory, base + offset)?),
+                                    tags,
+                                ),
+                                LoadKind::V128 => Value::Concrete(
+                                    WasmVal::V128(self.image.read_u128(l.memory, base + offset)?),
+                                    tags,
+                                ),
+                            }
+                        }
+                        // TODO: handle loads from renamed operand stack.
+                        _ => Value::Runtime(ValueTags::default()),
+                    };
+                    result.cur().stack.push(value);
+                    self.builder
+                        .instr_seq(into_seq.0)
+                        .instr(Instr::Load(l.clone()));
                 }
                 Instr::Store(s) => {
-                    todo!("handle stores to renamed stack")
+                    // TODO: handle stores to renamed operand stack.
+                    result.cur().stack.pop();
+                    result.cur().stack.pop();
+                    self.builder
+                        .instr_seq(into_seq.0)
+                        .instr(Instr::Store(s.clone()));
                 }
                 _ => {
                     anyhow::bail!("Unsupported instruction: {:?}", instr);

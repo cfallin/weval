@@ -3,7 +3,7 @@
 use crate::image::Image;
 use crate::intrinsics::find_global_data_by_exported_func;
 use crate::value::{Value, ValueTags, WasmVal};
-use walrus::{FunctionId, Module};
+use walrus::{FunctionId, MemoryId, Module};
 
 #[derive(Clone, Debug)]
 pub struct Directive {
@@ -33,14 +33,19 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
         }
     };
 
-    let mut head = im.read_heap_u32(pending_head_addr)?;
-    let mut freelist = im.read_heap_u32(freelist_head_addr)?;
+    let heap = match im.main_heap {
+        Some(heap) => heap,
+        None => return Ok(vec![]),
+    };
+
+    let mut head = im.read_u32(heap, pending_head_addr)?;
+    let mut freelist = im.read_u32(heap, freelist_head_addr)?;
     let mut directives = vec![];
     while head != 0 {
-        directives.push(decode_weval_req(module, im, head)?);
-        let next = im.read_heap_u32(head)?;
-        im.write_heap_u32(head, freelist)?;
-        im.write_heap_u32(freelist_head_addr, head)?;
+        directives.push(decode_weval_req(module, im, heap, head)?);
+        let next = im.read_u32(heap, head)?;
+        im.write_u32(heap, head, freelist)?;
+        im.write_u32(heap, freelist_head_addr, head)?;
         freelist = head;
         head = next;
     }
@@ -48,23 +53,28 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
     Ok(directives)
 }
 
-fn decode_weval_req(module: &Module, im: &Image, head: u32) -> anyhow::Result<Directive> {
-    let func_index = im.read_heap_u32(head + 4)?;
-    let mut arg_ptr = im.read_heap_u32(head + 8)?;
-    let nargs = im.read_heap_u32(head + 12)?;
-    let func_index_out_addr = im.read_heap_u32(head + 16)?;
+fn decode_weval_req(
+    module: &Module,
+    im: &Image,
+    heap: MemoryId,
+    head: u32,
+) -> anyhow::Result<Directive> {
+    let func_index = im.read_u32(heap, head + 4)?;
+    let mut arg_ptr = im.read_u32(heap, head + 8)?;
+    let nargs = im.read_u32(heap, head + 12)?;
+    let func_index_out_addr = im.read_u32(heap, head + 16)?;
 
     let mut const_params = vec![];
     for i in 0..nargs {
-        let is_specialized = im.read_heap_u32(arg_ptr)?;
-        let ty = im.read_heap_u32(arg_ptr + 4)?;
+        let is_specialized = im.read_u32(heap, arg_ptr)?;
+        let ty = im.read_u32(heap, arg_ptr + 4)?;
         let tags = ValueTags::default();
         let value = if is_specialized != 0 {
             match ty {
-                0 => Value::Concrete(WasmVal::I32(im.read_heap_u32(arg_ptr + 8)?), tags),
-                1 => Value::Concrete(WasmVal::I64(im.read_heap_u64(arg_ptr + 8)?), tags),
-                2 => Value::Concrete(WasmVal::F32(im.read_heap_u32(arg_ptr + 8)?), tags),
-                3 => Value::Concrete(WasmVal::F64(im.read_heap_u64(arg_ptr + 8)?), tags),
+                0 => Value::Concrete(WasmVal::I32(im.read_u32(heap, arg_ptr + 8)?), tags),
+                1 => Value::Concrete(WasmVal::I64(im.read_u64(heap, arg_ptr + 8)?), tags),
+                2 => Value::Concrete(WasmVal::F32(im.read_u32(heap, arg_ptr + 8)?), tags),
+                3 => Value::Concrete(WasmVal::F64(im.read_u64(heap, arg_ptr + 8)?), tags),
                 _ => anyhow::bail!("Invalid type"),
             }
         } else {

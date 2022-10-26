@@ -87,10 +87,24 @@ pub fn update(module: &mut Module, im: &Image) {
 }
 
 impl Image {
-    pub fn read_heap_u8(&self, addr: u32) -> anyhow::Result<u8> {
-        let id = self
-            .main_heap
-            .ok_or_else(|| anyhow::anyhow!("No main heap"))?;
+    pub fn can_read(&self, memory: MemoryId, addr: u32, size: u32) -> bool {
+        let end = match addr.checked_add(size) {
+            Some(end) => end,
+            None => return false,
+        };
+        let image = match self.memories.get(&memory) {
+            Some(image) => image,
+            None => return false,
+        };
+        (end as usize) <= image.len
+    }
+
+    pub fn main_heap(&self) -> anyhow::Result<MemoryId> {
+        self.main_heap
+            .ok_or_else(|| anyhow::anyhow!("no main heap"))
+    }
+
+    pub fn read_u8(&self, id: MemoryId, addr: u32) -> anyhow::Result<u8> {
         let image = self.memories.get(&id).unwrap();
         image
             .image
@@ -99,10 +113,17 @@ impl Image {
             .ok_or_else(|| anyhow::anyhow!("Out of bounds"))
     }
 
-    pub fn read_heap_u32(&self, addr: u32) -> anyhow::Result<u32> {
-        let id = self
-            .main_heap
-            .ok_or_else(|| anyhow::anyhow!("No main heap"))?;
+    pub fn read_u16(&self, id: MemoryId, addr: u32) -> anyhow::Result<u16> {
+        let image = self.memories.get(&id).unwrap();
+        let addr = addr as usize;
+        if (addr + 2) > image.len {
+            anyhow::bail!("Out of bounds");
+        }
+        let slice = &image.image[addr..(addr + 2)];
+        Ok(u16::from_le_bytes([slice[0], slice[1]]))
+    }
+
+    pub fn read_u32(&self, id: MemoryId, addr: u32) -> anyhow::Result<u32> {
         let image = self.memories.get(&id).unwrap();
         let addr = addr as usize;
         if (addr + 4) > image.len {
@@ -112,16 +133,19 @@ impl Image {
         Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
     }
 
-    pub fn read_heap_u64(&self, addr: u32) -> anyhow::Result<u64> {
-        let low = self.read_heap_u32(addr)?;
-        let high = self.read_heap_u32(addr + 4)?;
+    pub fn read_u64(&self, id: MemoryId, addr: u32) -> anyhow::Result<u64> {
+        let low = self.read_u32(id, addr)?;
+        let high = self.read_u32(id, addr + 4)?;
         Ok((high as u64) << 32 | (low as u64))
     }
 
-    pub fn write_heap_u8(&mut self, addr: u32, value: u8) -> anyhow::Result<()> {
-        let id = self
-            .main_heap
-            .ok_or_else(|| anyhow::anyhow!("No main heap"))?;
+    pub fn read_u128(&self, id: MemoryId, addr: u32) -> anyhow::Result<u128> {
+        let low = self.read_u64(id, addr)?;
+        let high = self.read_u64(id, addr + 8)?;
+        Ok((high as u128) << 64 | (low as u128))
+    }
+
+    pub fn write_u8(&mut self, id: MemoryId, addr: u32, value: u8) -> anyhow::Result<()> {
         let image = self.memories.get_mut(&id).unwrap();
         *image
             .image
@@ -130,10 +154,7 @@ impl Image {
         Ok(())
     }
 
-    pub fn write_heap_u32(&mut self, addr: u32, value: u32) -> anyhow::Result<()> {
-        let id = self
-            .main_heap
-            .ok_or_else(|| anyhow::anyhow!("No main heap"))?;
+    pub fn write_u32(&mut self, id: MemoryId, addr: u32, value: u32) -> anyhow::Result<()> {
         let image = self.memories.get_mut(&id).unwrap();
         let addr = addr as usize;
         if (addr + 4) > image.len {
