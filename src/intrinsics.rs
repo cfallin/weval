@@ -2,6 +2,7 @@
 
 use walrus::{ExportItem, FunctionId, FunctionKind, Module, ValType};
 
+#[derive(Clone, Debug)]
 pub struct Intrinsics {
     pub assume_const_memory: Option<FunctionId>,
     pub loop_pc32: Option<FunctionId>,

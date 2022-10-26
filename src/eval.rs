@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 use walrus::{
     ir::BinaryOp, ir::ExtendedLoad, ir::Instr, ir::InstrSeqId, ir::InstrSeqType, ir::LoadKind,
     ir::UnaryOp, FunctionBuilder, FunctionKind, LocalFunction, Module, ModuleFunctions,
-    ModuleTypes,
+    ModuleLocals, ModuleTypes, ValType,
 };
 
 /// Partially evaluates according to the given directives.
@@ -34,6 +34,7 @@ pub fn partially_evaluate(
     directives: &[Directive],
 ) -> anyhow::Result<()> {
     let intrinsics = Intrinsics::find(module);
+    log::trace!("intrinsics: {:?}", intrinsics);
     let mut mem_updates = HashMap::new();
     for directive in directives {
         log::trace!("Processing directive {:?}", directive);
@@ -102,6 +103,7 @@ fn partially_evaluate_func(
         image,
         seq_map: HashMap::new(),
         tys: &module.types,
+        locals: &module.locals,
         funcs: &module.funcs,
     };
 
@@ -131,6 +133,7 @@ struct EvalCtx<'a> {
     /// Map from seq ID in original function to specialized function.
     seq_map: HashMap<OrigSeqId, OutSeqId>,
     tys: &'a ModuleTypes,
+    locals: &'a ModuleLocals,
     funcs: &'a ModuleFunctions,
 }
 
@@ -471,12 +474,21 @@ impl<'a> EvalCtx<'a> {
                 }
                 Instr::LocalGet(lg) => {
                     self.builder.instr_seq(into_seq.0).local_get(lg.local);
+                    let ty = self.locals.get(lg.local).ty();
+                    let default_val = match ty {
+                        ValType::I32 => Value::Concrete(WasmVal::I32(0), ValueTags::default()),
+                        ValType::I64 => Value::Concrete(WasmVal::I64(0), ValueTags::default()),
+                        ValType::F32 => Value::Concrete(WasmVal::F32(0), ValueTags::default()),
+                        ValType::F64 => Value::Concrete(WasmVal::F64(0), ValueTags::default()),
+                        ValType::V128 => Value::Concrete(WasmVal::V128(0), ValueTags::default()),
+                        _ => Value::Runtime(ValueTags::default()),
+                    };
                     let value = result
                         .cur()
                         .locals
                         .get(&lg.local)
                         .cloned()
-                        .unwrap_or(Value::Runtime(ValueTags::default()));
+                        .unwrap_or(default_val);
                     result.cur().stack.push(value);
                 }
                 Instr::LocalSet(ls) => {
@@ -636,6 +648,7 @@ impl<'a> EvalCtx<'a> {
                     let selector = result.cur().stack.pop().unwrap();
 
                     if let Some(k) = selector.is_const_u32() {
+                        log::trace!("br_table: concrete index {}", k);
                         // Known constant selector: drop, then emit an uncond br.
                         self.builder.instr_seq(into_seq.0).drop();
                         let instr = self.builder.instr_seq(into_seq.0).instrs().len();
