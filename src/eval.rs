@@ -258,6 +258,7 @@ impl<'a> EvalCtx<'a> {
                     // at the next instruction).
                     self.target_map.insert(OrigSeqId(b.seq), this_target);
                     let sub_into_seq = OutSeqId(self.builder.dangling_instr_seq(ty).id());
+                    log::trace!(" -> new seq {}", sub_into_seq.0.index());
                     self.seq_map.insert(this_target, sub_into_seq);
                     let sub_state = result.cur().subblock_state(ty, &self.tys);
                     let sub_result = self.eval_seq(sub_state, sub_target, sub_into_seq)?;
@@ -389,6 +390,11 @@ impl<'a> EvalCtx<'a> {
                                     }
                                     Entry::Vacant(v) => {
                                         let code = self.builder.dangling_instr_seq(ty).id();
+                                        log::trace!(
+                                            "new seq {} for target pc {:?}",
+                                            code.index(),
+                                            taken_pc
+                                        );
                                         v.insert(IterState {
                                             input: taken.state.clone(),
                                             code: Some(OutSeqId(code)),
