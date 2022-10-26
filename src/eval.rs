@@ -16,7 +16,7 @@
 use crate::directive::Directive;
 use crate::image::Image;
 use crate::intrinsics::Intrinsics;
-use crate::stackify::{rewrite_br_targets, stackify};
+use crate::stackify::stackify;
 use crate::state::State;
 use crate::value::{Value, ValueTags, WasmVal};
 use std::collections::hash_map::Entry;
@@ -102,12 +102,20 @@ fn partially_evaluate_func(
         intrinsics,
         image,
         seq_map: HashMap::new(),
+        target_map: HashMap::new(),
         tys: &module.types,
         locals: &module.locals,
         funcs: &module.funcs,
     };
 
-    let exit_state = ctx.eval_seq(state, from_seq, into_seq)?;
+    let exit_state = ctx.eval_seq(
+        state,
+        Target {
+            seq: from_seq,
+            instr: 0,
+        },
+        into_seq,
+    )?;
     if exit_state.fallthrough.is_some() {
         builder.instr_seq(into_seq.0).return_();
     }
@@ -130,8 +138,13 @@ struct EvalCtx<'a> {
     builder: &'a mut FunctionBuilder,
     intrinsics: &'a Intrinsics,
     image: &'a Image,
-    /// Map from seq ID in original function to specialized function.
-    seq_map: HashMap<OrigSeqId, OutSeqId>,
+    /// Map from seq ID and starting inst in original function to
+    /// specialized function.
+    seq_map: HashMap<Target, OutSeqId>,
+    /// Map from seq ID to target: e.g., branching to a block label
+    /// actually lands in its parent seq, at a given continuation
+    /// instruction ID>
+    target_map: HashMap<OrigSeqId, Target>,
     tys: &'a ModuleTypes,
     locals: &'a ModuleLocals,
     funcs: &'a ModuleFunctions,
@@ -148,15 +161,16 @@ struct EvalResult {
 
 #[derive(Clone, Debug)]
 struct TakenEdge {
-    target: OrigSeqId,
+    target: Target,
     state: State,
     seq: OutSeqId,
     instr: usize,
+    arg_idx: usize,
 }
 
 impl EvalResult {
     /// Returns `true` if merged-into seq was branched to.
-    fn merge_subblock(&mut self, sub_seq: EvalResult, this_seq: OrigSeqId) -> bool {
+    fn merge_subblock(&mut self, sub_seq: EvalResult, this_point: Option<Target>) -> bool {
         let state = self
             .fallthrough
             .as_mut()
@@ -166,7 +180,7 @@ impl EvalResult {
         }
         let mut this_seq_taken = false;
         for taken in sub_seq.taken {
-            if taken.target == this_seq {
+            if Some(taken.target) == this_point {
                 this_seq_taken = true;
                 state.meet_with(&taken.state);
             } else {
@@ -183,31 +197,42 @@ impl EvalResult {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Target {
+    seq: OrigSeqId,
+    instr: usize,
+}
+
 impl<'a> EvalCtx<'a> {
     fn eval_seq(
         &mut self,
         state: State,
-        from_seq: OrigSeqId,
+        target: Target,
         into_seq: OutSeqId,
     ) -> anyhow::Result<EvalResult> {
         log::trace!(
             "eval_seq: from {:?} into {:?} state {:?}",
-            from_seq,
+            target,
             into_seq,
             state
         );
-
-        self.seq_map.insert(from_seq, into_seq);
 
         let mut result = EvalResult {
             fallthrough: Some(state),
             taken: vec![],
         };
 
-        for (instr, _) in &self.generic_fn.block(from_seq.0).instrs {
+        for (instr_idx, (instr, _)) in self
+            .generic_fn
+            .block(target.seq.0)
+            .instrs
+            .iter()
+            .enumerate()
+            .skip(target.instr)
+        {
             log::trace!(
                 "eval_seq: from {:?} into {:?} result {:?} instr {:?}",
-                from_seq,
+                target,
                 into_seq,
                 result,
                 instr
@@ -220,11 +245,23 @@ impl<'a> EvalCtx<'a> {
                 Instr::Block(b) => {
                     // Create a new output seq and recursively eval.
                     let ty = self.generic_fn.block(b.seq).ty;
-                    let sub_from_seq = OrigSeqId(b.seq);
+                    let sub_target = Target {
+                        seq: OrigSeqId(b.seq),
+                        instr: 0,
+                    };
+                    let this_target = Target {
+                        seq: target.seq,
+                        instr: instr_idx + 1,
+                    };
+                    // For a block, a branch to the label is a branch
+                    // to the continuation point (*this* current seq,
+                    // at the next instruction).
+                    self.target_map.insert(OrigSeqId(b.seq), this_target);
                     let sub_into_seq = OutSeqId(self.builder.dangling_instr_seq(ty).id());
+                    self.seq_map.insert(this_target, sub_into_seq);
                     let sub_state = result.cur().subblock_state(ty, &self.tys);
-                    let sub_result = self.eval_seq(sub_state, sub_from_seq, sub_into_seq)?;
-                    let block_used = result.merge_subblock(sub_result, from_seq);
+                    let sub_result = self.eval_seq(sub_state, sub_target, sub_into_seq)?;
+                    let block_used = result.merge_subblock(sub_result, Some(this_target));
 
                     if block_used {
                         // This `block` was actually branched to, so
@@ -250,7 +287,13 @@ impl<'a> EvalCtx<'a> {
                 Instr::Loop(l) => {
                     // Create the initial sub-block state.
                     let ty = self.generic_fn.block(l.seq).ty;
-                    let sub_from_seq = OrigSeqId(l.seq);
+                    let sub_target = Target {
+                        seq: OrigSeqId(l.seq),
+                        instr: 0,
+                    };
+                    // For a loop, a branch to the label is a branch
+                    // to the top-of-loop.
+                    self.target_map.insert(OrigSeqId(l.seq), sub_target);
                     let mut sub_state = result.cur().subblock_state(ty, &self.tys);
                     sub_state.loop_pcs.push(None);
 
@@ -300,6 +343,7 @@ impl<'a> EvalCtx<'a> {
                         // evaluated this iter.
                         let sub_into_seq = match iter_state.code {
                             Some(seq) => {
+                                log::trace!(" -> reusing seq {}, clearing", seq.0.index());
                                 self.builder.instr_seq(seq.0).instrs_mut().clear();
                                 seq
                             }
@@ -315,14 +359,16 @@ impl<'a> EvalCtx<'a> {
                             }
                         };
 
+                        self.seq_map.insert(sub_target, sub_into_seq);
+
                         // Evaluate the loop body.
-                        let mut sub_result = self.eval_seq(in_state, sub_from_seq, sub_into_seq)?;
+                        let mut sub_result = self.eval_seq(in_state, sub_target, sub_into_seq)?;
 
                         // Examine taken edges out of the sub_result
                         // for any other iters we need to add to the
                         // workqueue.
                         sub_result.taken.retain(|taken| {
-                            if taken.target.0 != l.seq {
+                            if taken.target != sub_target {
                                 true
                             } else {
                                 // Pick the PC out of the taken-state.
@@ -353,18 +399,18 @@ impl<'a> EvalCtx<'a> {
                                     }
                                 };
 
-                                rewrite_br_targets(
-                                    &mut self.builder.instr_seq(taken.seq.0).instrs_mut()
-                                        [taken.instr]
-                                        .0,
-                                    |target| {
-                                        if target == l.seq {
-                                            dest_seq
-                                        } else {
-                                            target
-                                        }
-                                    },
+                                log::trace!(
+                                    "rewrite br to target {:?} with edge {:?} to dest seq {:?}",
+                                    target,
+                                    taken,
+                                    dest_seq
                                 );
+                                log::trace!(
+                                    "seq {}: {:?}",
+                                    taken.seq.0.index(),
+                                    self.builder.instr_seq(taken.seq.0).instrs()
+                                );
+                                rewrite_br_target(self.builder, taken, OutSeqId(dest_seq));
 
                                 if needs_enqueue {
                                     if workqueue_set.insert(taken_pc) {
@@ -403,7 +449,7 @@ impl<'a> EvalCtx<'a> {
                     // assert that we've handled branches to the loop
                     // label in the process above.
                     for (_, state) in iters.into_iter() {
-                        result.merge_subblock(state.output.unwrap(), from_seq);
+                        result.merge_subblock(state.output.unwrap(), None);
                     }
 
                     // Emit a block with the stackified body.
@@ -560,26 +606,41 @@ impl<'a> EvalCtx<'a> {
                     assert_eq!(ty, InstrSeqType::Simple(None));
 
                     let instr = self.builder.instr_seq(into_seq.0).instrs().len();
+                    let target = self.target_map.get(&OrigSeqId(b.block)).copied().unwrap();
+                    let block = self.seq_map.get(&target).copied().unwrap().0;
                     self.builder
                         .instr_seq(into_seq.0)
-                        .instr(Instr::Br(walrus::ir::Br {
-                            block: self.seq_map.get(&OrigSeqId(b.block)).cloned().unwrap().0,
-                        }));
+                        .instr(Instr::Br(walrus::ir::Br { block }));
 
                     let state = result.cur().clone();
+                    assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
                     result.taken.push(TakenEdge {
-                        target: OrigSeqId(b.block),
+                        target,
                         state,
                         seq: into_seq,
                         instr,
+                        arg_idx: 0,
                     });
+                    log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
+                    log::trace!(
+                        "seq {:?}: {:?}",
+                        into_seq.0.index(),
+                        self.builder.instr_seq(into_seq.0).instrs()
+                    );
 
                     result.fallthrough = None;
                 }
                 Instr::BrIf(brif) => {
                     // Don't handle block args for now.
                     let ty = self.generic_fn.block(brif.block).ty;
-                    assert_eq!(ty, InstrSeqType::Simple(None));
+                    assert!(matches!(ty, InstrSeqType::Simple(_)));
+
+                    let target = self
+                        .target_map
+                        .get(&OrigSeqId(brif.block))
+                        .copied()
+                        .unwrap();
+                    let block = self.seq_map.get(&target).copied().unwrap().0;
 
                     // Pop the value off the stack. If known, we can
                     // either ignore this branch (if zero) or treat it
@@ -595,14 +656,7 @@ impl<'a> EvalCtx<'a> {
                             let instr = self.builder.instr_seq(into_seq.0).instrs().len();
                             self.builder
                                 .instr_seq(into_seq.0)
-                                .instr(Instr::Br(walrus::ir::Br {
-                                    block: self
-                                        .seq_map
-                                        .get(&OrigSeqId(brif.block))
-                                        .cloned()
-                                        .unwrap()
-                                        .0,
-                                }));
+                                .instr(Instr::Br(walrus::ir::Br { block }));
 
                             result.fallthrough = None;
 
@@ -619,16 +673,9 @@ impl<'a> EvalCtx<'a> {
                         None => {
                             // Known at runtime only: emit a br_if.
                             let instr = self.builder.instr_seq(into_seq.0).instrs().len();
-                            self.builder.instr_seq(into_seq.0).instr(Instr::BrIf(
-                                walrus::ir::BrIf {
-                                    block: self
-                                        .seq_map
-                                        .get(&OrigSeqId(brif.block))
-                                        .cloned()
-                                        .unwrap()
-                                        .0,
-                                },
-                            ));
+                            self.builder
+                                .instr_seq(into_seq.0)
+                                .instr(Instr::BrIf(walrus::ir::BrIf { block }));
 
                             (instr, true)
                         }
@@ -636,12 +683,20 @@ impl<'a> EvalCtx<'a> {
 
                     if did_branch {
                         let state = result.cur().clone();
+                        assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
                         result.taken.push(TakenEdge {
-                            target: OrigSeqId(brif.block),
+                            target,
                             state,
                             seq: into_seq,
                             instr,
+                            arg_idx: 0,
                         });
+                        log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
+                        log::trace!(
+                            "seq {:?}: {:?}",
+                            into_seq.0.index(),
+                            self.builder.instr_seq(into_seq.0).instrs()
+                        );
                     }
                 }
                 Instr::BrTable(bt) => {
@@ -657,58 +712,89 @@ impl<'a> EvalCtx<'a> {
                         } else {
                             bt.default
                         };
-                        let block = self.seq_map.get(&OrigSeqId(target)).cloned().unwrap().0;
+                        let target = self.target_map.get(&OrigSeqId(target)).copied().unwrap();
+                        log::trace!(" -> concrete target {:?}", target);
+                        let block = self.seq_map.get(&target).copied().unwrap().0;
                         self.builder
                             .instr_seq(into_seq.0)
                             .instr(Instr::Br(walrus::ir::Br { block }));
                         let state = result.cur().clone();
+                        assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
                         result.taken.push(TakenEdge {
-                            target: OrigSeqId(target),
+                            target,
                             state,
                             seq: into_seq,
                             instr,
+                            arg_idx: 0,
                         });
+                        log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
+                        log::trace!(
+                            "seq {:?}: {:?}",
+                            into_seq.0.index(),
+                            self.builder.instr_seq(into_seq.0).instrs()
+                        );
                         result.fallthrough = None;
                     } else {
                         let instr = self.builder.instr_seq(into_seq.0).instrs().len();
+                        let seq_to_target = |seq: InstrSeqId| {
+                            self.target_map.get(&OrigSeqId(seq)).copied().unwrap()
+                        };
+                        let target_to_new_seq = |target: Target| -> InstrSeqId {
+                            self.seq_map.get(&target).copied().unwrap().0
+                        };
+
                         let blocks = bt
                             .blocks
                             .iter()
-                            .map(|&block| self.seq_map.get(&OrigSeqId(block)).cloned().unwrap().0)
+                            .map(|&block| target_to_new_seq(seq_to_target(block)))
                             .collect::<Vec<InstrSeqId>>()
                             .into_boxed_slice();
-                        let default = self.seq_map.get(&OrigSeqId(bt.default)).cloned().unwrap().0;
+                        let default = target_to_new_seq(seq_to_target(bt.default));
                         self.builder
                             .instr_seq(into_seq.0)
                             .instr(Instr::BrTable(walrus::ir::BrTable { blocks, default }));
 
-                        for &block in bt.blocks.iter() {
+                        for (i, &block) in bt.blocks.iter().enumerate() {
                             let state = result.cur().clone();
+                            assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
                             result.taken.push(TakenEdge {
-                                target: OrigSeqId(block),
+                                target: seq_to_target(block),
                                 state,
                                 seq: into_seq,
                                 instr,
+                                arg_idx: i,
                             });
+                            log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
+                            log::trace!(
+                                "seq {:?}: {:?}",
+                                into_seq.0.index(),
+                                self.builder.instr_seq(into_seq.0).instrs()
+                            );
                         }
                         let state = result.cur().clone();
+                        assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
                         result.taken.push(TakenEdge {
-                            target: OrigSeqId(bt.default),
+                            target: seq_to_target(bt.default),
                             state,
                             seq: into_seq,
                             instr,
+                            arg_idx: bt.blocks.len(),
                         });
+                        log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
+                        log::trace!(
+                            "seq {:?}: {:?}",
+                            into_seq.0.index(),
+                            self.builder.instr_seq(into_seq.0).instrs()
+                        );
                     }
                 }
                 Instr::IfElse(ie) => {
                     let ty = self.generic_fn.block(ie.consequent).ty;
                     debug_assert_eq!(ty, self.generic_fn.block(ie.alternative).ty);
-                    // Don't handle block args for now.
-                    assert_eq!(ty, InstrSeqType::Simple(None));
 
                     let cond = result.cur().stack.pop().unwrap();
 
-                    let (consequent_from_seq, alternative_from_seq) = match cond.is_const_truthy() {
+                    let (consequent_seq, alternative_seq) = match cond.is_const_truthy() {
                         Some(true) => (Some(OrigSeqId(ie.consequent)), None),
                         Some(false) => (None, Some(OrigSeqId(ie.alternative))),
                         None => (
@@ -716,24 +802,25 @@ impl<'a> EvalCtx<'a> {
                             Some(OrigSeqId(ie.alternative)),
                         ),
                     };
+                    let consequent_target = consequent_seq.map(|seq| Target { seq, instr: 0 });
+                    let alternative_target = alternative_seq.map(|seq| Target { seq, instr: 0 });
 
-                    let mut f =
-                        |sub_from_seq: Option<OrigSeqId>| -> anyhow::Result<Option<OutSeqId>> {
-                            sub_from_seq
-                                .map(|sub_from_seq| {
-                                    let sub_into_seq =
-                                        OutSeqId(self.builder.dangling_instr_seq(ty).id());
-                                    let sub_sub_state = result.cur().subblock_state(ty, &self.tys);
-                                    let sub_sub_result =
-                                        self.eval_seq(sub_sub_state, sub_from_seq, sub_into_seq)?;
-                                    result.merge_subblock(sub_sub_result, from_seq);
-                                    Ok(sub_into_seq)
-                                })
-                                .transpose()
-                        };
+                    let mut f = |sub_target: Option<Target>| -> anyhow::Result<Option<OutSeqId>> {
+                        sub_target
+                            .map(|sub_target| {
+                                let sub_into_seq =
+                                    OutSeqId(self.builder.dangling_instr_seq(ty).id());
+                                let sub_state = result.cur().subblock_state(ty, &self.tys);
+                                let sub_result =
+                                    self.eval_seq(sub_state, sub_target, sub_into_seq)?;
+                                result.merge_subblock(sub_result, None);
+                                Ok(sub_into_seq)
+                            })
+                            .transpose()
+                    };
 
-                    let consequent_into_seq = f(consequent_from_seq)?;
-                    let alternative_into_seq = f(alternative_from_seq)?;
+                    let consequent_into_seq = f(consequent_target)?;
+                    let alternative_into_seq = f(alternative_target)?;
 
                     match (consequent_into_seq, alternative_into_seq) {
                         (Some(t), Some(f)) => {
@@ -785,6 +872,7 @@ impl<'a> EvalCtx<'a> {
                     // Is it a known constant, with the `const_memory`
                     // `ValueTag`? If so, we can read bytes from the
                     // heap image to satisfy this load.
+                    let result_tags = ValueTags::default();
                     let value = match addr {
                         Value::Concrete(WasmVal::I32(base), tags)
                             if tags.contains(ValueTags::const_memory())
@@ -793,11 +881,11 @@ impl<'a> EvalCtx<'a> {
                             match l.kind {
                                 LoadKind::I32 { .. } => Value::Concrete(
                                     WasmVal::I32(self.image.read_u32(l.memory, base + offset)?),
-                                    tags,
+                                    result_tags,
                                 ),
                                 LoadKind::I64 { .. } => Value::Concrete(
                                     WasmVal::I64(self.image.read_u64(l.memory, base + offset)?),
-                                    tags,
+                                    result_tags,
                                 ),
                                 LoadKind::I32_8 { kind } => {
                                     let u8val = self.image.read_u8(l.memory, base + offset)?;
@@ -806,7 +894,7 @@ impl<'a> EvalCtx<'a> {
                                         ExtendedLoad::ZeroExtend
                                         | ExtendedLoad::ZeroExtendAtomic => u8val as u32,
                                     };
-                                    Value::Concrete(WasmVal::I32(ext), tags)
+                                    Value::Concrete(WasmVal::I32(ext), result_tags)
                                 }
                                 LoadKind::I32_16 { kind } => {
                                     let u16val = self.image.read_u16(l.memory, base + offset)?;
@@ -815,7 +903,7 @@ impl<'a> EvalCtx<'a> {
                                         ExtendedLoad::ZeroExtend
                                         | ExtendedLoad::ZeroExtendAtomic => u16val as u32,
                                     };
-                                    Value::Concrete(WasmVal::I32(ext), tags)
+                                    Value::Concrete(WasmVal::I32(ext), result_tags)
                                 }
                                 LoadKind::I64_8 { kind } => {
                                     let u8val = self.image.read_u8(l.memory, base + offset)?;
@@ -824,7 +912,7 @@ impl<'a> EvalCtx<'a> {
                                         ExtendedLoad::ZeroExtend
                                         | ExtendedLoad::ZeroExtendAtomic => u8val as u64,
                                     };
-                                    Value::Concrete(WasmVal::I64(ext), tags)
+                                    Value::Concrete(WasmVal::I64(ext), result_tags)
                                 }
                                 LoadKind::I64_16 { kind } => {
                                     let u16val = self.image.read_u16(l.memory, base + offset)?;
@@ -833,7 +921,7 @@ impl<'a> EvalCtx<'a> {
                                         ExtendedLoad::ZeroExtend
                                         | ExtendedLoad::ZeroExtendAtomic => u16val as u64,
                                     };
-                                    Value::Concrete(WasmVal::I64(ext), tags)
+                                    Value::Concrete(WasmVal::I64(ext), result_tags)
                                 }
                                 LoadKind::I64_32 { kind } => {
                                     let u32val = self.image.read_u32(l.memory, base + offset)?;
@@ -842,19 +930,19 @@ impl<'a> EvalCtx<'a> {
                                         ExtendedLoad::ZeroExtend
                                         | ExtendedLoad::ZeroExtendAtomic => u32val as u64,
                                     };
-                                    Value::Concrete(WasmVal::I64(ext), tags)
+                                    Value::Concrete(WasmVal::I64(ext), result_tags)
                                 }
                                 LoadKind::F32 => Value::Concrete(
                                     WasmVal::F32(self.image.read_u32(l.memory, base + offset)?),
-                                    tags,
+                                    result_tags,
                                 ),
                                 LoadKind::F64 => Value::Concrete(
                                     WasmVal::F64(self.image.read_u64(l.memory, base + offset)?),
-                                    tags,
+                                    result_tags,
                                 ),
                                 LoadKind::V128 => Value::Concrete(
                                     WasmVal::V128(self.image.read_u128(l.memory, base + offset)?),
-                                    tags,
+                                    result_tags,
                                 ),
                             }
                         }
@@ -880,11 +968,9 @@ impl<'a> EvalCtx<'a> {
             }
         }
 
-        self.seq_map.remove(&from_seq);
-
         log::trace!(
             "eval seq {:?} to {:?} -> result {:?}",
-            from_seq,
+            target,
             into_seq,
             result
         );
@@ -1156,5 +1242,25 @@ fn interpret_binop(op: BinaryOp, arg0: Value, arg1: Value) -> Value {
             }
         }
         _ => Value::Runtime(ValueTags::default()),
+    }
+}
+
+fn rewrite_br_target(builder: &mut FunctionBuilder, edge: &TakenEdge, target: OutSeqId) {
+    log::trace!(
+        "seq {:?}: {:?}",
+        edge.seq.0.index(),
+        builder.instr_seq(edge.seq.0).instrs()
+    );
+    match &mut builder.instr_seq(edge.seq.0).instrs_mut()[edge.instr].0 {
+        Instr::Br(br) => br.block = target.0,
+        Instr::BrIf(brif) => brif.block = target.0,
+        Instr::BrTable(brtable) => {
+            if edge.arg_idx < brtable.blocks.len() {
+                brtable.blocks[edge.arg_idx] = target.0;
+            } else {
+                brtable.default = target.0;
+            }
+        }
+        _ => unreachable!(),
     }
 }
