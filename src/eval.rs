@@ -202,6 +202,14 @@ impl<'a> EvalCtx<'a> {
         };
 
         for (instr, _) in &self.generic_fn.block(from_seq.0).instrs {
+            log::trace!(
+                "eval_seq: from {:?} into {:?} result {:?} instr {:?}",
+                from_seq,
+                into_seq,
+                result,
+                instr
+            );
+
             if result.fallthrough.is_none() {
                 break;
             }
@@ -268,12 +276,21 @@ impl<'a> EvalCtx<'a> {
                     workqueue.push(None);
                     workqueue_set.insert(None);
 
+                    log::trace!("Evaluating loop at seq {}", l.seq.index());
+
                     while let Some(iter_pc) = workqueue.pop() {
                         workqueue_set.remove(&iter_pc);
 
                         // Get the current (input-state, output-code, output-state) for this PC.
                         let iter_state = iters.get_mut(&iter_pc).unwrap();
                         let in_state = iter_state.input.clone();
+
+                        log::trace!(
+                            "loop seq {} iter: PC {:?} state {:?}",
+                            l.seq.index(),
+                            iter_pc,
+                            in_state
+                        );
 
                         // Allocate an InstrSeq for the output, or
                         // reuse the one that was used last time we
@@ -285,6 +302,11 @@ impl<'a> EvalCtx<'a> {
                             }
                             None => {
                                 let new_seq = OutSeqId(self.builder.dangling_instr_seq(ty).id());
+                                log::trace!(
+                                    " -> new seq {} for PC {:?}",
+                                    new_seq.0.index(),
+                                    iter_pc
+                                );
                                 iter_state.code = Some(new_seq);
                                 new_seq
                             }
@@ -846,6 +868,13 @@ impl<'a> EvalCtx<'a> {
         }
 
         self.seq_map.remove(&from_seq);
+
+        log::trace!(
+            "eval seq {:?} to {:?} -> result {:?}",
+            from_seq,
+            into_seq,
+            result
+        );
 
         Ok(result)
     }
