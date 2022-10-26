@@ -837,28 +837,55 @@ impl<'a> EvalCtx<'a> {
 }
 
 fn interpret_unop(op: UnaryOp, arg: Value) -> Value {
-    if let Value::Concrete(v, _) = arg {
-        match op {
-            UnaryOp::I32Eqz => Value::Concrete(
-                if v.integer_value().unwrap() == 0 {
-                    WasmVal::I32(1)
-                } else {
-                    WasmVal::I32(0)
-                },
-                ValueTags::default(),
-            ),
-            UnaryOp::I32Clz => Value::Runtime(ValueTags::default()),
-            UnaryOp::I32Ctz => Value::Runtime(ValueTags::default()),
-            UnaryOp::I64Eqz => Value::Concrete(
-                if v.integer_value().unwrap() == 0 {
-                    WasmVal::I64(1)
-                } else {
-                    WasmVal::I64(0)
-                },
-                ValueTags::default(),
-            ),
-            UnaryOp::I64Clz => Value::Runtime(ValueTags::default()),
-            UnaryOp::I64Ctz => Value::Runtime(ValueTags::default()),
+    if let Value::Concrete(v, tags) = arg {
+        match (op, v) {
+            (UnaryOp::I32Eqz, WasmVal::I32(k)) => {
+                Value::Concrete(WasmVal::I32(std::cmp::min(k, 1)), tags)
+            }
+            (UnaryOp::I64Eqz, WasmVal::I64(k)) => {
+                Value::Concrete(WasmVal::I64(std::cmp::min(k, 1)), tags)
+            }
+            (UnaryOp::I32Clz, WasmVal::I32(k)) => {
+                Value::Concrete(WasmVal::I32(k.leading_zeros()), tags)
+            }
+            (UnaryOp::I64Clz, WasmVal::I64(k)) => {
+                Value::Concrete(WasmVal::I64(k.leading_zeros() as u64), tags)
+            }
+            (UnaryOp::I32Ctz, WasmVal::I32(k)) => {
+                Value::Concrete(WasmVal::I32(k.trailing_zeros()), tags)
+            }
+            (UnaryOp::I64Ctz, WasmVal::I64(k)) => {
+                Value::Concrete(WasmVal::I64(k.trailing_zeros() as u64), tags)
+            }
+            (UnaryOp::I32Popcnt, WasmVal::I32(k)) => {
+                Value::Concrete(WasmVal::I32(k.count_ones()), tags)
+            }
+            (UnaryOp::I64Popcnt, WasmVal::I64(k)) => {
+                Value::Concrete(WasmVal::I64(k.count_ones() as u64), tags)
+            }
+            (UnaryOp::I32WrapI64, WasmVal::I64(k)) => Value::Concrete(WasmVal::I32(k as u32), tags),
+            (UnaryOp::I32Extend8S, WasmVal::I32(k)) => {
+                Value::Concrete(WasmVal::I32(k as u8 as i8 as i32 as u32), tags)
+            }
+            (UnaryOp::I32Extend16S, WasmVal::I32(k)) => {
+                Value::Concrete(WasmVal::I32(k as u16 as i16 as i32 as u32), tags)
+            }
+            (UnaryOp::I64Extend8S, WasmVal::I64(k)) => {
+                Value::Concrete(WasmVal::I64(k as u8 as i8 as i64 as u64), tags)
+            }
+            (UnaryOp::I64Extend16S, WasmVal::I64(k)) => {
+                Value::Concrete(WasmVal::I64(k as u16 as i16 as i64 as u64), tags)
+            }
+            (UnaryOp::I64Extend32S, WasmVal::I64(k)) => {
+                Value::Concrete(WasmVal::I64(k as u32 as i32 as i64 as u64), tags)
+            }
+            (UnaryOp::I64ExtendSI32, WasmVal::I32(k)) => {
+                Value::Concrete(WasmVal::I64(k as i32 as i64 as u64), tags)
+            }
+            (UnaryOp::I64ExtendUI32, WasmVal::I32(k)) => {
+                Value::Concrete(WasmVal::I64(k as u64), tags)
+            }
+            // TODO: FP and SIMD ops
             _ => Value::Runtime(ValueTags::default()),
         }
     } else {
@@ -866,6 +893,211 @@ fn interpret_unop(op: UnaryOp, arg: Value) -> Value {
     }
 }
 
-fn interpret_binop(_op: BinaryOp, _arg0: Value, _arg1: Value) -> Value {
-    Value::Runtime(ValueTags::default())
+fn interpret_binop(op: BinaryOp, arg0: Value, arg1: Value) -> Value {
+    match (arg0, arg1) {
+        (Value::Concrete(v1, tag1), Value::Concrete(v2, tag2)) => {
+            let tags = tag1.meet(tag2);
+            match (op, v1, v2) {
+                // 32-bit comparisons.
+                (BinaryOp::I32Eq, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(if k1 == k2 { 1 } else { 0 }), tags)
+                }
+                (BinaryOp::I32Ne, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(if k1 != k2 { 1 } else { 0 }), tags)
+                }
+                (BinaryOp::I32LtS, WasmVal::I32(k1), WasmVal::I32(k2)) => Value::Concrete(
+                    WasmVal::I32(if (k1 as i32) < (k2 as i32) { 1 } else { 0 }),
+                    tags,
+                ),
+                (BinaryOp::I32LtU, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(if k1 < k2 { 1 } else { 0 }), tags)
+                }
+                (BinaryOp::I32GtS, WasmVal::I32(k1), WasmVal::I32(k2)) => Value::Concrete(
+                    WasmVal::I32(if (k1 as i32) > (k2 as i32) { 1 } else { 0 }),
+                    tags,
+                ),
+                (BinaryOp::I32GtU, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(if k1 > k2 { 1 } else { 0 }), tags)
+                }
+                (BinaryOp::I32LeS, WasmVal::I32(k1), WasmVal::I32(k2)) => Value::Concrete(
+                    WasmVal::I32(if (k1 as i32) <= (k2 as i32) { 1 } else { 0 }),
+                    tags,
+                ),
+                (BinaryOp::I32LeU, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(if k1 <= k2 { 1 } else { 0 }), tags)
+                }
+                (BinaryOp::I32GeS, WasmVal::I32(k1), WasmVal::I32(k2)) => Value::Concrete(
+                    WasmVal::I32(if (k1 as i32) >= (k2 as i32) { 1 } else { 0 }),
+                    tags,
+                ),
+                (BinaryOp::I32GeU, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(if k1 >= k2 { 1 } else { 0 }), tags)
+                }
+
+                // 64-bit comparisons.
+                (BinaryOp::I64Eq, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(if k1 == k2 { 1 } else { 0 }), tags)
+                }
+                (BinaryOp::I64Ne, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(if k1 != k2 { 1 } else { 0 }), tags)
+                }
+                (BinaryOp::I64LtS, WasmVal::I64(k1), WasmVal::I64(k2)) => Value::Concrete(
+                    WasmVal::I64(if (k1 as i64) < (k2 as i64) { 1 } else { 0 }),
+                    tags,
+                ),
+                (BinaryOp::I64LtU, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(if k1 < k2 { 1 } else { 0 }), tags)
+                }
+                (BinaryOp::I64GtS, WasmVal::I64(k1), WasmVal::I64(k2)) => Value::Concrete(
+                    WasmVal::I64(if (k1 as i64) > (k2 as i64) { 1 } else { 0 }),
+                    tags,
+                ),
+                (BinaryOp::I64GtU, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(if k1 > k2 { 1 } else { 0 }), tags)
+                }
+                (BinaryOp::I64LeS, WasmVal::I64(k1), WasmVal::I64(k2)) => Value::Concrete(
+                    WasmVal::I64(if (k1 as i64) <= (k2 as i64) { 1 } else { 0 }),
+                    tags,
+                ),
+                (BinaryOp::I64LeU, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(if k1 <= k2 { 1 } else { 0 }), tags)
+                }
+                (BinaryOp::I64GeS, WasmVal::I64(k1), WasmVal::I64(k2)) => Value::Concrete(
+                    WasmVal::I64(if (k1 as i64) >= (k2 as i64) { 1 } else { 0 }),
+                    tags,
+                ),
+                (BinaryOp::I64GeU, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(if k1 >= k2 { 1 } else { 0 }), tags)
+                }
+
+                // 32-bit integer arithmetic.
+                (BinaryOp::I32Add, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(k1.wrapping_add(k2)), tags)
+                }
+                (BinaryOp::I32Sub, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(k1.wrapping_sub(k2)), tags)
+                }
+                (BinaryOp::I32Mul, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(k1.wrapping_mul(k2)), tags)
+                }
+                (BinaryOp::I32DivU, WasmVal::I32(k1), WasmVal::I32(k2)) if k2 != 0 => {
+                    Value::Concrete(WasmVal::I32(k1.wrapping_div(k2)), tags)
+                }
+                (BinaryOp::I32DivS, WasmVal::I32(k1), WasmVal::I32(k2))
+                    if k2 != 0 && (k1 != 0x8000_0000 || k2 != 0xffff_ffff) =>
+                {
+                    Value::Concrete(
+                        WasmVal::I32((k1 as i32).wrapping_div(k2 as i32) as u32),
+                        tags,
+                    )
+                }
+                (BinaryOp::I32RemU, WasmVal::I32(k1), WasmVal::I32(k2)) if k2 != 0 => {
+                    Value::Concrete(WasmVal::I32(k1.wrapping_rem(k2)), tags)
+                }
+                (BinaryOp::I32RemS, WasmVal::I32(k1), WasmVal::I32(k2))
+                    if k2 != 0 && (k1 != 0x8000_0000 || k2 != 0xffff_ffff) =>
+                {
+                    Value::Concrete(
+                        WasmVal::I32((k1 as i32).wrapping_rem(k2 as i32) as u32),
+                        tags,
+                    )
+                }
+                (BinaryOp::I32And, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(k1 & k2), tags)
+                }
+                (BinaryOp::I32Or, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(k1 | k2), tags)
+                }
+                (BinaryOp::I32Xor, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(k1 ^ k2), tags)
+                }
+                (BinaryOp::I32Shl, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(k1.wrapping_shl(k2 & 0x1f)), tags)
+                }
+                (BinaryOp::I32ShrU, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    Value::Concrete(WasmVal::I32(k1.wrapping_shr(k2 & 0x1f)), tags)
+                }
+                (BinaryOp::I32ShrS, WasmVal::I32(k1), WasmVal::I32(k2)) => Value::Concrete(
+                    WasmVal::I32((k1 as i32).wrapping_shr(k2 & 0x1f) as u32),
+                    tags,
+                ),
+                (BinaryOp::I32Rotl, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    let amt = k2 & 0x1f;
+                    let result = k1.wrapping_shl(amt) | k1.wrapping_shr(32 - amt);
+                    Value::Concrete(WasmVal::I32(result), tags)
+                }
+                (BinaryOp::I32Rotr, WasmVal::I32(k1), WasmVal::I32(k2)) => {
+                    let amt = k2 & 0x1f;
+                    let result = k1.wrapping_shr(amt) | k1.wrapping_shl(32 - amt);
+                    Value::Concrete(WasmVal::I32(result), tags)
+                }
+
+                // 64-bit integer arithmetic.
+                (BinaryOp::I64Add, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(k1.wrapping_add(k2)), tags)
+                }
+                (BinaryOp::I64Sub, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(k1.wrapping_sub(k2)), tags)
+                }
+                (BinaryOp::I64Mul, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(k1.wrapping_mul(k2)), tags)
+                }
+                (BinaryOp::I64DivU, WasmVal::I64(k1), WasmVal::I64(k2)) if k2 != 0 => {
+                    Value::Concrete(WasmVal::I64(k1.wrapping_div(k2)), tags)
+                }
+                (BinaryOp::I64DivS, WasmVal::I64(k1), WasmVal::I64(k2))
+                    if k2 != 0 && (k1 != 0x8000_0000_0000_0000 || k2 != 0xffff_ffff_ffff_ffff) =>
+                {
+                    Value::Concrete(
+                        WasmVal::I64((k1 as i64).wrapping_div(k2 as i64) as u64),
+                        tags,
+                    )
+                }
+                (BinaryOp::I64RemU, WasmVal::I64(k1), WasmVal::I64(k2)) if k2 != 0 => {
+                    Value::Concrete(WasmVal::I64(k1.wrapping_rem(k2)), tags)
+                }
+                (BinaryOp::I64RemS, WasmVal::I64(k1), WasmVal::I64(k2))
+                    if k2 != 0 && (k1 != 0x8000_0000_0000_0000 || k2 != 0xffff_ffff_ffff_ffff) =>
+                {
+                    Value::Concrete(
+                        WasmVal::I64((k1 as i64).wrapping_rem(k2 as i64) as u64),
+                        tags,
+                    )
+                }
+                (BinaryOp::I64And, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(k1 & k2), tags)
+                }
+                (BinaryOp::I64Or, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(k1 | k2), tags)
+                }
+                (BinaryOp::I64Xor, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(k1 ^ k2), tags)
+                }
+                (BinaryOp::I64Shl, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(k1.wrapping_shl((k2 & 0x3f) as u32)), tags)
+                }
+                (BinaryOp::I64ShrU, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    Value::Concrete(WasmVal::I64(k1.wrapping_shr((k2 & 0x3f) as u32)), tags)
+                }
+                (BinaryOp::I64ShrS, WasmVal::I64(k1), WasmVal::I64(k2)) => Value::Concrete(
+                    WasmVal::I64((k1 as i64).wrapping_shr((k2 & 0x3f) as u32) as u64),
+                    tags,
+                ),
+                (BinaryOp::I64Rotl, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    let amt = (k2 & 0x3f) as u32;
+                    let result = k1.wrapping_shl(amt) | k1.wrapping_shr(64 - amt);
+                    Value::Concrete(WasmVal::I64(result), tags)
+                }
+                (BinaryOp::I64Rotr, WasmVal::I64(k1), WasmVal::I64(k2)) => {
+                    let amt = (k2 & 0x3f) as u32;
+                    let result = k1.wrapping_shr(amt) | k1.wrapping_shl(64 - amt);
+                    Value::Concrete(WasmVal::I64(result), tags)
+                }
+
+                // TODO: FP and SIMD ops.
+                _ => Value::Runtime(ValueTags::default()),
+            }
+        }
+        _ => Value::Runtime(ValueTags::default()),
+    }
 }
