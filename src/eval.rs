@@ -169,8 +169,7 @@ struct TakenEdge {
 }
 
 impl EvalResult {
-    /// Returns `true` if merged-into seq was branched to.
-    fn merge_subblock(&mut self, sub_seq: EvalResult, this_point: Option<Target>) -> bool {
+    fn merge_subblock(&mut self, sub_seq: EvalResult, this_point: Option<Target>) {
         let state = self
             .fallthrough
             .as_mut()
@@ -178,16 +177,13 @@ impl EvalResult {
         if let Some(fallthrough) = sub_seq.fallthrough {
             state.meet_with(&fallthrough);
         }
-        let mut this_seq_taken = false;
         for taken in sub_seq.taken {
             if Some(taken.target) == this_point {
-                this_seq_taken = true;
                 state.meet_with(&taken.state);
             } else {
                 self.taken.push(taken);
             }
         }
-        this_seq_taken
     }
 
     pub fn cur(&mut self) -> &mut State {
@@ -262,28 +258,13 @@ impl<'a> EvalCtx<'a> {
                     self.seq_map.insert(this_target, sub_into_seq);
                     let sub_state = result.cur().subblock_state(ty, &self.tys);
                     let sub_result = self.eval_seq(sub_state, sub_target, sub_into_seq)?;
-                    let block_used = result.merge_subblock(sub_result, Some(this_target));
+                    result.merge_subblock(sub_result, Some(this_target));
 
-                    if block_used {
-                        // This `block` was actually branched to, so
-                        // we need to keep it.
-                        self.builder
-                            .instr_seq(into_seq.0)
-                            .instr(Instr::Block(walrus::ir::Block {
-                                seq: sub_into_seq.0,
-                            }));
-                    } else {
-                        // This `block` was not actually branched to,
-                        // so we can remove it and just inline the
-                        // resulting instructions directly (i.e.,
-                        // discard the layering).
-                        let instrs =
-                            std::mem::take(self.builder.instr_seq(sub_into_seq.0).instrs_mut());
-                        self.builder
-                            .instr_seq(into_seq.0)
-                            .instrs_mut()
-                            .extend(instrs.into_iter());
-                    }
+                    self.builder
+                        .instr_seq(into_seq.0)
+                        .instr(Instr::Block(walrus::ir::Block {
+                            seq: sub_into_seq.0,
+                        }));
                 }
                 Instr::Loop(l) => {
                     // Create the initial sub-block state.
