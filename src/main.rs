@@ -8,9 +8,9 @@ mod directive;
 mod eval;
 mod image;
 mod intrinsics;
+mod stackify;
 mod state;
 mod value;
-mod stackify;
 
 #[derive(Clone, Debug, StructOpt)]
 struct Options {
@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
 
     // Collect directives.
     let directives = directive::collect(&module, &mut im)?;
-    println!("Directives: {:?}", directives);
+    log::debug!("Directives: {:?}", directives);
 
     // Partially evaluate.
     eval::partially_evaluate(&mut module, &mut im, &directives[..])?;

@@ -42,7 +42,7 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
     let mut freelist = im.read_u32(heap, freelist_head_addr)?;
     let mut directives = vec![];
     while head != 0 {
-        directives.push(decode_weval_req(module, im, heap, head)?);
+        directives.push(decode_weval_req(im, heap, head)?);
         let next = im.read_u32(heap, head)?;
         im.write_u32(heap, head, freelist)?;
         im.write_u32(heap, freelist_head_addr, head)?;
@@ -53,13 +53,9 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
     Ok(directives)
 }
 
-fn decode_weval_req(
-    module: &Module,
-    im: &Image,
-    heap: MemoryId,
-    head: u32,
-) -> anyhow::Result<Directive> {
-    let func_index = im.read_u32(heap, head + 4)?;
+fn decode_weval_req(im: &Image, heap: MemoryId, head: u32) -> anyhow::Result<Directive> {
+    let func_table_index = im.read_u32(heap, head + 4)?;
+    let func = im.func_ptr(func_table_index)?;
     let mut arg_ptr = im.read_u32(heap, head + 8)?;
     let nargs = im.read_u32(heap, head + 12)?;
     let func_index_out_addr = im.read_u32(heap, head + 16)?;
@@ -83,12 +79,6 @@ fn decode_weval_req(
         const_params.push(value);
         arg_ptr += 16;
     }
-
-    let func = module
-        .functions()
-        .find(|f| f.id().index() == func_index as usize)
-        .ok_or_else(|| anyhow::anyhow!("Cannot find function index {}", func_index))?
-        .id();
 
     Ok(Directive {
         func,

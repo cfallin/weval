@@ -36,7 +36,9 @@ pub fn partially_evaluate(
     let intrinsics = Intrinsics::find(module);
     let mut mem_updates = HashMap::new();
     for directive in directives {
+        log::trace!("Processing directive {:?}", directive);
         if let Some(idx) = partially_evaluate_func(module, im, &intrinsics, directive)? {
+            log::trace!("New func index {}", idx);
             // Update memory image.
             mem_updates.insert(directive.func_index_out_addr, idx);
         }
@@ -72,7 +74,13 @@ fn partially_evaluate_func(
 ) -> anyhow::Result<Option<u32>> {
     let lf = match &module.funcs.get(directive.func).kind {
         FunctionKind::Local(lf) => lf,
-        _ => return Ok(None),
+        _ => {
+            log::trace!(
+                "Cannot partially evaluate func {}: not a local func",
+                directive.func.index(),
+            );
+            return Ok(None);
+        }
     };
     let (param_tys, result_tys) = module.types.params_results(lf.ty());
     let param_tys = param_tys.to_vec();
@@ -179,6 +187,13 @@ impl<'a> EvalCtx<'a> {
         from_seq: OrigSeqId,
         into_seq: OutSeqId,
     ) -> anyhow::Result<EvalResult> {
+        log::trace!(
+            "eval_seq: from {:?} into {:?} state {:?}",
+            from_seq,
+            into_seq,
+            state
+        );
+
         self.seq_map.insert(from_seq, into_seq);
 
         let mut result = EvalResult {

@@ -3,16 +3,18 @@
 use crate::value::WasmVal;
 use std::collections::BTreeMap;
 use walrus::{
-    ActiveData, ActiveDataLocation, DataKind, GlobalId, GlobalKind, InitExpr, Memory, MemoryId,
-    Module,
+    ActiveData, ActiveDataLocation, DataKind, ElementKind, FunctionId, GlobalId, GlobalKind,
+    InitExpr, Memory, MemoryId, Module, Table, TableId,
 };
 
 #[derive(Clone, Debug)]
 pub struct Image {
     pub memories: BTreeMap<MemoryId, MemImage>,
     pub globals: BTreeMap<GlobalId, WasmVal>,
+    pub tables: BTreeMap<TableId, Vec<Option<FunctionId>>>,
     pub stack_pointer: Option<GlobalId>,
     pub main_heap: Option<MemoryId>,
+    pub main_table: Option<TableId>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,10 +38,17 @@ pub fn build_image(module: &Module) -> anyhow::Result<Image> {
                 _ => None,
             })
             .collect(),
+        tables: module
+            .tables
+            .iter()
+            .flat_map(|table| maybe_table_image(module, table).map(|image| (table.id(), image)))
+            .collect(),
         // HACK: assume first global is shadow stack pointer.
         stack_pointer: module.globals.iter().next().map(|g| g.id()),
         // HACK: assume first memory is main heap.
         main_heap: module.memories.iter().next().map(|m| m.id()),
+        // HACK: assume first table is used for function pointers.
+        main_table: module.tables.iter().next().map(|t| t.id()),
     })
 }
 
@@ -51,7 +60,7 @@ fn maybe_mem_image(module: &Module, mem: &Memory) -> Option<MemImage> {
     for &segment_id in &mem.data_segments {
         let segment = module.data.get(segment_id);
         match segment.kind {
-            DataKind::Passive => continue,
+            DataKind::Passive => {}
             DataKind::Active(ActiveData {
                 memory: _,
                 location: ActiveDataLocation::Relative(..),
@@ -69,6 +78,34 @@ fn maybe_mem_image(module: &Module, mem: &Memory) -> Option<MemImage> {
     }
 
     Some(MemImage { image, len })
+}
+
+pub fn maybe_table_image(module: &Module, table: &Table) -> Option<Vec<Option<FunctionId>>> {
+    let mut image = vec![];
+    image.resize(table.initial as usize, None);
+    for &segment_id in &table.elem_segments {
+        let segment = module.elements.get(segment_id);
+        match segment.kind {
+            ElementKind::Passive => {}
+            ElementKind::Declared => {}
+            ElementKind::Active {
+                table: _,
+                offset: InitExpr::Value(walrus::ir::Value::I32(offset)),
+            } => {
+                let offset = offset as usize;
+                if offset + segment.members.len() > image.len() {
+                    return None;
+                }
+                image[offset..(offset + segment.members.len())]
+                    .copy_from_slice(&segment.members[..]);
+            }
+            _ => {
+                return None;
+            }
+        }
+    }
+
+    Some(image)
 }
 
 pub fn update(module: &mut Module, im: &Image) {
@@ -163,5 +200,18 @@ impl Image {
         let slice = &mut image.image[addr..(addr + 4)];
         slice.copy_from_slice(&value.to_le_bytes()[..]);
         Ok(())
+    }
+
+    pub fn func_ptr(&self, idx: u32) -> anyhow::Result<FunctionId> {
+        let table = self
+            .main_table
+            .ok_or_else(|| anyhow::anyhow!("no main table"))?;
+        Ok(self
+            .tables
+            .get(&table)
+            .unwrap()
+            .get(idx as usize)
+            .ok_or_else(|| anyhow::anyhow!("func ptr out of bounds"))?
+            .ok_or_else(|| anyhow::anyhow!("func table entry is null"))?)
     }
 }
