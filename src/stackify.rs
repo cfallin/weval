@@ -261,7 +261,7 @@ impl Marks {
         // Pass 2: compute location of innermost loop for each block.
         let mut innermost_loop: Vec<Option<RPOIndex>> = vec![None; rpo.order.len()];
         let mut loop_stack: Vec<(RPOIndex, RPOIndex)> = vec![];
-        for (rpo_seq, seq) in rpo.iter_with_index() {
+        for (rpo_seq, _seq) in rpo.iter_with_index() {
             while let Some(innermost) = loop_stack.last() {
                 if innermost.1 >= rpo_seq {
                     break;

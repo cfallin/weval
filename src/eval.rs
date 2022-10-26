@@ -502,7 +502,7 @@ impl<'a> EvalCtx<'a> {
                             .push(Value::Runtime(ValueTags::default()));
                     }
                 }
-                Instr::Unreachable(u) => {
+                Instr::Unreachable(_) => {
                     self.builder.instr_seq(into_seq.0).unreachable();
                 }
                 Instr::Br(b) => {
@@ -703,11 +703,11 @@ impl<'a> EvalCtx<'a> {
                         (None, None) => unreachable!(),
                     }
                 }
-                Instr::Drop(d) => {
+                Instr::Drop(_) => {
                     self.builder.instr_seq(into_seq.0).drop();
                     result.cur().stack.pop();
                 }
-                Instr::Return(r) => {
+                Instr::Return(_) => {
                     result.cur().stack.pop();
                     self.builder.instr_seq(into_seq.0).return_();
                 }
@@ -866,6 +866,6 @@ fn interpret_unop(op: UnaryOp, arg: Value) -> Value {
     }
 }
 
-fn interpret_binop(op: BinaryOp, arg0: Value, arg1: Value) -> Value {
+fn interpret_binop(_op: BinaryOp, _arg0: Value, _arg1: Value) -> Value {
     Value::Runtime(ValueTags::default())
 }

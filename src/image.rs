@@ -53,13 +53,13 @@ fn maybe_mem_image(module: &Module, mem: &Memory) -> Option<MemImage> {
         match segment.kind {
             DataKind::Passive => continue,
             DataKind::Active(ActiveData {
-                memory,
+                memory: _,
                 location: ActiveDataLocation::Relative(..),
             }) => {
                 return None;
             }
             DataKind::Active(ActiveData {
-                memory,
+                memory: _,
                 location: ActiveDataLocation::Absolute(offset),
             }) => {
                 let offset = offset as usize;

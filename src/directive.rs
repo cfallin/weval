@@ -65,7 +65,7 @@ fn decode_weval_req(
     let func_index_out_addr = im.read_u32(heap, head + 16)?;
 
     let mut const_params = vec![];
-    for i in 0..nargs {
+    for _ in 0..nargs {
         let is_specialized = im.read_u32(heap, arg_ptr)?;
         let ty = im.read_u32(heap, arg_ptr + 4)?;
         let tags = ValueTags::default();
