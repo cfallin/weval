@@ -156,10 +156,10 @@ struct EvalResult {
     /// The output state for fallthrough. `None` if unreachable.
     fallthrough: Option<State>,
     /// Any taken-edge states.
-    taken: Vec<TakenEdge>,
+    taken: HashSet<TakenEdge>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TakenEdge {
     target: Target,
     state: State,
@@ -181,7 +181,7 @@ impl EvalResult {
             if Some(taken.target) == this_point {
                 state.meet_with(&taken.state);
             } else {
-                self.taken.push(taken);
+                self.taken.insert(taken);
             }
         }
     }
@@ -215,7 +215,7 @@ impl<'a> EvalCtx<'a> {
 
         let mut result = EvalResult {
             fallthrough: Some(state),
-            taken: vec![],
+            taken: HashSet::new(),
         };
 
         for (instr_idx, (instr, _)) in self
@@ -599,22 +599,16 @@ impl<'a> EvalCtx<'a> {
                         .instr_seq(into_seq.0)
                         .instr(Instr::Br(walrus::ir::Br { block }));
 
-                    let state = result.cur().clone();
+                    let mut state = result.cur().clone();
+                    state.stack.clear();
                     assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
-                    result.taken.push(TakenEdge {
+                    result.taken.insert(TakenEdge {
                         target,
                         state,
                         seq: into_seq,
                         instr,
                         arg_idx: 0,
                     });
-                    log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
-                    log::trace!(
-                        "seq {:?}: {:?}",
-                        into_seq.0.index(),
-                        self.builder.instr_seq(into_seq.0).instrs()
-                    );
-
                     result.fallthrough = None;
                 }
                 Instr::BrIf(brif) => {
@@ -669,21 +663,16 @@ impl<'a> EvalCtx<'a> {
                     };
 
                     if did_branch {
-                        let state = result.cur().clone();
+                        let mut state = result.cur().clone();
+                        state.stack.clear();
                         assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
-                        result.taken.push(TakenEdge {
+                        result.taken.insert(TakenEdge {
                             target,
                             state,
                             seq: into_seq,
                             instr,
                             arg_idx: 0,
                         });
-                        log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
-                        log::trace!(
-                            "seq {:?}: {:?}",
-                            into_seq.0.index(),
-                            self.builder.instr_seq(into_seq.0).instrs()
-                        );
                     }
                 }
                 Instr::BrTable(bt) => {
@@ -705,21 +694,16 @@ impl<'a> EvalCtx<'a> {
                         self.builder
                             .instr_seq(into_seq.0)
                             .instr(Instr::Br(walrus::ir::Br { block }));
-                        let state = result.cur().clone();
+                        let mut state = result.cur().clone();
+                        state.stack.clear();
                         assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
-                        result.taken.push(TakenEdge {
+                        result.taken.insert(TakenEdge {
                             target,
                             state,
                             seq: into_seq,
                             instr,
                             arg_idx: 0,
                         });
-                        log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
-                        log::trace!(
-                            "seq {:?}: {:?}",
-                            into_seq.0.index(),
-                            self.builder.instr_seq(into_seq.0).instrs()
-                        );
                         result.fallthrough = None;
                     } else {
                         let instr = self.builder.instr_seq(into_seq.0).instrs().len();
@@ -744,35 +728,23 @@ impl<'a> EvalCtx<'a> {
                         for (i, &block) in bt.blocks.iter().enumerate() {
                             let state = result.cur().clone();
                             assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
-                            result.taken.push(TakenEdge {
+                            result.taken.insert(TakenEdge {
                                 target: seq_to_target(block),
                                 state,
                                 seq: into_seq,
                                 instr,
                                 arg_idx: i,
                             });
-                            log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
-                            log::trace!(
-                                "seq {:?}: {:?}",
-                                into_seq.0.index(),
-                                self.builder.instr_seq(into_seq.0).instrs()
-                            );
                         }
                         let state = result.cur().clone();
                         assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
-                        result.taken.push(TakenEdge {
+                        result.taken.insert(TakenEdge {
                             target: seq_to_target(bt.default),
                             state,
                             seq: into_seq,
                             instr,
                             arg_idx: bt.blocks.len(),
                         });
-                        log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
-                        log::trace!(
-                            "seq {:?}: {:?}",
-                            into_seq.0.index(),
-                            self.builder.instr_seq(into_seq.0).instrs()
-                        );
                     }
                 }
                 Instr::IfElse(ie) => {
