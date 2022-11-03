@@ -156,10 +156,10 @@ struct EvalResult {
     /// The output state for fallthrough. `None` if unreachable.
     fallthrough: Option<State>,
     /// Any taken-edge states.
-    taken: Vec<TakenEdge>,
+    taken: HashSet<TakenEdge>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TakenEdge {
     target: Target,
     state: State,
@@ -169,8 +169,7 @@ struct TakenEdge {
 }
 
 impl EvalResult {
-    /// Returns `true` if merged-into seq was branched to.
-    fn merge_subblock(&mut self, sub_seq: EvalResult, this_point: Option<Target>) -> bool {
+    fn merge_subblock(&mut self, sub_seq: EvalResult, this_point: Option<Target>) {
         let state = self
             .fallthrough
             .as_mut()
@@ -178,16 +177,13 @@ impl EvalResult {
         if let Some(fallthrough) = sub_seq.fallthrough {
             state.meet_with(&fallthrough);
         }
-        let mut this_seq_taken = false;
         for taken in sub_seq.taken {
             if Some(taken.target) == this_point {
-                this_seq_taken = true;
                 state.meet_with(&taken.state);
             } else {
-                self.taken.push(taken);
+                self.taken.insert(taken);
             }
         }
-        this_seq_taken
     }
 
     pub fn cur(&mut self) -> &mut State {
@@ -219,7 +215,7 @@ impl<'a> EvalCtx<'a> {
 
         let mut result = EvalResult {
             fallthrough: Some(state),
-            taken: vec![],
+            taken: HashSet::new(),
         };
 
         for (instr_idx, (instr, _)) in self
@@ -262,28 +258,13 @@ impl<'a> EvalCtx<'a> {
                     self.seq_map.insert(this_target, sub_into_seq);
                     let sub_state = result.cur().subblock_state(ty, &self.tys);
                     let sub_result = self.eval_seq(sub_state, sub_target, sub_into_seq)?;
-                    let block_used = result.merge_subblock(sub_result, Some(this_target));
+                    result.merge_subblock(sub_result, Some(this_target));
 
-                    if block_used {
-                        // This `block` was actually branched to, so
-                        // we need to keep it.
-                        self.builder
-                            .instr_seq(into_seq.0)
-                            .instr(Instr::Block(walrus::ir::Block {
-                                seq: sub_into_seq.0,
-                            }));
-                    } else {
-                        // This `block` was not actually branched to,
-                        // so we can remove it and just inline the
-                        // resulting instructions directly (i.e.,
-                        // discard the layering).
-                        let instrs =
-                            std::mem::take(self.builder.instr_seq(sub_into_seq.0).instrs_mut());
-                        self.builder
-                            .instr_seq(into_seq.0)
-                            .instrs_mut()
-                            .extend(instrs.into_iter());
-                    }
+                    self.builder
+                        .instr_seq(into_seq.0)
+                        .instr(Instr::Block(walrus::ir::Block {
+                            seq: sub_into_seq.0,
+                        }));
                 }
                 Instr::Loop(l) => {
                     // Create the initial sub-block state.
@@ -618,22 +599,16 @@ impl<'a> EvalCtx<'a> {
                         .instr_seq(into_seq.0)
                         .instr(Instr::Br(walrus::ir::Br { block }));
 
-                    let state = result.cur().clone();
+                    let mut state = result.cur().clone();
+                    state.stack.clear();
                     assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
-                    result.taken.push(TakenEdge {
+                    result.taken.insert(TakenEdge {
                         target,
                         state,
                         seq: into_seq,
                         instr,
                         arg_idx: 0,
                     });
-                    log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
-                    log::trace!(
-                        "seq {:?}: {:?}",
-                        into_seq.0.index(),
-                        self.builder.instr_seq(into_seq.0).instrs()
-                    );
-
                     result.fallthrough = None;
                 }
                 Instr::BrIf(brif) => {
@@ -688,21 +663,16 @@ impl<'a> EvalCtx<'a> {
                     };
 
                     if did_branch {
-                        let state = result.cur().clone();
+                        let mut state = result.cur().clone();
+                        state.stack.clear();
                         assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
-                        result.taken.push(TakenEdge {
+                        result.taken.insert(TakenEdge {
                             target,
                             state,
                             seq: into_seq,
                             instr,
                             arg_idx: 0,
                         });
-                        log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
-                        log::trace!(
-                            "seq {:?}: {:?}",
-                            into_seq.0.index(),
-                            self.builder.instr_seq(into_seq.0).instrs()
-                        );
                     }
                 }
                 Instr::BrTable(bt) => {
@@ -724,21 +694,16 @@ impl<'a> EvalCtx<'a> {
                         self.builder
                             .instr_seq(into_seq.0)
                             .instr(Instr::Br(walrus::ir::Br { block }));
-                        let state = result.cur().clone();
+                        let mut state = result.cur().clone();
+                        state.stack.clear();
                         assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
-                        result.taken.push(TakenEdge {
+                        result.taken.insert(TakenEdge {
                             target,
                             state,
                             seq: into_seq,
                             instr,
                             arg_idx: 0,
                         });
-                        log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
-                        log::trace!(
-                            "seq {:?}: {:?}",
-                            into_seq.0.index(),
-                            self.builder.instr_seq(into_seq.0).instrs()
-                        );
                         result.fallthrough = None;
                     } else {
                         let instr = self.builder.instr_seq(into_seq.0).instrs().len();
@@ -763,35 +728,23 @@ impl<'a> EvalCtx<'a> {
                         for (i, &block) in bt.blocks.iter().enumerate() {
                             let state = result.cur().clone();
                             assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
-                            result.taken.push(TakenEdge {
+                            result.taken.insert(TakenEdge {
                                 target: seq_to_target(block),
                                 state,
                                 seq: into_seq,
                                 instr,
                                 arg_idx: i,
                             });
-                            log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
-                            log::trace!(
-                                "seq {:?}: {:?}",
-                                into_seq.0.index(),
-                                self.builder.instr_seq(into_seq.0).instrs()
-                            );
                         }
                         let state = result.cur().clone();
                         assert!(instr < self.builder.instr_seq(into_seq.0).instrs().len());
-                        result.taken.push(TakenEdge {
+                        result.taken.insert(TakenEdge {
                             target: seq_to_target(bt.default),
                             state,
                             seq: into_seq,
                             instr,
                             arg_idx: bt.blocks.len(),
                         });
-                        log::trace!(" -> taken edge: {:?}", result.taken.last().unwrap());
-                        log::trace!(
-                            "seq {:?}: {:?}",
-                            into_seq.0.index(),
-                            self.builder.instr_seq(into_seq.0).instrs()
-                        );
                     }
                 }
                 Instr::IfElse(ie) => {
