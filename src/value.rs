@@ -9,18 +9,6 @@ pub enum WasmVal {
     V128(u128),
 }
 
-impl std::convert::From<walrus::ir::Value> for WasmVal {
-    fn from(val: walrus::ir::Value) -> Self {
-        match val {
-            walrus::ir::Value::I32(i) => WasmVal::I32(i as u32),
-            walrus::ir::Value::I64(i) => WasmVal::I64(i as u64),
-            walrus::ir::Value::F32(f) => WasmVal::F32(f.to_bits()),
-            walrus::ir::Value::F64(f) => WasmVal::F64(f.to_bits()),
-            walrus::ir::Value::V128(v) => WasmVal::V128(v),
-        }
-    }
-}
-
 impl WasmVal {
     pub fn is_truthy(self) -> bool {
         match self {
@@ -52,7 +40,7 @@ impl WasmVal {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Value {
+pub enum AbstractValue {
     /// "top" default value; undefined.
     Top,
     /// A value known at specialization time.
@@ -94,36 +82,36 @@ impl ValueTags {
     }
 }
 
-impl Value {
+impl AbstractValue {
     pub fn tags(&self) -> ValueTags {
         match self {
-            &Value::Top => ValueTags::default(),
-            &Value::Concrete(_, t) => t,
-            &Value::Runtime(t) => t,
+            &AbstractValue::Top => ValueTags::default(),
+            &AbstractValue::Concrete(_, t) => t,
+            &AbstractValue::Runtime(t) => t,
         }
     }
 
-    pub fn with_tags(&self, new_tags: ValueTags) -> Value {
+    pub fn with_tags(&self, new_tags: ValueTags) -> AbstractValue {
         match self {
-            &Value::Top => Value::Top,
-            &Value::Concrete(k, t) => Value::Concrete(k, t | new_tags),
-            &Value::Runtime(t) => Value::Runtime(t | new_tags),
+            &AbstractValue::Top => AbstractValue::Top,
+            &AbstractValue::Concrete(k, t) => AbstractValue::Concrete(k, t | new_tags),
+            &AbstractValue::Runtime(t) => AbstractValue::Runtime(t | new_tags),
         }
     }
 
-    pub fn meet(a: Value, b: Value) -> Value {
+    pub fn meet(a: AbstractValue, b: AbstractValue) -> AbstractValue {
         match (a, b) {
-            (Value::Top, x) | (x, Value::Top) => x,
-            (Value::Concrete(a, t1), Value::Concrete(b, t2)) if a == b => {
-                Value::Concrete(a, t1.meet(t2))
+            (AbstractValue::Top, x) | (x, AbstractValue::Top) => x,
+            (AbstractValue::Concrete(a, t1), AbstractValue::Concrete(b, t2)) if a == b => {
+                AbstractValue::Concrete(a, t1.meet(t2))
             }
-            (a, b) => Value::Runtime(a.tags().meet(b.tags())),
+            (a, b) => AbstractValue::Runtime(a.tags().meet(b.tags())),
         }
     }
 
     pub fn is_const_u32(&self) -> Option<u32> {
         match self {
-            &Value::Concrete(WasmVal::I32(k), _) => Some(k),
+            &AbstractValue::Concrete(WasmVal::I32(k), _) => Some(k),
             _ => None,
         }
     }

@@ -1,39 +1,34 @@
 //! State tracking.
 
 use crate::image::Image;
-use crate::value::{Value, ValueTags};
+use crate::value::{AbstractValue, ValueTags};
 use std::collections::BTreeMap;
-use waffle::Global;
-use walrus::{ir::InstrSeqType, FunctionId, FunctionKind, LocalId, Module, ModuleTypes};
+use waffle::{Func, FunctionBody, Global, Module, Value};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct State {
     /// Memory overlay. We store only aligned u32s here.
-    pub mem_overlay: BTreeMap<u32, Value>,
+    pub mem_overlay: BTreeMap<u32, AbstractValue>,
     /// Global values.
-    pub globals: BTreeMap<Global, Value>,
-    /// Local values.
-    pub locals: BTreeMap<LocalId, Value>,
-    /// Operand stack. May be partial: describes the suffix of the
-    /// operand stack. This allows meets to work more easily when a
-    /// block returns results to its parent block.
-    pub stack: Vec<Value>,
+    pub globals: BTreeMap<Global, AbstractValue>,
+    /// Values of SSA `Value`s.
+    pub values: BTreeMap<Value, AbstractValue>,
     /// Loop stack, with a known PC per loop level.
     pub loop_pcs: Vec<Option<u64>>,
 }
 
 fn map_meet_with<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
-    this: &mut BTreeMap<K, Value>,
-    other: &BTreeMap<K, Value>,
+    this: &mut BTreeMap<K, AbstractValue>,
+    other: &BTreeMap<K, AbstractValue>,
 ) -> bool {
     let mut changed = false;
     for (k, val) in this.iter_mut() {
         if let Some(other_val) = other.get(k) {
-            let met = Value::meet(*val, *other_val);
+            let met = AbstractValue::meet(*val, *other_val);
             changed |= met != *val;
             *val = met;
         } else {
-            *val = Value::Top;
+            *val = AbstractValue::Top;
             // N.B.: not changed: Top should not have an effect (every
             // non-present key is conceptually already Top).
         }
@@ -49,23 +44,27 @@ fn map_meet_with<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
 }
 
 impl State {
-    pub fn initial(module: &Module, im: &Image, func: FunctionId, args: Vec<Value>) -> State {
-        let arg_locals = match &module.funcs.get(func).kind {
-            FunctionKind::Local(lf) => &lf.args[..],
-            _ => panic!("Getting state for non-local function"),
-        };
-        let locals = arg_locals.iter().cloned().zip(args.into_iter()).collect();
+    pub fn initial(
+        module: &Module,
+        im: &Image,
+        func: &FunctionBody,
+        args: Vec<AbstractValue>,
+    ) -> State {
+        let mut values = BTreeMap::new();
+        // Block params of first block get values of args.
+        for ((_, arg), arg_val) in func.blocks[func.entry].params.iter().zip(args.iter()) {
+            values.insert(*arg, arg_val.clone());
+        }
         let globals = im
             .globals
             .iter()
-            .map(|(id, val)| (*id, Value::Concrete(*val, ValueTags::default())))
+            .map(|(id, val)| (*id, AbstractValue::Concrete(*val, ValueTags::default())))
             .collect();
 
         State {
             mem_overlay: BTreeMap::new(),
             globals,
-            locals,
-            stack: vec![],
+            values,
             loop_pcs: vec![],
         }
     }
