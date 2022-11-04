@@ -3,12 +3,12 @@
 use crate::image::Image;
 use crate::intrinsics::find_global_data_by_exported_func;
 use crate::value::{Value, ValueTags, WasmVal};
-use walrus::{FunctionId, MemoryId, Module};
+use waffle::{Func, Memory, Module};
 
 #[derive(Clone, Debug)]
 pub struct Directive {
     /// Evaluate the given function.
-    pub func: FunctionId,
+    pub func: Func,
     /// Evaluate with the given parameter values fixed.
     pub const_params: Vec<Value>,
     /// Place the ID of the resulting specialized function at the
@@ -53,7 +53,7 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
     Ok(directives)
 }
 
-fn decode_weval_req(im: &Image, heap: MemoryId, head: u32) -> anyhow::Result<Directive> {
+fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Directive> {
     let func_table_index = im.read_u32(heap, head + 4)?;
     let func = im.func_ptr(func_table_index)?;
     let mut arg_ptr = im.read_u32(heap, head + 8)?;

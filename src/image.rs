@@ -2,19 +2,16 @@
 
 use crate::value::WasmVal;
 use std::collections::BTreeMap;
-use walrus::{
-    ActiveData, ActiveDataLocation, DataKind, ElementKind, FunctionId, GlobalId, GlobalKind,
-    InitExpr, Memory, MemoryId, Module, Table, TableId,
-};
+use waffle::{Func, Global, Memory, MemoryData, MemorySegment, Module, Table};
 
 #[derive(Clone, Debug)]
 pub struct Image {
-    pub memories: BTreeMap<MemoryId, MemImage>,
-    pub globals: BTreeMap<GlobalId, WasmVal>,
-    pub tables: BTreeMap<TableId, Vec<Option<FunctionId>>>,
-    pub stack_pointer: Option<GlobalId>,
-    pub main_heap: Option<MemoryId>,
-    pub main_table: Option<TableId>,
+    pub memories: BTreeMap<Memory, MemImage>,
+    pub globals: BTreeMap<Global, WasmVal>,
+    pub tables: BTreeMap<Table, Vec<Func>>,
+    pub stack_pointer: Option<Global>,
+    pub main_heap: Option<Memory>,
+    pub main_table: Option<Table>,
 }
 
 #[derive(Clone, Debug)]
@@ -26,105 +23,54 @@ pub struct MemImage {
 pub fn build_image(module: &Module) -> anyhow::Result<Image> {
     Ok(Image {
         memories: module
-            .memories
-            .iter()
-            .flat_map(|mem| maybe_mem_image(module, mem).map(|image| (mem.id(), image)))
+            .memories()
+            .flat_map(|(id, mem)| maybe_mem_image(mem).map(|image| (id, image)))
             .collect(),
         globals: module
-            .globals
-            .iter()
-            .flat_map(|g| match &g.kind {
-                GlobalKind::Local(InitExpr::Value(val)) => Some((g.id(), WasmVal::from(*val))),
+            .globals()
+            .flat_map(|(global_id, data)| match data.value {
+                Some(bits) => Some((global_id, WasmVal::from_bits(data.ty, bits)?)),
                 _ => None,
             })
             .collect(),
         tables: module
-            .tables
-            .iter()
-            .flat_map(|table| maybe_table_image(module, table).map(|image| (table.id(), image)))
+            .tables()
+            .map(|(id, data)| (id, data.func_elements.clone().unwrap_or(vec![])))
             .collect(),
         // HACK: assume first global is shadow stack pointer.
-        stack_pointer: module.globals.iter().next().map(|g| g.id()),
+        stack_pointer: module.globals().next().map(|(id, _)| id),
         // HACK: assume first memory is main heap.
-        main_heap: module.memories.iter().next().map(|m| m.id()),
+        main_heap: module.memories().next().map(|(id, _)| id),
         // HACK: assume first table is used for function pointers.
-        main_table: module.tables.iter().next().map(|t| t.id()),
+        main_table: module.tables().next().map(|(id, _)| id),
     })
 }
 
-fn maybe_mem_image(module: &Module, mem: &Memory) -> Option<MemImage> {
+fn maybe_mem_image(mem: &MemoryData) -> Option<MemImage> {
     const WASM_PAGE: usize = 1 << 16;
-    let len = (mem.initial as usize) * WASM_PAGE;
+    let len = mem.initial_pages * WASM_PAGE;
     let mut image = vec![0; len];
 
-    for &segment_id in &mem.data_segments {
-        let segment = module.data.get(segment_id);
-        match segment.kind {
-            DataKind::Passive => {}
-            DataKind::Active(ActiveData {
-                memory: _,
-                location: ActiveDataLocation::Relative(..),
-            }) => {
-                return None;
-            }
-            DataKind::Active(ActiveData {
-                memory: _,
-                location: ActiveDataLocation::Absolute(offset),
-            }) => {
-                let offset = offset as usize;
-                image[offset..(offset + segment.value.len())].copy_from_slice(&segment.value[..]);
-            }
-        }
+    for &segment in &mem.segments {
+        image[segment.offset..(segment.offset + segment.data.len())]
+            .copy_from_slice(&segment.data[..]);
     }
 
     Some(MemImage { image, len })
 }
 
-pub fn maybe_table_image(module: &Module, table: &Table) -> Option<Vec<Option<FunctionId>>> {
-    let mut image = vec![];
-    image.resize(table.initial as usize, None);
-    for &segment_id in &table.elem_segments {
-        let segment = module.elements.get(segment_id);
-        match segment.kind {
-            ElementKind::Passive => {}
-            ElementKind::Declared => {}
-            ElementKind::Active {
-                table: _,
-                offset: InitExpr::Value(walrus::ir::Value::I32(offset)),
-            } => {
-                let offset = offset as usize;
-                if offset + segment.members.len() > image.len() {
-                    return None;
-                }
-                image[offset..(offset + segment.members.len())]
-                    .copy_from_slice(&segment.members[..]);
-            }
-            _ => {
-                return None;
-            }
-        }
-    }
-
-    Some(image)
-}
-
 pub fn update(module: &mut Module, im: &Image) {
-    for (mem_id, mem) in &im.memories {
-        for data_id in &module.memories.get(*mem_id).data_segments {
-            module.data.delete(*data_id);
-        }
-        module.data.add(
-            DataKind::Active(ActiveData {
-                memory: *mem_id,
-                location: ActiveDataLocation::Absolute(0),
-            }),
-            mem.image.clone(),
-        );
+    for (&mem_id, mem) in &im.memories {
+        module.memory_mut(mem_id).segments.clear();
+        module.memory_mut(mem_id).segments.push(MemorySegment {
+            offset: 0,
+            data: mem.image.clone(),
+        });
     }
 }
 
 impl Image {
-    pub fn can_read(&self, memory: MemoryId, addr: u32, size: u32) -> bool {
+    pub fn can_read(&self, memory: Memory, addr: u32, size: u32) -> bool {
         let end = match addr.checked_add(size) {
             Some(end) => end,
             None => return false,
@@ -136,12 +82,12 @@ impl Image {
         (end as usize) <= image.len
     }
 
-    pub fn main_heap(&self) -> anyhow::Result<MemoryId> {
+    pub fn main_heap(&self) -> anyhow::Result<Memory> {
         self.main_heap
             .ok_or_else(|| anyhow::anyhow!("no main heap"))
     }
 
-    pub fn read_u8(&self, id: MemoryId, addr: u32) -> anyhow::Result<u8> {
+    pub fn read_u8(&self, id: Memory, addr: u32) -> anyhow::Result<u8> {
         let image = self.memories.get(&id).unwrap();
         image
             .image
@@ -150,7 +96,7 @@ impl Image {
             .ok_or_else(|| anyhow::anyhow!("Out of bounds"))
     }
 
-    pub fn read_u16(&self, id: MemoryId, addr: u32) -> anyhow::Result<u16> {
+    pub fn read_u16(&self, id: Memory, addr: u32) -> anyhow::Result<u16> {
         let image = self.memories.get(&id).unwrap();
         let addr = addr as usize;
         if (addr + 2) > image.len {
@@ -160,7 +106,7 @@ impl Image {
         Ok(u16::from_le_bytes([slice[0], slice[1]]))
     }
 
-    pub fn read_u32(&self, id: MemoryId, addr: u32) -> anyhow::Result<u32> {
+    pub fn read_u32(&self, id: Memory, addr: u32) -> anyhow::Result<u32> {
         let image = self.memories.get(&id).unwrap();
         let addr = addr as usize;
         if (addr + 4) > image.len {
@@ -170,19 +116,19 @@ impl Image {
         Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
     }
 
-    pub fn read_u64(&self, id: MemoryId, addr: u32) -> anyhow::Result<u64> {
+    pub fn read_u64(&self, id: Memory, addr: u32) -> anyhow::Result<u64> {
         let low = self.read_u32(id, addr)?;
         let high = self.read_u32(id, addr + 4)?;
         Ok((high as u64) << 32 | (low as u64))
     }
 
-    pub fn read_u128(&self, id: MemoryId, addr: u32) -> anyhow::Result<u128> {
+    pub fn read_u128(&self, id: Memory, addr: u32) -> anyhow::Result<u128> {
         let low = self.read_u64(id, addr)?;
         let high = self.read_u64(id, addr + 8)?;
         Ok((high as u128) << 64 | (low as u128))
     }
 
-    pub fn write_u8(&mut self, id: MemoryId, addr: u32, value: u8) -> anyhow::Result<()> {
+    pub fn write_u8(&mut self, id: Memory, addr: u32, value: u8) -> anyhow::Result<()> {
         let image = self.memories.get_mut(&id).unwrap();
         *image
             .image
@@ -191,7 +137,7 @@ impl Image {
         Ok(())
     }
 
-    pub fn write_u32(&mut self, id: MemoryId, addr: u32, value: u32) -> anyhow::Result<()> {
+    pub fn write_u32(&mut self, id: Memory, addr: u32, value: u32) -> anyhow::Result<()> {
         let image = self.memories.get_mut(&id).unwrap();
         let addr = addr as usize;
         if (addr + 4) > image.len {
@@ -202,7 +148,7 @@ impl Image {
         Ok(())
     }
 
-    pub fn func_ptr(&self, idx: u32) -> anyhow::Result<FunctionId> {
+    pub fn func_ptr(&self, idx: u32) -> anyhow::Result<Func> {
         let table = self
             .main_table
             .ok_or_else(|| anyhow::anyhow!("no main table"))?;
@@ -211,7 +157,7 @@ impl Image {
             .get(&table)
             .unwrap()
             .get(idx as usize)
-            .ok_or_else(|| anyhow::anyhow!("func ptr out of bounds"))?
-            .ok_or_else(|| anyhow::anyhow!("func table entry is null"))?)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("func ptr out of bounds"))?)
     }
 }

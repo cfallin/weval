@@ -38,6 +38,17 @@ impl WasmVal {
             _ => None,
         }
     }
+
+    pub fn from_bits(ty: waffle::Type, bits: u64) -> Option<Self> {
+        match ty {
+            waffle::Type::I32 => Some(WasmVal::I32(bits as u32)),
+            waffle::Type::I64 => Some(WasmVal::I64(bits)),
+            waffle::Type::F32 => Some(WasmVal::F32(bits as u32)),
+            waffle::Type::F64 => Some(WasmVal::F64(bits)),
+            waffle::Type::V128 => Some(WasmVal::V128(bits as u128)),
+            waffle::Type::FuncRef => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

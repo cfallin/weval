@@ -3,14 +3,15 @@
 use crate::image::Image;
 use crate::value::{Value, ValueTags};
 use std::collections::BTreeMap;
-use walrus::{ir::InstrSeqType, FunctionId, FunctionKind, GlobalId, LocalId, Module, ModuleTypes};
+use waffle::Global;
+use walrus::{ir::InstrSeqType, FunctionId, FunctionKind, LocalId, Module, ModuleTypes};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct State {
     /// Memory overlay. We store only aligned u32s here.
     pub mem_overlay: BTreeMap<u32, Value>,
     /// Global values.
-    pub globals: BTreeMap<GlobalId, Value>,
+    pub globals: BTreeMap<Global, Value>,
     /// Local values.
     pub locals: BTreeMap<LocalId, Value>,
     /// Operand stack. May be partial: describes the suffix of the
