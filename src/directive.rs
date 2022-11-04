@@ -2,7 +2,7 @@
 
 use crate::image::Image;
 use crate::intrinsics::find_global_data_by_exported_func;
-use crate::value::{Value, ValueTags, WasmVal};
+use crate::value::{AbstractValue, ValueTags, WasmVal};
 use waffle::{Func, Memory, Module};
 
 #[derive(Clone, Debug)]
@@ -10,7 +10,7 @@ pub struct Directive {
     /// Evaluate the given function.
     pub func: Func,
     /// Evaluate with the given parameter values fixed.
-    pub const_params: Vec<Value>,
+    pub const_params: Vec<AbstractValue>,
     /// Place the ID of the resulting specialized function at the
     /// given address in memory.
     pub func_index_out_addr: u32,
@@ -67,14 +67,14 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
         let tags = ValueTags::default();
         let value = if is_specialized != 0 {
             match ty {
-                0 => Value::Concrete(WasmVal::I32(im.read_u32(heap, arg_ptr + 8)?), tags),
-                1 => Value::Concrete(WasmVal::I64(im.read_u64(heap, arg_ptr + 8)?), tags),
-                2 => Value::Concrete(WasmVal::F32(im.read_u32(heap, arg_ptr + 8)?), tags),
-                3 => Value::Concrete(WasmVal::F64(im.read_u64(heap, arg_ptr + 8)?), tags),
+                0 => AbstractValue::Concrete(WasmVal::I32(im.read_u32(heap, arg_ptr + 8)?), tags),
+                1 => AbstractValue::Concrete(WasmVal::I64(im.read_u64(heap, arg_ptr + 8)?), tags),
+                2 => AbstractValue::Concrete(WasmVal::F32(im.read_u32(heap, arg_ptr + 8)?), tags),
+                3 => AbstractValue::Concrete(WasmVal::F64(im.read_u64(heap, arg_ptr + 8)?), tags),
                 _ => anyhow::bail!("Invalid type"),
             }
         } else {
-            Value::Runtime(tags)
+            AbstractValue::Runtime(tags)
         };
         const_params.push(value);
         arg_ptr += 16;

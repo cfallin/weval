@@ -18,7 +18,7 @@ use crate::image::Image;
 use crate::intrinsics::Intrinsics;
 use crate::stackify::stackify;
 use crate::state::State;
-use crate::value::{Value, ValueTags, WasmVal};
+use crate::value::{AbstractValue, ValueTags, WasmVal};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use walrus::{

@@ -73,7 +73,7 @@ impl State {
         let mut changed = false;
         changed |= map_meet_with(&mut self.mem_overlay, &other.mem_overlay);
         changed |= map_meet_with(&mut self.globals, &other.globals);
-        changed |= map_meet_with(&mut self.locals, &other.locals);
+        changed |= map_meet_with(&mut self.values, &other.values);
 
         // Meet stacks. Zip stacks backward, since they describe the
         // suffix of the stack. Grow our stack to the size of
@@ -93,38 +93,5 @@ impl State {
             }
         }
         changed
-    }
-
-    /// Create a clone of the state to flow into a block, taking args
-    /// from the parent block's stack.
-    pub fn subblock_state(&mut self, ty: InstrSeqType, tys: &ModuleTypes) -> State {
-        match ty {
-            InstrSeqType::Simple(_) => self.clone(),
-            InstrSeqType::MultiValue(ty) => {
-                let ty = tys.get(ty);
-                let n_params = ty.params().len();
-                let n_rets = ty.results().len();
-                let mut ret = self.clone();
-                // Split off params.
-                let param_vals = self.stack.split_off(self.stack.len() - n_params);
-                ret.stack = param_vals;
-                // Create `Top` values for result in this (fallthrough) state.
-                for _ in 0..n_rets {
-                    self.stack.push(Value::Top);
-                }
-                ret
-            }
-        }
-    }
-
-    /// Pop N values.
-    pub fn popn(&mut self, n: usize) {
-        assert!(self.stack.len() >= n);
-        self.stack.truncate(self.stack.len() - n);
-    }
-
-    /// Push N copies of the given value.
-    pub fn pushn(&mut self, n: usize, val: Value) {
-        self.stack.resize(self.stack.len() + n, val);
     }
 }
