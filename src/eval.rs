@@ -15,17 +15,17 @@
 
 use crate::directive::Directive;
 use crate::image::Image;
-use crate::intrinsics::Intrinsics;
-use crate::stackify::stackify;
-use crate::state::State;
-use crate::value::{AbstractValue, ValueTags, WasmVal};
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
-use walrus::{
-    ir::BinaryOp, ir::ExtendedLoad, ir::Instr, ir::InstrSeqId, ir::InstrSeqType, ir::LoadKind,
-    ir::UnaryOp, FunctionBuilder, FunctionKind, LocalFunction, Module, ModuleFunctions,
-    ModuleLocals, ModuleTypes, ValType,
-};
+use waffle::Module;
+
+pub fn partially_evaluate(
+    _module: &mut Module,
+    _im: &mut Image,
+    _directives: &[Directive],
+) -> anyhow::Result<()> {
+    todo!()
+}
+
+/*
 
 /// Partially evaluates according to the given directives.
 pub fn partially_evaluate(
@@ -1223,3 +1223,5 @@ fn rewrite_br_target(builder: &mut FunctionBuilder, edge: &TakenEdge, target: Ou
         _ => unreachable!(),
     }
 }
+
+*/

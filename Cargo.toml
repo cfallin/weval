@@ -9,7 +9,6 @@ edition = "2021"
 waffle = { path = "../waffle", version = "*" }
 anyhow = "*"
 structopt = "*"
-walrus = "*"
 wasm-encoder = "*"
 wasmparser = "*"
 log = "*"

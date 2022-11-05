@@ -51,7 +51,7 @@ fn maybe_mem_image(mem: &MemoryData) -> Option<MemImage> {
     let len = mem.initial_pages * WASM_PAGE;
     let mut image = vec![0; len];
 
-    for &segment in &mem.segments {
+    for segment in &mem.segments {
         image[segment.offset..(segment.offset + segment.data.len())]
             .copy_from_slice(&segment.data[..]);
     }
