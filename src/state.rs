@@ -64,13 +64,22 @@ impl Contexts {
             }
         }
     }
+
+    pub fn parent(&self, context: Context) -> Context {
+        self.contexts[context].0
+    }
+
+    pub fn leaf_element(&self, context: Context) -> ContextElem {
+        self.contexts[context].1
+    }
 }
 
 /// The flow-insensitive part of the satte.
 #[derive(Clone, Debug, Default)]
 pub struct SSAState {
-    /// Values of SSA `Value`s.
-    pub values: BTreeMap<Value, AbstractValue>,
+    /// AbstractValues and SSA `Value`s in specialized function of
+    /// generic function's SSA `Value`s.
+    pub values: BTreeMap<Value, (Value, AbstractValue)>,
 }
 
 /// The flow-sensitive part of the state.
@@ -82,7 +91,7 @@ pub struct ProgPointState {
     pub globals: BTreeMap<Global, AbstractValue>,
 }
 
-/// The state for a function body.
+/// The state for a function body during analysis.
 #[derive(Clone, Debug)]
 pub struct FunctionState {
     pub contexts: Contexts,
@@ -121,7 +130,6 @@ fn map_meet_with<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
     }
     for other_k in other.keys() {
         if !this.contains_key(other_k) {
-            // `Runtime` is a "bottom" value in the semilattice.
             this.insert(*other_k, AbstractValue::Runtime(ValueTags::default()));
             changed = true;
         }
@@ -129,8 +137,67 @@ fn map_meet_with<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
     changed
 }
 
+impl ProgPointState {
+    pub fn entry(im: &Image) -> ProgPointState {
+        let globals = im
+            .globals
+            .keys()
+            .map(|global| (*global, AbstractValue::Runtime(ValueTags::default())))
+            .collect();
+        ProgPointState {
+            mem_overlay: BTreeMap::new(),
+            globals,
+        }
+    }
+
+    pub fn meet_with(&mut self, other: &ProgPointState) -> bool {
+        let mut changed = false;
+        changed |= map_meet_with(&mut self.mem_overlay, &other.mem_overlay);
+        changed |= map_meet_with(&mut self.globals, &other.globals);
+        changed
+    }
+}
+
 impl FunctionState {
-    pub fn new(_im: &Image, _func: &FunctionBody, _args: Vec<AbstractValue>) -> FunctionState {
-        todo!()
+    pub fn new() -> FunctionState {
+        FunctionState {
+            contexts: Contexts::default(),
+            state: PerEntity::default(),
+        }
+    }
+
+    pub fn init_args(
+        &mut self,
+        orig_body: &FunctionBody,
+        specialized_body: &FunctionBody,
+        im: &Image,
+        args: &[AbstractValue],
+    ) {
+        // For each blockparam of the entry block, set the value of the SSA arg.
+        debug_assert_eq!(args.len(), orig_body.blocks[orig_body.entry].params.len());
+        debug_assert_eq!(
+            args.len(),
+            specialized_body.blocks[specialized_body.entry].params.len()
+        );
+        let ctx = Context::default();
+        for (((_, orig_value), (_, spec_value)), abs) in orig_body.blocks[orig_body.entry]
+            .params
+            .iter()
+            .zip(
+                specialized_body.blocks[specialized_body.entry]
+                    .params
+                    .iter(),
+            )
+            .zip(args.iter())
+        {
+            self.state[ctx]
+                .ssa
+                .values
+                .insert(*orig_value, (*spec_value, *abs));
+        }
+        let entry_state = ProgPointState::entry(im);
+        self.state[ctx]
+            .block_entry
+            .insert(orig_body.entry, entry_state);
     }
 }

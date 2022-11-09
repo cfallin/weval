@@ -1,31 +1,48 @@
 //! Partial evaluation.
 
 /* TODO:
-
-- if/else scheme
-- breaks out of blocks, and forward-edge state merging
-- loops and per-state loop unrolling
 - inlining
 - "memory renaming": connecting symbolic ops through the operand-stack
   memory region
 - more general memory-region handling: symbolic but unique
   (non-escaped) pointers, stack, operand-stack region, ...
-
 */
 
 use crate::directive::Directive;
 use crate::image::Image;
-use waffle::Module;
+use crate::intrinsics::Intrinsics;
+use crate::state::*;
+use crate::value::{AbstractValue, ValueTags, WasmVal};
+use std::collections::{HashMap, HashSet};
+use waffle::cfg::CFGInfo;
+use waffle::{
+    entity::EntityRef, Block, FunctionBody, Module, Operator, Terminator, Type, Value, ValueDef,
+};
 
-pub fn partially_evaluate(
-    _module: &mut Module,
-    _im: &mut Image,
-    _directives: &[Directive],
-) -> anyhow::Result<()> {
-    todo!()
+struct Evaluator<'a> {
+    /// Original function body.
+    generic: &'a FunctionBody,
+    /// Memory image.
+    image: &'a Image,
+    /// Domtree for function body.
+    cfg: CFGInfo,
+    /// State of SSA values and program points:
+    /// - per context:
+    ///   - per SSA number, an abstract value
+    ///   - per block, entry state for that block
+    state: FunctionState,
+    /// New function body.
+    func: FunctionBody,
+    /// Map of (ctx, block_in_generic) to specialized block_in_func.
+    block_map: HashMap<(Context, Block), Block>,
+    /// Map of (ctx, value_in_generic) to specialized value_in_func.
+    value_map: HashMap<(Context, Value), Value>,
+    /// Queue of blocks to (re)compute. List of (block_in_generic,
+    /// ctx, block_in_func).
+    queue: Vec<(Block, Context, Block)>,
+    /// Set to deduplicate `queue`.
+    queue_set: HashSet<(Block, Context)>,
 }
-
-/*
 
 /// Partially evaluates according to the given directives.
 pub fn partially_evaluate(
@@ -45,27 +62,283 @@ pub fn partially_evaluate(
         }
     }
 
-    // Update memory: regenerate as one large data segment for heap 0 from the image.
-    if let Some(main_heap_image) = im
-        .main_heap
-        .and_then(|main_heap| im.memories.get_mut(&main_heap))
-    {
-        for (addr, value) in mem_updates {
-            let addr = addr as usize;
-            if (addr + 4) > main_heap_image.image.len() {
-                log::warn!(
-                    "Cannot store function index for new function: address {:x} is out-of-bounds",
-                    addr
-                );
-                continue;
-            }
-            main_heap_image.image[addr..(addr + 4)].copy_from_slice(&value.to_le_bytes()[..]);
-        }
-        Ok(())
-    } else {
-        anyhow::bail!("No image for main heap: cannot update");
+    // Update memory.
+    let heap = im.main_heap()?;
+    for (addr, value) in mem_updates {
+        im.write_u32(heap, addr, value)?;
+    }
+    Ok(())
+}
+
+fn partially_evaluate_func(
+    module: &mut Module,
+    image: &Image,
+    intrinsics: &Intrinsics,
+    directive: &Directive,
+) -> anyhow::Result<Option<u32>> {
+    // Get function body.
+    let body = module
+        .func(directive.func)
+        .body()
+        .ok_or_else(|| anyhow::anyhow!("Attempt to specialize an import"))?;
+    let sig = module.func(directive.func).sig();
+
+    // Compute CFG info.
+    let cfg = CFGInfo::new(body);
+
+    // Build the evaluator.
+    let mut evaluator = Evaluator {
+        generic: body,
+        image,
+        cfg,
+        state: FunctionState::new(),
+        func: FunctionBody::new(module, sig),
+        block_map: HashMap::new(),
+        value_map: HashMap::new(),
+        queue: vec![],
+        queue_set: HashSet::new(),
+    };
+    evaluator.state.init_args(
+        body,
+        &mut evaluator.func,
+        image,
+        &directive.const_params[..],
+    );
+    evaluator.queue.push((
+        evaluator.generic.entry,
+        Context::default(),
+        evaluator.func.entry,
+    ));
+    evaluator
+        .queue_set
+        .insert((evaluator.generic.entry, Context::default()));
+    evaluator.evaluate();
+
+    let func = module.add_func(sig, evaluator.func);
+    Ok(Some(func.index() as u32))
+}
+
+fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {
+    match (ty, value) {
+        (Type::I32, WasmVal::I32(k)) => Some(Operator::I32Const { value: k as i32 }),
+        (Type::I64, WasmVal::I64(k)) => Some(Operator::I64Const { value: k as i64 }),
+        (Type::F32, WasmVal::F32(k)) => Some(Operator::F32Const {
+            value: waffle::wasmparser::Ieee32::from_bits(k as u32),
+        }),
+        (Type::F64, WasmVal::F64(k)) => Some(Operator::F64Const {
+            value: waffle::wasmparser::Ieee64::from_bits(k),
+        }),
+        _ => None,
     }
 }
+
+impl<'a> Evaluator<'a> {
+    fn evaluate(&mut self) {
+        while let Some((orig_block, ctx, new_block)) = self.queue.pop() {
+            self.queue_set.remove(&(orig_block, ctx));
+            self.evaluate_block(orig_block, ctx, new_block);
+        }
+    }
+
+    fn evaluate_block(&mut self, orig_block: Block, ctx: Context, new_block: Block) {
+        // Clear the block body each time we rebuild it -- we may be
+        // recomputing a specialization with an existing output.
+        self.func.blocks[new_block].insts.clear();
+
+        // Create program-point state.
+        let mut state = PointState {
+            context: ctx,
+            flow: self.state.state[ctx]
+                .block_entry
+                .get(&orig_block)
+                .cloned()
+                .unwrap(),
+        };
+
+        // Do the actual constant-prop, carrying the state across the
+        // block and updating flow-sensitive state, and updating SSA
+        // vals as well.
+        self.evaluate_block_body(orig_block, &mut state, new_block);
+        self.evaluate_term(orig_block, &mut state, new_block);
+    }
+
+    /// For a given value in the generic function, accessed in the
+    /// given context, find its abstract value and SSA value in the
+    /// specialized function.
+    fn use_value(&self, mut context: Context, orig_val: Value) -> (Value, AbstractValue) {
+        loop {
+            if let Some((val, abs)) = self.state.state[context].ssa.values.get(&orig_val) {
+                return (*val, *abs);
+            }
+            assert_ne!(context, Context::default());
+            context = self.state.contexts.parent(context);
+        }
+    }
+
+    fn def_value(
+        &mut self,
+        block: Block,
+        context: Context,
+        orig_val: Value,
+        val: Value,
+        abs: AbstractValue,
+        state: &mut PointState,
+    ) {
+        let changed = self.state.state[context]
+            .ssa
+            .values
+            .insert(orig_val, (val, abs))
+            .map(|(_, old_abs)| abs != old_abs)
+            .unwrap_or(true);
+
+        if changed {
+            if let &ValueDef::BlockParam(dest_block, idx, _) = &self.generic.values[orig_val] {
+                // We just updated a blockparam. If the block it is
+                // attached to is not dominated by our current block,
+                // then it won't be seen in this pass, so let's
+                // enqueue the block.
+                if !self.cfg.dominates(block, dest_block) {
+                    self.enqueue_block_if_existing(dest_block, state.context);
+                }
+            }
+        }
+    }
+
+    fn enqueue_block_if_existing(&mut self, orig_block: Block, context: Context) {
+        if let Some(block) = self.block_map.get(&(context, orig_block)).copied() {
+            if self.queue_set.insert((orig_block, context)) {
+                self.queue.push((orig_block, context, block));
+            }
+        }
+    }
+
+    fn evaluate_block_body(&mut self, orig_block: Block, state: &mut PointState, new_block: Block) {
+        // Reused below for each instruction.
+        let mut arg_abs_values = vec![];
+        let mut arg_values = vec![];
+
+        for &inst in &self.generic.blocks[orig_block].insts {
+            let input_ctx = state.context;
+            if let Some((result_value, result_abs)) = match &self.generic.values[inst] {
+                ValueDef::Alias(_) => {
+                    // Don't generate any new code; uses will be
+                    // rewritten. (We resolve aliases when
+                    // transcribing to specialized blocks, in other
+                    // words.)
+                    None
+                }
+                ValueDef::PickOutput(val, idx, ty) => {
+                    // Directly transcribe.
+                    let (val, _) = self.use_value(state.context, *val);
+                    Some((
+                        ValueDef::PickOutput(val, *idx, *ty),
+                        AbstractValue::Runtime(ValueTags::default()),
+                    ))
+                }
+                ValueDef::Operator(op, args, tys) => {
+                    // Collect AbstractValues for args.
+                    arg_abs_values.clear();
+                    arg_values.clear();
+                    for &arg in args {
+                        let arg = self.generic.resolve_alias(arg);
+                        let (val, abs) = self.use_value(state.context, arg);
+                        arg_abs_values.push(abs);
+                        arg_values.push(val);
+                    }
+
+                    // Eval the transfer-function for this operator.
+                    let result_abs_value =
+                        self.abstract_eval(*op, &arg_abs_values[..], &arg_values[..], state);
+                    // Transcribe either the original operation, or a
+                    // constant, to the output.
+
+                    match result_abs_value {
+                        AbstractValue::Top => unreachable!(),
+                        AbstractValue::Concrete(bits, t) if tys.len() == 1 => {
+                            if let Some(const_op) = const_operator(tys[0], bits) {
+                                Some((
+                                    ValueDef::Operator(const_op, vec![], tys.clone()),
+                                    AbstractValue::Concrete(bits, t),
+                                ))
+                            } else {
+                                Some((
+                                    ValueDef::Operator(
+                                        *op,
+                                        std::mem::take(&mut arg_values),
+                                        tys.clone(),
+                                    ),
+                                    AbstractValue::Runtime(t),
+                                ))
+                            }
+                        }
+                        av => Some((
+                            ValueDef::Operator(*op, std::mem::take(&mut arg_values), tys.clone()),
+                            AbstractValue::Runtime(av.tags()),
+                        )),
+                    }
+                }
+                _ => unreachable!(
+                    "Invalid ValueDef in `insts` array for {} at {}",
+                    orig_block, inst
+                ),
+            } {
+                let result_value = self.func.add_value(result_value);
+                self.value_map.insert((input_ctx, inst), result_value);
+
+                self.def_value(orig_block, input_ctx, inst, result_value, result_abs, state);
+            }
+        }
+    }
+
+    fn target_block(&mut self, state: &mut PointState, orig_block: Block, target: Block) -> Block {
+        // TODO: alloc new block in specialized body and enqueue; or
+        // if existing, return existing, and re-enqueue if any SSA
+        // values changed or our point-state is not equal to entry
+        // state of given block.
+        todo!()
+    }
+
+    fn evaluate_term(&mut self, orig_block: Block, state: &mut PointState, new_block: Block) {
+        let new_term = match &self.generic.blocks[orig_block].terminator {
+            &Terminator::None => Terminator::None,
+            &Terminator::CondBr {
+                cond,
+                ref if_true,
+                ref if_false,
+            } => {
+                todo!()
+            }
+            &Terminator::Br { ref target } => {
+                todo!()
+            }
+            &Terminator::Select {
+                value,
+                ref targets,
+                ref default,
+            } => {
+                todo!()
+            }
+            &Terminator::Return { ref values } => {
+                todo!()
+            }
+            &Terminator::Unreachable => Terminator::Unreachable,
+        };
+        self.func.blocks[new_block].terminator = new_term;
+    }
+
+    fn abstract_eval(
+        &mut self,
+        op: Operator,
+        abs: &[AbstractValue],
+        values: &[Value],
+        state: &mut PointState,
+    ) -> AbstractValue {
+        // TODO
+        AbstractValue::Runtime(ValueTags::default())
+    }
+}
+
+/*
 
 fn partially_evaluate_func(
     module: &mut Module,

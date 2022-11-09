@@ -39,9 +39,10 @@ impl WasmVal {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AbstractValue {
     /// "top" default value; undefined.
+    #[default]
     Top,
     /// A value known at specialization time.
     ///
@@ -105,7 +106,7 @@ impl AbstractValue {
             (AbstractValue::Concrete(a, t1), AbstractValue::Concrete(b, t2)) if a == b => {
                 AbstractValue::Concrete(a, t1.meet(t2))
             }
-            (a, b) => AbstractValue::Runtime(a.tags().meet(b.tags())),
+            (av1, av2) => AbstractValue::Runtime(av1.tags().meet(av2.tags())),
         }
     }
 
