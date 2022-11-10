@@ -13,10 +13,13 @@ use crate::image::Image;
 use crate::intrinsics::Intrinsics;
 use crate::state::*;
 use crate::value::{AbstractValue, ValueTags, WasmVal};
-use std::collections::{HashMap, HashSet};
+use std::collections::{
+    btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, HashMap, HashSet,
+};
 use waffle::cfg::CFGInfo;
 use waffle::{
-    entity::EntityRef, Block, FunctionBody, Module, Operator, Terminator, Type, Value, ValueDef,
+    entity::EntityRef, Block, BlockTarget, FunctionBody, Module, Operator, Terminator, Type, Value,
+    ValueDef,
 };
 
 struct Evaluator<'a> {
@@ -182,7 +185,6 @@ impl<'a> Evaluator<'a> {
         orig_val: Value,
         val: Value,
         abs: AbstractValue,
-        state: &mut PointState,
     ) {
         let changed = self.state.state[context]
             .ssa
@@ -198,7 +200,7 @@ impl<'a> Evaluator<'a> {
                 // then it won't be seen in this pass, so let's
                 // enqueue the block.
                 if !self.cfg.dominates(block, dest_block) {
-                    self.enqueue_block_if_existing(dest_block, state.context);
+                    self.enqueue_block_if_existing(dest_block, context);
                 }
             }
         }
@@ -285,17 +287,77 @@ impl<'a> Evaluator<'a> {
                 let result_value = self.func.add_value(result_value);
                 self.value_map.insert((input_ctx, inst), result_value);
 
-                self.def_value(orig_block, input_ctx, inst, result_value, result_abs, state);
+                self.def_value(orig_block, input_ctx, inst, result_value, result_abs);
             }
         }
     }
 
-    fn target_block(&mut self, state: &mut PointState, orig_block: Block, target: Block) -> Block {
-        // TODO: alloc new block in specialized body and enqueue; or
-        // if existing, return existing, and re-enqueue if any SSA
-        // values changed or our point-state is not equal to entry
-        // state of given block.
-        todo!()
+    fn meet_into_block_entry(
+        &mut self,
+        block: Block,
+        context: Context,
+        state: &ProgPointState,
+    ) -> bool {
+        match self.state.state[context].block_entry.entry(block) {
+            BTreeEntry::Vacant(v) => {
+                v.insert(state.clone());
+                true
+            }
+            BTreeEntry::Occupied(mut o) => o.get_mut().meet_with(state),
+        }
+    }
+
+    fn target_block(&mut self, state: &PointState, orig_block: Block, target: Block) -> Block {
+        match self.block_map.entry((state.context, target)) {
+            HashEntry::Vacant(v) => {
+                let block = self.func.add_block();
+                for (ty, _) in &self.generic.blocks[target].params {
+                    self.func.add_blockparam(block, *ty);
+                }
+                self.queue_set.insert((target, state.context));
+                self.queue.push((target, state.context, block));
+                self.state.state[state.context]
+                    .block_entry
+                    .insert(target, state.flow.clone());
+                *v.insert(block)
+            }
+            HashEntry::Occupied(o) => {
+                let target_specialized = *o.get();
+                let changed = self.meet_into_block_entry(target, state.context, &state.flow);
+                // If we *don't* dominate this block and input changed, then re-enqueue.
+                if changed && !self.cfg.dominates(orig_block, target) {
+                    if self.queue_set.insert((target, state.context)) {
+                        self.queue.push((target, state.context, target_specialized));
+                    }
+                }
+                target_specialized
+            }
+        }
+    }
+
+    fn evaluate_block_target(
+        &mut self,
+        orig_block: Block,
+        state: &PointState,
+        target: &BlockTarget,
+    ) -> BlockTarget {
+        let mut args = vec![];
+        for (blockparam, arg) in self.generic.blocks[target.block]
+            .params
+            .iter()
+            .map(|(_, val)| *val)
+            .zip(target.args.iter().copied())
+        {
+            let (val, abs) = self.use_value(state.context, arg);
+            args.push(val);
+            self.def_value(orig_block, state.context, blockparam, val, abs);
+        }
+
+        let target_block = self.target_block(state, orig_block, target.block);
+        BlockTarget {
+            block: target_block,
+            args,
+        }
     }
 
     fn evaluate_term(&mut self, orig_block: Block, state: &mut PointState, new_block: Block) {
@@ -306,20 +368,59 @@ impl<'a> Evaluator<'a> {
                 ref if_true,
                 ref if_false,
             } => {
-                todo!()
+                let (cond, abs_cond) = self.use_value(state.context, cond);
+                match abs_cond.is_const_truthy() {
+                    Some(true) => Terminator::Br {
+                        target: self.evaluate_block_target(orig_block, state, if_true),
+                    },
+                    Some(false) => Terminator::Br {
+                        target: self.evaluate_block_target(orig_block, state, if_false),
+                    },
+                    None => Terminator::CondBr {
+                        cond,
+                        if_true: self.evaluate_block_target(orig_block, state, if_true),
+                        if_false: self.evaluate_block_target(orig_block, state, if_false),
+                    },
+                }
             }
-            &Terminator::Br { ref target } => {
-                todo!()
-            }
+            &Terminator::Br { ref target } => Terminator::Br {
+                target: self.evaluate_block_target(orig_block, state, target),
+            },
             &Terminator::Select {
                 value,
                 ref targets,
                 ref default,
             } => {
-                todo!()
+                let (value, abs_value) = self.use_value(state.context, value);
+                if let Some(selector) = abs_value.is_const_u32() {
+                    let selector = selector as usize;
+                    let target = if selector < targets.len() {
+                        &targets[selector]
+                    } else {
+                        default
+                    };
+                    Terminator::Br {
+                        target: self.evaluate_block_target(orig_block, state, target),
+                    }
+                } else {
+                    let targets = targets
+                        .iter()
+                        .map(|target| self.evaluate_block_target(orig_block, state, target))
+                        .collect::<Vec<_>>();
+                    let default = self.evaluate_block_target(orig_block, state, default);
+                    Terminator::Select {
+                        value,
+                        targets,
+                        default,
+                    }
+                }
             }
             &Terminator::Return { ref values } => {
-                todo!()
+                let values = values
+                    .iter()
+                    .map(|&value| self.use_value(state.context, value).0)
+                    .collect::<Vec<_>>();
+                Terminator::Return { values }
             }
             &Terminator::Unreachable => Terminator::Unreachable,
         };

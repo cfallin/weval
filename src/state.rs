@@ -83,7 +83,7 @@ pub struct SSAState {
 }
 
 /// The flow-sensitive part of the state.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProgPointState {
     /// Memory overlay. We store only aligned u32s here.
     pub mem_overlay: BTreeMap<u32, AbstractValue>,
