@@ -74,6 +74,8 @@ __attribute__((noinline))
 uint32_t weval_loop_pc32(uint32_t pc);
 __attribute__((noinline))
 uint64_t weval_loop_pc64(uint64_t pc);
+__attribute__((noinline))
+void weval_loop_end();
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -91,6 +93,9 @@ uint32_t loop_pc(uint32_t pc) {
 }
 uint64_t loop_pc(uint64_t pc) {
     return weval_loop_pc64(pc);
+}
+void loop_end() {
+    weval_loop_end();
 }
 
 }  // namespace weval

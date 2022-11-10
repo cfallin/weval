@@ -4,10 +4,11 @@ weval_req_t* weval_req_pending_head;
 weval_req_t* weval_req_freelist_head;
 
 static int __hook = 0;
+static int __loop_end = 0;
 
 __attribute__((export_name("weval.hook")))
 void set_hook() {
-    __hook = 1;
+    __hook = 1 + __loop_end;
 }
 
 
@@ -47,6 +48,11 @@ uint64_t weval_loop_pc64(uint64_t pc) {
     } else {
         return pc;
     }
+}
+
+__attribute__((export_name("wval.loop.end")))
+void weval_loop_end() {
+    __loop_end++;
 }
 
 __attribute__((export_name("weval.pending.head")))

@@ -7,6 +7,7 @@ pub struct Intrinsics {
     pub assume_const_memory: Option<Func>,
     pub loop_pc32: Option<Func>,
     pub loop_pc64: Option<Func>,
+    pub loop_end: Option<Func>,
 }
 
 impl Intrinsics {
@@ -20,6 +21,7 @@ impl Intrinsics {
             ),
             loop_pc32: find_exported_func(module, "weval.loop.pc32", &[Type::I32], &[Type::I32]),
             loop_pc64: find_exported_func(module, "weval.loop.pc64", &[Type::I64], &[Type::I64]),
+            loop_end: find_exported_func(module, "weval.loop.end", &[], &[]),
         }
     }
 }

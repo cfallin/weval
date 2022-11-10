@@ -39,6 +39,19 @@ impl WasmVal {
     }
 }
 
+impl std::convert::TryFrom<waffle::Operator> for WasmVal {
+    type Error = ();
+    fn try_from(op: waffle::Operator) -> Result<Self, Self::Error> {
+        match op {
+            waffle::Operator::I32Const { value } => Ok(WasmVal::I32(value as u32)),
+            waffle::Operator::I64Const { value } => Ok(WasmVal::I64(value as u64)),
+            waffle::Operator::F32Const { value } => Ok(WasmVal::F32(value.bits())),
+            waffle::Operator::F64Const { value } => Ok(WasmVal::F64(value.bits())),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AbstractValue {
     /// "top" default value; undefined.
@@ -116,6 +129,14 @@ impl AbstractValue {
             _ => None,
         }
     }
+
+    pub fn is_const_u64(&self) -> Option<u64> {
+        match self {
+            &AbstractValue::Concrete(WasmVal::I64(k), _) => Some(k),
+            _ => None,
+        }
+    }
+
 
     pub fn is_const_truthy(&self) -> Option<bool> {
         self.is_const_u32().map(|k| k != 0)

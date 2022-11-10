@@ -25,6 +25,8 @@ use waffle::{
 struct Evaluator<'a> {
     /// Original function body.
     generic: &'a FunctionBody,
+    /// Intrinsic function indices.
+    intrinsics: &'a Intrinsics,
     /// Memory image.
     image: &'a Image,
     /// Domtree for function body.
@@ -92,6 +94,7 @@ fn partially_evaluate_func(
     // Build the evaluator.
     let mut evaluator = Evaluator {
         generic: body,
+        intrinsics,
         image,
         cfg,
         state: FunctionState::new(),
@@ -249,14 +252,15 @@ impl<'a> Evaluator<'a> {
                     }
 
                     // Eval the transfer-function for this operator.
-                    let result_abs_value =
+                    let (result_abs_value, is_intrinsic_ident) =
                         self.abstract_eval(*op, &arg_abs_values[..], &arg_values[..], state);
                     // Transcribe either the original operation, or a
                     // constant, to the output.
 
-                    match result_abs_value {
-                        AbstractValue::Top => unreachable!(),
-                        AbstractValue::Concrete(bits, t) if tys.len() == 1 => {
+                    match (is_intrinsic_ident, result_abs_value) {
+                        (_, AbstractValue::Top) => unreachable!(),
+                        (true, av) => Some((ValueDef::Alias(arg_values[0]), av)),
+                        (_, AbstractValue::Concrete(bits, t)) if tys.len() == 1 => {
                             if let Some(const_op) = const_operator(tys[0], bits) {
                                 Some((
                                     ValueDef::Operator(const_op, vec![], tys.clone()),
@@ -273,7 +277,7 @@ impl<'a> Evaluator<'a> {
                                 ))
                             }
                         }
-                        av => Some((
+                        (_, av) => Some((
                             ValueDef::Operator(*op, std::mem::take(&mut arg_values), tys.clone()),
                             AbstractValue::Runtime(av.tags()),
                         )),
@@ -433,9 +437,171 @@ impl<'a> Evaluator<'a> {
         abs: &[AbstractValue],
         values: &[Value],
         state: &mut PointState,
+    ) -> (AbstractValue, bool) {
+        debug_assert_eq!(abs.len(), values.len());
+
+        if let Some(ret) = self.abstract_eval_intrinsic(op, abs, values, state) {
+            return (ret, true);
+        }
+
+        let ret = match abs.len() {
+            0 => self.abstract_eval_nullary(op, state),
+            1 => self.abstract_eval_unary(op, abs[0], values[0], state),
+            2 => self.abstract_eval_binary(op, abs[0], abs[1], values[0], values[1], state),
+            3 => self.abstract_eval_ternary(
+                op, abs[0], abs[1], abs[2], values[0], values[1], values[2], state,
+            ),
+            _ => AbstractValue::Runtime(ValueTags::default()),
+        };
+        (ret, false)
+    }
+
+    fn abstract_eval_intrinsic(
+        &mut self,
+        op: Operator,
+        abs: &[AbstractValue],
+        values: &[Value],
+        state: &mut PointState,
+    ) -> Option<AbstractValue> {
+        match op {
+            Operator::Call { function_index } => {
+                if Some(function_index) == self.intrinsics.assume_const_memory {
+                    Some(abs[0].with_tags(ValueTags::const_memory()))
+                } else if Some(function_index) == self.intrinsics.loop_pc32 {
+                    let pc = abs[0].is_const_u32().map(|pc| pc as u64);
+                    state.context = self
+                        .state
+                        .contexts
+                        .create(Some(state.context), ContextElem(pc));
+                    Some(abs[0])
+                } else if Some(function_index) == self.intrinsics.loop_pc64 {
+                    let pc = abs[0].is_const_u64();
+                    state.context = self
+                        .state
+                        .contexts
+                        .create(Some(state.context), ContextElem(pc));
+                    Some(abs[0])
+                } else if Some(function_index) == self.intrinsics.loop_end {
+                    state.context = self.state.contexts.parent(state.context);
+                    Some(AbstractValue::Runtime(ValueTags::default()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn abstract_eval_nullary(&mut self, op: Operator, state: &mut PointState) -> AbstractValue {
+        match op {
+            Operator::GlobalGet { global_index } => state
+                .flow
+                .globals
+                .get(&global_index)
+                .cloned()
+                .unwrap_or(AbstractValue::Runtime(ValueTags::default())),
+            Operator::I32Const { .. }
+            | Operator::I64Const { .. }
+            | Operator::F32Const { .. }
+            | Operator::F64Const { .. } => {
+                AbstractValue::Concrete(WasmVal::try_from(op).unwrap(), ValueTags::default())
+            }
+            _ => AbstractValue::Runtime(ValueTags::default()),
+        }
+    }
+
+    fn abstract_eval_unary(
+        &mut self,
+        op: Operator,
+        x: AbstractValue,
+        x_val: Value,
+        state: &mut PointState,
     ) -> AbstractValue {
-        // TODO
-        AbstractValue::Runtime(ValueTags::default())
+        match (op, x) {
+            (Operator::GlobalSet { global_index }, av) => {
+                state.flow.globals.insert(global_index, av);
+                AbstractValue::Runtime(ValueTags::default())
+            }
+            (Operator::I32Eqz, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I32(if k == 0 { 1 } else { 0 }), t)
+            }
+            (Operator::I64Eqz, AbstractValue::Concrete(WasmVal::I64(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I64(if k == 0 { 1 } else { 0 }), t)
+            }
+            (Operator::I32Extend8S, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I32(k as i8 as i32 as u32), t)
+            }
+            (Operator::I32Extend16S, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I32(k as i16 as i32 as u32), t)
+            }
+            (Operator::I64Extend8S, AbstractValue::Concrete(WasmVal::I64(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I64(k as i8 as i64 as u64), t)
+            }
+            (Operator::I64Extend16S, AbstractValue::Concrete(WasmVal::I64(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I64(k as i16 as i64 as u64), t)
+            }
+            (Operator::I64Extend32S, AbstractValue::Concrete(WasmVal::I64(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I64(k as i32 as i64 as u64), t)
+            }
+            (Operator::I32Clz, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I32(k.leading_zeros()), t)
+            }
+            (Operator::I64Clz, AbstractValue::Concrete(WasmVal::I64(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I64(k.leading_zeros() as u64), t)
+            }
+            (Operator::I32Ctz, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I32(k.trailing_zeros()), t)
+            }
+            (Operator::I64Ctz, AbstractValue::Concrete(WasmVal::I64(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I64(k.trailing_zeros() as u64), t)
+            }
+            (Operator::I32Popcnt, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I32(k.count_ones()), t)
+            }
+            (Operator::I64Popcnt, AbstractValue::Concrete(WasmVal::I64(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I64(k.count_ones() as u64), t)
+            }
+            (Operator::I32WrapI64, AbstractValue::Concrete(WasmVal::I64(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I32(k as u32), t)
+            }
+            (Operator::I64ExtendI32S, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I64(k as i32 as i64 as u64), t)
+            }
+            (Operator::I64ExtendI32U, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
+                AbstractValue::Concrete(WasmVal::I64(k as u64), t)
+            }
+
+            // TODO: FP and SIMD
+
+            // TODO: loads from symbolic addresses
+            _ => AbstractValue::Runtime(ValueTags::default()),
+        }
+    }
+
+    fn abstract_eval_binary(
+        &mut self,
+        op: Operator,
+        x: AbstractValue,
+        y: AbstractValue,
+        x_val: Value,
+        y_val: Value,
+        state: &mut PointState,
+    ) -> AbstractValue {
+        todo!()
+    }
+
+    fn abstract_eval_ternary(
+        &mut self,
+        op: Operator,
+        x: AbstractValue,
+        y: AbstractValue,
+        z: AbstractValue,
+        x_val: Value,
+        y_val: Value,
+        z_val: Value,
+        state: &mut PointState,
+    ) -> AbstractValue {
+        todo!()
     }
 }
 
