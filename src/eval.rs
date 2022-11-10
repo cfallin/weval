@@ -52,6 +52,8 @@ struct Evaluator<'a> {
     queue: VecDeque<(Block, Context, Block)>,
     /// Set to deduplicate `queue`.
     queue_set: HashSet<(Block, Context)>,
+    /// Header blocks.
+    header_blocks: HashSet<Block>,
 }
 
 /// Partially evaluates according to the given directives.
@@ -114,6 +116,7 @@ fn partially_evaluate_func(
         value_map: HashMap::new(),
         queue: VecDeque::new(),
         queue_set: HashSet::new(),
+        header_blocks: HashSet::new(),
     };
     let ctx = evaluator.state.init_args(
         body,
@@ -121,6 +124,7 @@ fn partially_evaluate_func(
         image,
         &directive.const_params[..],
     );
+    evaluator.compute_header_blocks();
     log::trace!("after init_args, state is {:?}", evaluator.state);
     evaluator
         .queue
@@ -388,7 +392,12 @@ impl<'a> Evaluator<'a> {
         block
     }
 
-    fn target_block(&mut self, state: &PointState, orig_block: Block, target: Block) -> Block {
+    fn target_block(
+        &mut self,
+        state: &PointState,
+        orig_block: Block,
+        target: Block,
+    ) -> (Block, Context) {
         log::trace!(
             "targeting block {} from {}, in context {}",
             target,
@@ -397,6 +406,7 @@ impl<'a> Evaluator<'a> {
         );
 
         let mut target_context = state.context;
+        // Pop and/or update PC if needed.
         let updated_state = loop {
             let elem = self.state.contexts.leaf_element(target_context);
             if elem.1 == self.generic.entry {
@@ -444,6 +454,24 @@ impl<'a> Evaluator<'a> {
                 break Cow::Borrowed(state);
             }
         };
+        // Push new context elem if entering a loop.
+        let updated_state =
+            if self.header_blocks.contains(&target) && !self.cfg.dominates(target, orig_block) {
+                let context = self
+                    .state
+                    .contexts
+                    .create(Some(updated_state.context), ContextElem(None, target));
+                let mut updated_state = updated_state.into_owned();
+                updated_state.context = context;
+                log::trace!(
+                    "pushing context for loop header {}: now {}",
+                    target,
+                    context
+                );
+                Cow::Owned(updated_state)
+            } else {
+                updated_state
+            };
 
         match self.block_map.entry((updated_state.context, target)) {
             HashEntry::Vacant(_) => {
@@ -452,7 +480,7 @@ impl<'a> Evaluator<'a> {
                     .insert((updated_state.context, target), block);
                 self.queue_set.insert((target, updated_state.context));
                 self.queue.push_back((target, updated_state.context, block));
-                block
+                (block, updated_state.context)
             }
             HashEntry::Occupied(o) => {
                 let target_specialized = *o.get();
@@ -464,7 +492,7 @@ impl<'a> Evaluator<'a> {
                             .push_back((target, updated_state.context, target_specialized));
                     }
                 }
-                target_specialized
+                (target_specialized, updated_state.context)
             }
         }
     }
@@ -482,6 +510,9 @@ impl<'a> Evaluator<'a> {
             state.context,
             target
         );
+
+        let (target_block, target_ctx) = self.target_block(state, orig_block, target.block);
+
         for (blockparam, arg) in self.generic.blocks[target.block]
             .params
             .iter()
@@ -498,10 +529,9 @@ impl<'a> Evaluator<'a> {
                 val,
                 abs
             );
-            self.def_value(orig_block, state.context, blockparam, val, abs);
+            self.def_value(orig_block, target_ctx, blockparam, val, abs);
         }
 
-        let target_block = self.target_block(state, orig_block, target.block);
         BlockTarget {
             block: target_block,
             args,
@@ -612,7 +642,7 @@ impl<'a> Evaluator<'a> {
 
     fn abstract_eval_intrinsic(
         &mut self,
-        orig_block: Block,
+        _orig_block: Block,
         op: Operator,
         abs: &[AbstractValue],
         values: &[Value],
@@ -622,17 +652,6 @@ impl<'a> Evaluator<'a> {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.assume_const_memory {
                     Some((abs[0].with_tags(ValueTags::const_memory()), Some(values[0])))
-                } else if Some(function_index) == self.intrinsics.loop_header {
-                    // If leaf elem of context is already this loop,
-                    // leave it be; otherwise add the context.
-                    if self.state.contexts.leaf_element(state.context).1 != orig_block {
-                        state.context = self
-                            .state
-                            .contexts
-                            .create(Some(state.context), ContextElem(None, orig_block));
-                        log::trace!("push context: header {} -> {}", orig_block, state.context);
-                    }
-                    Some((AbstractValue::Runtime(ValueTags::default()), None))
                 } else if Some(function_index) == self.intrinsics.loop_pc32_update {
                     let pc = abs[0].is_const_u32().map(|pc| pc as u64);
                     state.flow.staged_pc = StagedPC::Some(pc);
@@ -1062,6 +1081,21 @@ impl<'a> Evaluator<'a> {
                 }
             }
             _ => AbstractValue::Runtime(ValueTags::default()),
+        }
+    }
+
+    fn compute_header_blocks(&mut self) {
+        for (block, block_def) in self.generic.blocks.entries() {
+            for &inst in &block_def.insts {
+                if let ValueDef::Operator(Operator::Call { function_index }, ..) =
+                    &self.generic.values[inst]
+                {
+                    if Some(*function_index) == self.intrinsics.loop_header {
+                        self.header_blocks.insert(block);
+                        break;
+                    }
+                }
+            }
         }
     }
 }
