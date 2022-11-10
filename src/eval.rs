@@ -97,6 +97,8 @@ fn partially_evaluate_func(
     // Compute CFG info.
     let cfg = CFGInfo::new(body);
 
+    log::trace!("CFGInfo: {:?}", cfg);
+
     // Build the evaluator.
     let mut evaluator = Evaluator {
         generic: body,
@@ -111,20 +113,17 @@ fn partially_evaluate_func(
         queue: VecDeque::new(),
         queue_set: HashSet::new(),
     };
-    evaluator.state.init_args(
+    let ctx = evaluator.state.init_args(
         body,
         &mut evaluator.func,
         image,
         &directive.const_params[..],
     );
-    evaluator.queue.push_back((
-        evaluator.generic.entry,
-        Context::default(),
-        evaluator.func.entry,
-    ));
+    log::trace!("after init_args, state is {:?}", evaluator.state);
     evaluator
-        .queue_set
-        .insert((evaluator.generic.entry, Context::default()));
+        .queue
+        .push_back((evaluator.generic.entry, ctx, evaluator.func.entry));
+    evaluator.queue_set.insert((evaluator.generic.entry, ctx));
     evaluator.evaluate();
 
     log::debug!("Adding func:\n{}", evaluator.func.display("| "));
@@ -519,6 +518,7 @@ impl<'a> Evaluator<'a> {
                         .state
                         .contexts
                         .create(Some(state.context), ContextElem(pc));
+                    log::trace!("push PC: {:?} -> {}", pc, state.context);
                     Some(abs[0])
                 } else if Some(function_index) == self.intrinsics.loop_pc64 {
                     let pc = abs[0].is_const_u64();
@@ -526,9 +526,11 @@ impl<'a> Evaluator<'a> {
                         .state
                         .contexts
                         .create(Some(state.context), ContextElem(pc));
+                    log::trace!("push PC: {:?} -> {}", pc, state.context);
                     Some(abs[0])
                 } else if Some(function_index) == self.intrinsics.loop_end {
                     state.context = self.state.contexts.parent(state.context);
+                    log::trace!("pop PC -> {}", state.context);
                     Some(AbstractValue::Runtime(ValueTags::default()))
                 } else {
                     None

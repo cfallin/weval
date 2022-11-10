@@ -47,7 +47,7 @@ waffle::declare_entity!(Context, "context");
 pub struct ContextElem(pub Option<u64>);
 
 /// Arena of contexts.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct Contexts {
     contexts: EntityVec<Context, (Context, ContextElem)>,
     dedup: HashMap<(Context, ContextElem), Context>, // map from (parent, tail_elem) to ID
@@ -172,14 +172,14 @@ impl FunctionState {
         specialized_body: &FunctionBody,
         im: &Image,
         args: &[AbstractValue],
-    ) {
+    ) -> Context {
         // For each blockparam of the entry block, set the value of the SSA arg.
         debug_assert_eq!(args.len(), orig_body.blocks[orig_body.entry].params.len());
         debug_assert_eq!(
             args.len(),
             specialized_body.blocks[specialized_body.entry].params.len()
         );
-        let ctx = Context::default();
+        let ctx = self.contexts.create(None, ContextElem(None));
         for (((_, orig_value), (_, spec_value)), abs) in orig_body.blocks[orig_body.entry]
             .params
             .iter()
@@ -199,5 +199,6 @@ impl FunctionState {
         self.state[ctx]
             .block_entry
             .insert(orig_body.entry, entry_state);
+        ctx
     }
 }

@@ -50,7 +50,7 @@ uint64_t weval_loop_pc64(uint64_t pc) {
     }
 }
 
-__attribute__((export_name("wval.loop.end")))
+__attribute__((export_name("weval.loop.end")))
 void weval_loop_end() {
     __loop_end++;
 }

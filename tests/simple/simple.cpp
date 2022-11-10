@@ -40,10 +40,12 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     insts = weval::assume_const_memory(insts);
     uint32_t pc = 0;
 
+    pc = weval::loop_pc(pc);
     while (true) {
-        pc = weval::loop_pc(pc);
         const Inst* inst = &insts[pc];
         pc++;
+        weval::loop_end();
+        weval::loop_pc(pc);
         switch (inst->opcode) {
             case PushConst:
                 if (state->opstack_len + 1 > OPSTACK_SIZE) {
@@ -110,6 +112,8 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                     return false;
                 }
                 pc = inst->imm;
+                weval::loop_end();
+                weval::loop_pc(pc);
                 break;
             case GotoIf:
                 if (state->opstack_len == 0) {
@@ -121,6 +125,8 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                 state->opstack_len--;
                 if (state->opstack[state->opstack_len] != 0) {
                     pc = inst->imm;
+                    weval::loop_end();
+                    weval::loop_pc(pc);
                 }
                 break;
             case Exit:
