@@ -578,18 +578,62 @@ impl<'a> Evaluator<'a> {
             | (Operator::I32Load16S { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
                 if t.contains(ValueTags::const_memory()) =>
             {
-                let (conv, size) = match op {
-                    Operator::I32Load { .. } => (|x: u64| x as u32, 4),
-                    Operator::I32Load8U { .. } => (|x: u64| x as u8 as u32, 1),
-                    Operator::I32Load8S { .. } => (|x: u64| x as i8 as i32 as u32, 1),
-                    Operator::I32Load16U { .. } => (|x: u64| x as u16 as u32, 16),
-                    Operator::I32Load16S { .. } => (|x: u64| x as i16 as i32 as u32, 16),
+                let size = match op {
+                    Operator::I32Load { .. } => 4,
+                    Operator::I32Load8U { .. } => 1,
+                    Operator::I32Load8S { .. } => 1,
+                    Operator::I32Load16U { .. } => 2,
+                    Operator::I32Load16S { .. } => 2,
+                    _ => unreachable!(),
+                };
+                let conv = |x: u64| match op {
+                    Operator::I32Load { .. } => x as u32,
+                    Operator::I32Load8U { .. } => x as u8 as u32,
+                    Operator::I32Load8S { .. } => x as i8 as i32 as u32,
+                    Operator::I32Load16U { .. } => x as u16 as u32,
+                    Operator::I32Load16S { .. } => x as i16 as i32 as u32,
                     _ => unreachable!(),
                 };
 
                 self.image
                     .read_size(memory.memory, k + memory.offset as u32, size)
                     .map(|data| AbstractValue::Concrete(WasmVal::I32(conv(data)), t))
+                    .unwrap_or(AbstractValue::Runtime(ValueTags::default()))
+            }
+
+            (Operator::I64Load { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+            | (Operator::I64Load8U { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+            | (Operator::I64Load8S { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+            | (Operator::I64Load16U { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+            | (Operator::I64Load16S { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+            | (Operator::I64Load32U { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+            | (Operator::I64Load32S { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+                if t.contains(ValueTags::const_memory()) =>
+            {
+                let size = match op {
+                    Operator::I64Load { .. } => 8,
+                    Operator::I64Load8U { .. } => 1,
+                    Operator::I64Load8S { .. } => 1,
+                    Operator::I64Load16U { .. } => 2,
+                    Operator::I64Load16S { .. } => 2,
+                    Operator::I64Load32U { .. } => 4,
+                    Operator::I64Load32S { .. } => 4,
+                    _ => unreachable!(),
+                };
+                let conv = |x: u64| match op {
+                    Operator::I64Load { .. } => x,
+                    Operator::I64Load8U { .. } => x as u8 as u64,
+                    Operator::I64Load8S { .. } => x as i8 as i64 as u64,
+                    Operator::I64Load16U { .. } => x as u16 as u64,
+                    Operator::I64Load16S { .. } => x as i16 as i64 as u64,
+                    Operator::I64Load32U { .. } => x as u32 as u64,
+                    Operator::I64Load32S { .. } => x as i32 as i64 as u64,
+                    _ => unreachable!(),
+                };
+
+                self.image
+                    .read_size(memory.memory, k + memory.offset as u32, size)
+                    .map(|data| AbstractValue::Concrete(WasmVal::I64(conv(data)), t))
                     .unwrap_or(AbstractValue::Runtime(ValueTags::default()))
             }
 
