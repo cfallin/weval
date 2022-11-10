@@ -128,6 +128,16 @@ impl Image {
         Ok((high as u128) << 64 | (low as u128))
     }
 
+    pub fn read_size(&self, id: Memory, addr: u32, size: u8) -> anyhow::Result<u64> {
+        match size {
+            1 => self.read_u8(id, addr).map(|x| x as u64),
+            2 => self.read_u16(id, addr).map(|x| x as u64),
+            4 => self.read_u32(id, addr).map(|x| x as u64),
+            8 => self.read_u64(id, addr),
+            _ => panic!("bad size"),
+        }
+    }
+
     pub fn write_u8(&mut self, id: Memory, addr: u32, value: u8) -> anyhow::Result<()> {
         let image = self.memories.get_mut(&id).unwrap();
         *image

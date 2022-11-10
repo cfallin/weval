@@ -571,9 +571,29 @@ impl<'a> Evaluator<'a> {
                 AbstractValue::Concrete(WasmVal::I64(k as u64), t)
             }
 
-            // TODO: FP and SIMD
+            (Operator::I32Load { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+            | (Operator::I32Load8U { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+            | (Operator::I32Load8S { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+            | (Operator::I32Load16U { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+            | (Operator::I32Load16S { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
+                if t.contains(ValueTags::const_memory()) =>
+            {
+                let (conv, size) = match op {
+                    Operator::I32Load { .. } => (|x: u64| x as u32, 4),
+                    Operator::I32Load8U { .. } => (|x: u64| x as u8 as u32, 1),
+                    Operator::I32Load8S { .. } => (|x: u64| x as i8 as i32 as u32, 1),
+                    Operator::I32Load16U { .. } => (|x: u64| x as u16 as u32, 16),
+                    Operator::I32Load16S { .. } => (|x: u64| x as i16 as i32 as u32, 16),
+                    _ => unreachable!(),
+                };
 
-            // TODO: loads from symbolic addresses
+                self.image
+                    .read_size(memory.memory, k + memory.offset as u32, size)
+                    .map(|data| AbstractValue::Concrete(WasmVal::I32(conv(data)), t))
+                    .unwrap_or(AbstractValue::Runtime(ValueTags::default()))
+            }
+
+            // TODO: FP and SIMD
             _ => AbstractValue::Runtime(ValueTags::default()),
         }
     }
