@@ -93,6 +93,7 @@ fn partially_evaluate_func(
     let sig = module.func(directive.func).sig();
 
     log::trace!("Specializing: {}", directive.func);
+    log::trace!("body:\n{}", body.display("| "));
 
     // Compute CFG info.
     let cfg = CFGInfo::new(body);
@@ -191,10 +192,22 @@ impl<'a> Evaluator<'a> {
         orig_block: Block,
         orig_val: Value,
     ) -> (Value, AbstractValue) {
+        log::trace!(
+            "using value {} at block {} in context {}",
+            orig_val,
+            orig_block,
+            context
+        );
         let orig_context = context;
         let val_block = self.generic.value_blocks[orig_val];
         loop {
             if let Some((val, abs)) = self.state.state[context].ssa.values.get(&orig_val) {
+                log::trace!(
+                    " -> found specialized val {} with abstract value {:?} at context {}",
+                    val,
+                    abs,
+                    context
+                );
                 self.block_deps
                     .entry((context, val_block))
                     .or_insert_with(|| HashSet::new())
@@ -203,6 +216,7 @@ impl<'a> Evaluator<'a> {
             }
             assert_ne!(context, Context::default());
             context = self.state.contexts.parent(context);
+            log::trace!(" -> going up to parent context {}", context);
         }
     }
 
@@ -214,6 +228,14 @@ impl<'a> Evaluator<'a> {
         val: Value,
         abs: AbstractValue,
     ) {
+        log::trace!(
+            "defining val {} in block {} context {} with specialized val {} abs {:?}",
+            orig_val,
+            block,
+            context,
+            val,
+            abs
+        );
         let changed = match self.state.state[context].ssa.values.entry(orig_val) {
             BTreeEntry::Vacant(v) => {
                 v.insert((val, abs));
@@ -283,14 +305,14 @@ impl<'a> Evaluator<'a> {
                     }
 
                     // Eval the transfer-function for this operator.
-                    let (result_abs_value, is_intrinsic_ident) =
+                    let (result_abs_value, replace_value) =
                         self.abstract_eval(*op, &arg_abs_values[..], &arg_values[..], state);
                     // Transcribe either the original operation, or a
                     // constant, to the output.
 
-                    match (is_intrinsic_ident, result_abs_value) {
+                    match (replace_value, result_abs_value) {
                         (_, AbstractValue::Top) => unreachable!(),
-                        (true, av) => Some((ValueDef::Alias(arg_values[0]), av)),
+                        (Some(val), av) => Some((ValueDef::Alias(val), av)),
                         (_, AbstractValue::Concrete(bits, t)) if tys.len() == 1 => {
                             if let Some(const_op) = const_operator(tys[0], bits) {
                                 Some((
@@ -360,7 +382,7 @@ impl<'a> Evaluator<'a> {
         block
     }
 
-    fn target_block(&mut self, state: &PointState, orig_block: Block, target: Block) -> Block {
+    fn target_block(&mut self, state: &PointState, _orig_block: Block, target: Block) -> Block {
         match self.block_map.entry((state.context, target)) {
             HashEntry::Vacant(_) => {
                 let block = self.create_block(target, state.context, state.flow.clone());
@@ -372,8 +394,7 @@ impl<'a> Evaluator<'a> {
             HashEntry::Occupied(o) => {
                 let target_specialized = *o.get();
                 let changed = self.meet_into_block_entry(target, state.context, &state.flow);
-                // If we *don't* dominate this block and input changed, then re-enqueue.
-                if changed && !self.cfg.dominates(orig_block, target) {
+                if changed {
                     if self.queue_set.insert((target, state.context)) {
                         self.queue
                             .push_back((target, state.context, target_specialized));
@@ -391,6 +412,12 @@ impl<'a> Evaluator<'a> {
         target: &BlockTarget,
     ) -> BlockTarget {
         let mut args = vec![];
+        log::trace!(
+            "evaluate target: block {} context {} to {:?}",
+            orig_block,
+            state.context,
+            target
+        );
         for (blockparam, arg) in self.generic.blocks[target.block]
             .params
             .iter()
@@ -399,6 +426,14 @@ impl<'a> Evaluator<'a> {
         {
             let (val, abs) = self.use_value(state.context, orig_block, arg);
             args.push(val);
+            log::trace!(
+                "blockparam: block {} context {} to param {}: val {} abs {:?}",
+                orig_block,
+                state.context,
+                blockparam,
+                val,
+                abs
+            );
             self.def_value(orig_block, state.context, blockparam, val, abs);
         }
 
@@ -410,6 +445,13 @@ impl<'a> Evaluator<'a> {
     }
 
     fn evaluate_term(&mut self, orig_block: Block, state: &mut PointState, new_block: Block) {
+        log::trace!(
+            "evaluating terminator: block {} context {} specialized block {}: {:?}",
+            orig_block,
+            state.context,
+            new_block,
+            self.generic.blocks[orig_block].terminator
+        );
         let new_term = match &self.generic.blocks[orig_block].terminator {
             &Terminator::None => Terminator::None,
             &Terminator::CondBr {
@@ -482,11 +524,11 @@ impl<'a> Evaluator<'a> {
         abs: &[AbstractValue],
         values: &[Value],
         state: &mut PointState,
-    ) -> (AbstractValue, bool) {
+    ) -> (AbstractValue, Option<Value>) {
         debug_assert_eq!(abs.len(), values.len());
 
-        if let Some(ret) = self.abstract_eval_intrinsic(op, abs, values, state) {
-            return (ret, true);
+        if let Some((ret, replace_val)) = self.abstract_eval_intrinsic(op, abs, values, state) {
+            return (ret, replace_val);
         }
 
         let ret = match abs.len() {
@@ -498,20 +540,20 @@ impl<'a> Evaluator<'a> {
             ),
             _ => AbstractValue::Runtime(ValueTags::default()),
         };
-        (ret, false)
+        (ret, None)
     }
 
     fn abstract_eval_intrinsic(
         &mut self,
         op: Operator,
         abs: &[AbstractValue],
-        _values: &[Value],
+        values: &[Value],
         state: &mut PointState,
-    ) -> Option<AbstractValue> {
+    ) -> Option<(AbstractValue, Option<Value>)> {
         match op {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.assume_const_memory {
-                    Some(abs[0].with_tags(ValueTags::const_memory()))
+                    Some((abs[0].with_tags(ValueTags::const_memory()), Some(values[0])))
                 } else if Some(function_index) == self.intrinsics.loop_pc32 {
                     let pc = abs[0].is_const_u32().map(|pc| pc as u64);
                     state.context = self
@@ -519,7 +561,7 @@ impl<'a> Evaluator<'a> {
                         .contexts
                         .create(Some(state.context), ContextElem(pc));
                     log::trace!("push PC: {:?} -> {}", pc, state.context);
-                    Some(abs[0])
+                    Some((abs[0], Some(values[0])))
                 } else if Some(function_index) == self.intrinsics.loop_pc64 {
                     let pc = abs[0].is_const_u64();
                     state.context = self
@@ -527,11 +569,11 @@ impl<'a> Evaluator<'a> {
                         .contexts
                         .create(Some(state.context), ContextElem(pc));
                     log::trace!("push PC: {:?} -> {}", pc, state.context);
-                    Some(abs[0])
+                    Some((abs[0], Some(values[0])))
                 } else if Some(function_index) == self.intrinsics.loop_end {
                     state.context = self.state.contexts.parent(state.context);
                     log::trace!("pop PC -> {}", state.context);
-                    Some(AbstractValue::Runtime(ValueTags::default()))
+                    Some((AbstractValue::Runtime(ValueTags::default()), None))
                 } else {
                     None
                 }
