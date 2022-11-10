@@ -42,6 +42,8 @@ fn main() -> anyhow::Result<()> {
     // Update memories in module.
     image::update(&mut module, &im);
 
+    log::debug!("Final module:\n{}", module.display());
+
     let bytes = module.to_wasm_bytes()?;
     std::fs::write(&opts.output_module, &bytes[..])?;
 

@@ -120,6 +120,7 @@ fn partially_evaluate_func(
         .insert((evaluator.generic.entry, Context::default()));
     evaluator.evaluate();
 
+    log::debug!("Adding func:\n{}", evaluator.func.display("| "));
     let func = module.add_func(sig, evaluator.func);
     Ok(Some(func.index() as u32))
 }

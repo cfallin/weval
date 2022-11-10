@@ -62,6 +62,21 @@ pub fn find_global_data_by_exported_func(module: &Module, name: &str) -> Option<
                 _ => None,
             }
         }
+        Terminator::Br { target } => {
+            assert_eq!(target.args.len(), 1);
+            let val = match &body.values[target.args[0]] {
+                ValueDef::Operator(Operator::I32Const { value }, _, _) => *value as u32,
+                _ => return None,
+            };
+            match &body.blocks[target.block].terminator {
+                Terminator::Return { values }
+                    if values.len() == 1 && values[0] == body.blocks[target.block].params[0].1 =>
+                {
+                    Some(val)
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
