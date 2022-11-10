@@ -4,11 +4,10 @@ weval_req_t* weval_req_pending_head;
 weval_req_t* weval_req_freelist_head;
 
 static int __hook = 0;
-static int __loop_end = 0;
 
 __attribute__((export_name("weval.hook")))
 void set_hook() {
-    __hook = 1 + __loop_end;
+    __hook = 1;
 }
 
 
@@ -41,8 +40,8 @@ uint32_t weval_loop_pc32(uint32_t pc) {
     }
 }
 
-__attribute__((export_name("weval.loop.pc64")))
-uint64_t weval_loop_pc64(uint64_t pc) {
+__attribute__((export_name("weval.loop.pc32.update")))
+uint32_t weval_loop_pc32_update(uint32_t pc) {
     if (__hook) {
         return 3;
     } else {
@@ -50,10 +49,6 @@ uint64_t weval_loop_pc64(uint64_t pc) {
     }
 }
 
-__attribute__((export_name("weval.loop.end")))
-void weval_loop_end() {
-    __loop_end++;
-}
 
 __attribute__((export_name("weval.pending.head")))
 weval_req_t** __weval_pending_head() {

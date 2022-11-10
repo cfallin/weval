@@ -40,12 +40,15 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     insts = weval::assume_const_memory(insts);
     uint32_t pc = 0;
 
-    pc = weval::loop_pc(pc);
+    // TODO: build an abstraction for `pc`: `InterpreterPC<u32>` (and
+    // impls for u64 and T*) that have a `.loop([&](pc) { ... })`
+    // method that returns either LoopResult::next_pc(pc) or
+    // LoopResult::break_loop(val).
     while (true) {
+        weval::loop_pc(pc);
         const Inst* inst = &insts[pc];
         pc++;
-        weval::loop_end();
-        weval::loop_pc(pc);
+        weval::loop_pc_update(pc);
         switch (inst->opcode) {
             case PushConst:
                 if (state->opstack_len + 1 > OPSTACK_SIZE) {
@@ -112,8 +115,7 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                     return false;
                 }
                 pc = inst->imm;
-                weval::loop_end();
-                weval::loop_pc(pc);
+                weval::loop_pc_update(pc);
                 break;
             case GotoIf:
                 if (state->opstack_len == 0) {
@@ -125,8 +127,7 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                 state->opstack_len--;
                 if (state->opstack[state->opstack_len] != 0) {
                     pc = inst->imm;
-                    weval::loop_end();
-                    weval::loop_pc(pc);
+                    weval::loop_pc_update(pc);
                 }
                 break;
             case Exit:

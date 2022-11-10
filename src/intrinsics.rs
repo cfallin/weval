@@ -6,8 +6,7 @@ use waffle::{ExportKind, Func, FuncDecl, Module, Operator, Terminator, Type, Val
 pub struct Intrinsics {
     pub assume_const_memory: Option<Func>,
     pub loop_pc32: Option<Func>,
-    pub loop_pc64: Option<Func>,
-    pub loop_end: Option<Func>,
+    pub loop_pc32_update: Option<Func>,
 }
 
 impl Intrinsics {
@@ -20,8 +19,12 @@ impl Intrinsics {
                 &[Type::I32],
             ),
             loop_pc32: find_exported_func(module, "weval.loop.pc32", &[Type::I32], &[Type::I32]),
-            loop_pc64: find_exported_func(module, "weval.loop.pc64", &[Type::I64], &[Type::I64]),
-            loop_end: find_exported_func(module, "weval.loop.end", &[], &[]),
+            loop_pc32_update: find_exported_func(
+                module,
+                "weval.loop.pc32.update",
+                &[Type::I32],
+                &[Type::I32],
+            ),
         }
     }
 }

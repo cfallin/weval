@@ -73,9 +73,7 @@ const void* weval_assume_const_memory(const void* p);
 __attribute__((noinline))
 uint32_t weval_loop_pc32(uint32_t pc);
 __attribute__((noinline))
-uint64_t weval_loop_pc64(uint64_t pc);
-__attribute__((noinline))
-void weval_loop_end();
+uint32_t weval_loop_pc32_update(uint32_t pc);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -91,11 +89,9 @@ const T* assume_const_memory(const T* t) {
 uint32_t loop_pc(uint32_t pc) {
     return weval_loop_pc32(pc);
 }
-uint64_t loop_pc(uint64_t pc) {
-    return weval_loop_pc64(pc);
-}
-void loop_end() {
-    weval_loop_end();
+
+uint32_t loop_pc_update(uint32_t pc) {
+    return weval_loop_pc32_update(pc);
 }
 
 }  // namespace weval

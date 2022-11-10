@@ -305,8 +305,13 @@ impl<'a> Evaluator<'a> {
                     }
 
                     // Eval the transfer-function for this operator.
-                    let (result_abs_value, replace_value) =
-                        self.abstract_eval(*op, &arg_abs_values[..], &arg_values[..], state);
+                    let (result_abs_value, replace_value) = self.abstract_eval(
+                        orig_block,
+                        *op,
+                        &arg_abs_values[..],
+                        &arg_values[..],
+                        state,
+                    );
                     // Transcribe either the original operation, or a
                     // constant, to the output.
 
@@ -383,6 +388,19 @@ impl<'a> Evaluator<'a> {
     }
 
     fn target_block(&mut self, state: &PointState, _orig_block: Block, target: Block) -> Block {
+        let mut target_context = state.context;
+        loop {
+            let elem = self.state.contexts.leaf_element(target_context);
+            if elem.1 == self.generic.entry {
+                break;
+            }
+            if !self.cfg.dominates(elem.1, target) {
+                target_context = self.state.contexts.parent(target_context);
+            } else {
+                break;
+            }
+        }
+
         match self.block_map.entry((state.context, target)) {
             HashEntry::Vacant(_) => {
                 let block = self.create_block(target, state.context, state.flow.clone());
@@ -520,6 +538,7 @@ impl<'a> Evaluator<'a> {
 
     fn abstract_eval(
         &mut self,
+        orig_block: Block,
         op: Operator,
         abs: &[AbstractValue],
         values: &[Value],
@@ -527,7 +546,9 @@ impl<'a> Evaluator<'a> {
     ) -> (AbstractValue, Option<Value>) {
         debug_assert_eq!(abs.len(), values.len());
 
-        if let Some((ret, replace_val)) = self.abstract_eval_intrinsic(op, abs, values, state) {
+        if let Some((ret, replace_val)) =
+            self.abstract_eval_intrinsic(orig_block, op, abs, values, state)
+        {
             return (ret, replace_val);
         }
 
@@ -545,6 +566,7 @@ impl<'a> Evaluator<'a> {
 
     fn abstract_eval_intrinsic(
         &mut self,
+        orig_block: Block,
         op: Operator,
         abs: &[AbstractValue],
         values: &[Value],
@@ -559,21 +581,17 @@ impl<'a> Evaluator<'a> {
                     state.context = self
                         .state
                         .contexts
-                        .create(Some(state.context), ContextElem(pc));
+                        .create(Some(state.context), ContextElem(pc, orig_block));
                     log::trace!("push PC: {:?} -> {}", pc, state.context);
                     Some((abs[0], Some(values[0])))
-                } else if Some(function_index) == self.intrinsics.loop_pc64 {
-                    let pc = abs[0].is_const_u64();
-                    state.context = self
-                        .state
-                        .contexts
-                        .create(Some(state.context), ContextElem(pc));
-                    log::trace!("push PC: {:?} -> {}", pc, state.context);
+                } else if Some(function_index) == self.intrinsics.loop_pc32_update {
+                    let pc = abs[0].is_const_u32().map(|pc| pc as u64);
+                    let mut leaf = self.state.contexts.leaf_element(state.context);
+                    let parent = self.state.contexts.parent(state.context);
+                    leaf.0 = pc;
+                    state.context = self.state.contexts.create(Some(parent), leaf);
+                    log::trace!("change PC: {:?} -> {}", pc, state.context);
                     Some((abs[0], Some(values[0])))
-                } else if Some(function_index) == self.intrinsics.loop_end {
-                    state.context = self.state.contexts.parent(state.context);
-                    log::trace!("pop PC -> {}", state.context);
-                    Some((AbstractValue::Runtime(ValueTags::default()), None))
                 } else {
                     None
                 }

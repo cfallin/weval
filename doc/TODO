@@ -1,12 +1,7 @@
 SSA revamp:
 
-- update abstract state impl
-  - define "context": loop-PC stack
-  - for SSA values (including blockparams), abstract state for is
-    *flow-insensitive* but *context-sensitive* (for a given loop-PC
-     stack)
-  - for the memory overlay and globals, abstract state is
-    flow-sensitive as well as context-sensitive
-
-- rework const-evaluator
-  - toplevel workqueue of (bb, context)
+- define context in terms of domtree
+  - invariant: a value used at a block in a given context can only be
+    defined in that context or a parent context
+  - static pass to find blocks that set PC; in context, note block
+    where set, and pop when going to block not dom'd by it

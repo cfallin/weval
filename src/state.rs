@@ -43,8 +43,11 @@ use waffle::{Block, FunctionBody, Global, Value};
 
 waffle::declare_entity!(Context, "context");
 
+/// One element in the context stack: the loop PC, and the block that
+/// dominates the context (we automatically leave the context when
+/// crossing the dominance frontier of this block).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ContextElem(pub Option<u64>);
+pub struct ContextElem(pub Option<u64>, pub Block);
 
 /// Arena of contexts.
 #[derive(Clone, Default, Debug)]
@@ -179,7 +182,9 @@ impl FunctionState {
             args.len(),
             specialized_body.blocks[specialized_body.entry].params.len()
         );
-        let ctx = self.contexts.create(None, ContextElem(None));
+        let ctx = self
+            .contexts
+            .create(None, ContextElem(None, orig_body.entry));
         for (((_, orig_value), (_, spec_value)), abs) in orig_body.blocks[orig_body.entry]
             .params
             .iter()
