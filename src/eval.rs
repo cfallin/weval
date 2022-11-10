@@ -14,7 +14,7 @@ use crate::intrinsics::Intrinsics;
 use crate::state::*;
 use crate::value::{AbstractValue, ValueTags, WasmVal};
 use std::collections::{
-    btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, HashMap, HashSet,
+    btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, HashMap, HashSet, VecDeque,
 };
 use waffle::cfg::CFGInfo;
 use waffle::{
@@ -40,11 +40,15 @@ struct Evaluator<'a> {
     func: FunctionBody,
     /// Map of (ctx, block_in_generic) to specialized block_in_func.
     block_map: HashMap<(Context, Block), Block>,
+    /// Dependencies for updates: some use in a given block with a
+    /// given context occurs of a value defined in another block at
+    /// another context.
+    block_deps: HashMap<(Context, Block), HashSet<(Context, Block)>>,
     /// Map of (ctx, value_in_generic) to specialized value_in_func.
     value_map: HashMap<(Context, Value), Value>,
     /// Queue of blocks to (re)compute. List of (block_in_generic,
     /// ctx, block_in_func).
-    queue: Vec<(Block, Context, Block)>,
+    queue: VecDeque<(Block, Context, Block)>,
     /// Set to deduplicate `queue`.
     queue_set: HashSet<(Block, Context)>,
 }
@@ -88,6 +92,8 @@ fn partially_evaluate_func(
         .ok_or_else(|| anyhow::anyhow!("Attempt to specialize an import"))?;
     let sig = module.func(directive.func).sig();
 
+    log::trace!("Specializing: {}", directive.func);
+
     // Compute CFG info.
     let cfg = CFGInfo::new(body);
 
@@ -100,8 +106,9 @@ fn partially_evaluate_func(
         state: FunctionState::new(),
         func: FunctionBody::new(module, sig),
         block_map: HashMap::new(),
+        block_deps: HashMap::new(),
         value_map: HashMap::new(),
-        queue: vec![],
+        queue: VecDeque::new(),
         queue_set: HashSet::new(),
     };
     evaluator.state.init_args(
@@ -110,7 +117,7 @@ fn partially_evaluate_func(
         image,
         &directive.const_params[..],
     );
-    evaluator.queue.push((
+    evaluator.queue.push_back((
         evaluator.generic.entry,
         Context::default(),
         evaluator.func.entry,
@@ -141,7 +148,7 @@ fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {
 
 impl<'a> Evaluator<'a> {
     fn evaluate(&mut self) {
-        while let Some((orig_block, ctx, new_block)) = self.queue.pop() {
+        while let Some((orig_block, ctx, new_block)) = self.queue.pop_front() {
             self.queue_set.remove(&(orig_block, ctx));
             self.evaluate_block(orig_block, ctx, new_block);
         }
@@ -151,6 +158,13 @@ impl<'a> Evaluator<'a> {
         // Clear the block body each time we rebuild it -- we may be
         // recomputing a specialization with an existing output.
         self.func.blocks[new_block].insts.clear();
+
+        log::trace!(
+            "evaluate_block: orig {} ctx {} new {}",
+            orig_block,
+            ctx,
+            new_block
+        );
 
         // Create program-point state.
         let mut state = PointState {
@@ -170,11 +184,22 @@ impl<'a> Evaluator<'a> {
     }
 
     /// For a given value in the generic function, accessed in the
-    /// given context, find its abstract value and SSA value in the
-    /// specialized function.
-    fn use_value(&self, mut context: Context, orig_val: Value) -> (Value, AbstractValue) {
+    /// given context and at the given block, find its abstract value
+    /// and SSA value in the specialized function.
+    fn use_value(
+        &mut self,
+        mut context: Context,
+        orig_block: Block,
+        orig_val: Value,
+    ) -> (Value, AbstractValue) {
+        let orig_context = context;
+        let val_block = self.generic.value_blocks[orig_val];
         loop {
             if let Some((val, abs)) = self.state.state[context].ssa.values.get(&orig_val) {
+                self.block_deps
+                    .entry((context, val_block))
+                    .or_insert_with(|| HashSet::new())
+                    .insert((orig_context, orig_block));
                 return (*val, *abs);
             }
             assert_ne!(context, Context::default());
@@ -190,22 +215,28 @@ impl<'a> Evaluator<'a> {
         val: Value,
         abs: AbstractValue,
     ) {
-        let changed = self.state.state[context]
-            .ssa
-            .values
-            .insert(orig_val, (val, abs))
-            .map(|(_, old_abs)| abs != old_abs)
-            .unwrap_or(true);
+        let changed = match self.state.state[context].ssa.values.entry(orig_val) {
+            BTreeEntry::Vacant(v) => {
+                v.insert((val, abs));
+                true
+            }
+            BTreeEntry::Occupied(mut o) => {
+                let val_abs = &mut o.get_mut().1;
+                let updated = AbstractValue::meet(*val_abs, abs);
+                let changed = updated != *val_abs;
+                *val_abs = updated;
+                changed
+            }
+        };
 
         if changed {
-            if let &ValueDef::BlockParam(dest_block, _, _) = &self.generic.values[orig_val] {
-                // We just updated a blockparam. If the block it is
-                // attached to is not dominated by our current block,
-                // then it won't be seen in this pass, so let's
-                // enqueue the block.
-                if !self.cfg.dominates(block, dest_block) {
-                    self.enqueue_block_if_existing(dest_block, context);
+            // We need to enqueue all blocks that have read a value
+            // from this block.
+            if let Some(deps) = self.block_deps.remove(&(context, block)) {
+                for (ctx, block) in &deps {
+                    self.enqueue_block_if_existing(*block, *ctx);
                 }
+                self.block_deps.insert((context, block), deps);
             }
         }
     }
@@ -213,7 +244,7 @@ impl<'a> Evaluator<'a> {
     fn enqueue_block_if_existing(&mut self, orig_block: Block, context: Context) {
         if let Some(block) = self.block_map.get(&(context, orig_block)).copied() {
             if self.queue_set.insert((orig_block, context)) {
-                self.queue.push((orig_block, context, block));
+                self.queue.push_back((orig_block, context, block));
             }
         }
     }
@@ -235,7 +266,7 @@ impl<'a> Evaluator<'a> {
                 }
                 ValueDef::PickOutput(val, idx, ty) => {
                     // Directly transcribe.
-                    let (val, _) = self.use_value(state.context, *val);
+                    let (val, _) = self.use_value(state.context, orig_block, *val);
                     Some((
                         ValueDef::PickOutput(val, *idx, *ty),
                         AbstractValue::Runtime(ValueTags::default()),
@@ -247,7 +278,7 @@ impl<'a> Evaluator<'a> {
                     arg_values.clear();
                     for &arg in args {
                         let arg = self.generic.resolve_alias(arg);
-                        let (val, abs) = self.use_value(state.context, arg);
+                        let (val, abs) = self.use_value(state.context, orig_block, arg);
                         arg_abs_values.push(abs);
                         arg_values.push(val);
                     }
@@ -291,7 +322,7 @@ impl<'a> Evaluator<'a> {
             } {
                 let result_value = self.func.add_value(result_value);
                 self.value_map.insert((input_ctx, inst), result_value);
-                self.func.blocks[new_block].insts.push(result_value);
+                self.func.append_to_block(new_block, result_value);
 
                 self.def_value(orig_block, input_ctx, inst, result_value, result_abs);
             }
@@ -313,19 +344,31 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    fn create_block(
+        &mut self,
+        orig_block: Block,
+        context: Context,
+        state: ProgPointState,
+    ) -> Block {
+        let block = self.func.add_block();
+        for (ty, _) in &self.generic.blocks[orig_block].params {
+            self.func.add_blockparam(block, *ty);
+        }
+        self.block_map.insert((context, orig_block), block);
+        self.state.state[context]
+            .block_entry
+            .insert(orig_block, state);
+        block
+    }
+
     fn target_block(&mut self, state: &PointState, orig_block: Block, target: Block) -> Block {
         match self.block_map.entry((state.context, target)) {
-            HashEntry::Vacant(v) => {
-                let block = self.func.add_block();
-                for (ty, _) in &self.generic.blocks[target].params {
-                    self.func.add_blockparam(block, *ty);
-                }
+            HashEntry::Vacant(_) => {
+                let block = self.create_block(target, state.context, state.flow.clone());
+                self.block_map.insert((state.context, target), block);
                 self.queue_set.insert((target, state.context));
-                self.queue.push((target, state.context, block));
-                self.state.state[state.context]
-                    .block_entry
-                    .insert(target, state.flow.clone());
-                *v.insert(block)
+                self.queue.push_back((target, state.context, block));
+                block
             }
             HashEntry::Occupied(o) => {
                 let target_specialized = *o.get();
@@ -333,7 +376,8 @@ impl<'a> Evaluator<'a> {
                 // If we *don't* dominate this block and input changed, then re-enqueue.
                 if changed && !self.cfg.dominates(orig_block, target) {
                     if self.queue_set.insert((target, state.context)) {
-                        self.queue.push((target, state.context, target_specialized));
+                        self.queue
+                            .push_back((target, state.context, target_specialized));
                     }
                 }
                 target_specialized
@@ -354,7 +398,7 @@ impl<'a> Evaluator<'a> {
             .map(|(_, val)| *val)
             .zip(target.args.iter().copied())
         {
-            let (val, abs) = self.use_value(state.context, arg);
+            let (val, abs) = self.use_value(state.context, orig_block, arg);
             args.push(val);
             self.def_value(orig_block, state.context, blockparam, val, abs);
         }
@@ -374,7 +418,7 @@ impl<'a> Evaluator<'a> {
                 ref if_true,
                 ref if_false,
             } => {
-                let (cond, abs_cond) = self.use_value(state.context, cond);
+                let (cond, abs_cond) = self.use_value(state.context, orig_block, cond);
                 match abs_cond.is_const_truthy() {
                     Some(true) => Terminator::Br {
                         target: self.evaluate_block_target(orig_block, state, if_true),
@@ -397,7 +441,7 @@ impl<'a> Evaluator<'a> {
                 ref targets,
                 ref default,
             } => {
-                let (value, abs_value) = self.use_value(state.context, value);
+                let (value, abs_value) = self.use_value(state.context, orig_block, value);
                 if let Some(selector) = abs_value.is_const_u32() {
                     let selector = selector as usize;
                     let target = if selector < targets.len() {
@@ -424,7 +468,7 @@ impl<'a> Evaluator<'a> {
             &Terminator::Return { ref values } => {
                 let values = values
                     .iter()
-                    .map(|&value| self.use_value(state.context, value).0)
+                    .map(|&value| self.use_value(state.context, orig_block, value).0)
                     .collect::<Vec<_>>();
                 Terminator::Return { values }
             }
