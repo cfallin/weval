@@ -71,7 +71,7 @@ void marker(int magic);
 __attribute__((noinline))
 const void* weval_assume_const_memory(const void* p);
 __attribute__((noinline))
-uint32_t weval_loop_pc32(uint32_t pc);
+void weval_loop_header();
 __attribute__((noinline))
 uint32_t weval_loop_pc32_update(uint32_t pc);
 
@@ -86,10 +86,10 @@ const T* assume_const_memory(const T* t) {
     return (const T*)weval_assume_const_memory((const void*)t);
 }
 
-uint32_t loop_pc(uint32_t pc) {
-    return weval_loop_pc32(pc);
+void loop_header() {
+    weval_loop_header();
 }
-
+    
 uint32_t loop_pc_update(uint32_t pc) {
     return weval_loop_pc32_update(pc);
 }

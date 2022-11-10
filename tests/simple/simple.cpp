@@ -45,7 +45,7 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     // method that returns either LoopResult::next_pc(pc) or
     // LoopResult::break_loop(val).
     while (true) {
-        weval::loop_pc(pc);
+        weval::loop_header();
         const Inst* inst = &insts[pc];
         pc++;
         weval::loop_pc_update(pc);

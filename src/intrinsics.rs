@@ -5,7 +5,7 @@ use waffle::{ExportKind, Func, FuncDecl, Module, Operator, Terminator, Type, Val
 #[derive(Clone, Debug)]
 pub struct Intrinsics {
     pub assume_const_memory: Option<Func>,
-    pub loop_pc32: Option<Func>,
+    pub loop_header: Option<Func>,
     pub loop_pc32_update: Option<Func>,
 }
 
@@ -18,7 +18,9 @@ impl Intrinsics {
                 &[Type::I32],
                 &[Type::I32],
             ),
-            loop_pc32: find_exported_func(module, "weval.loop.pc32", &[Type::I32], &[Type::I32]),
+            // TODO: return a unique token from the header intrinsic
+            // to pass into pc32_update
+            loop_header: find_exported_func(module, "weval.loop.header", &[], &[]),
             loop_pc32_update: find_exported_func(
                 module,
                 "weval.loop.pc32.update",

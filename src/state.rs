@@ -43,11 +43,13 @@ use waffle::{Block, FunctionBody, Global, Value};
 
 waffle::declare_entity!(Context, "context");
 
+pub type PC = Option<u64>;
+
 /// One element in the context stack: the loop PC, and the block that
 /// dominates the context (we automatically leave the context when
 /// crossing the dominance frontier of this block).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ContextElem(pub Option<u64>, pub Block);
+pub struct ContextElem(pub PC, pub Block);
 
 /// Arena of contexts.
 #[derive(Clone, Default, Debug)]
@@ -92,6 +94,16 @@ pub struct ProgPointState {
     pub mem_overlay: BTreeMap<u32, AbstractValue>,
     /// Global values.
     pub globals: BTreeMap<Global, AbstractValue>,
+    /// Staged PC value for next loop backedge in innermost loop.
+    pub staged_pc: StagedPC,
+}
+
+/// The flow-sensitive part of the state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StagedPC {
+    None,
+    Some(PC),
+    Conflict,
 }
 
 /// The state for a function body during analysis.
@@ -150,6 +162,7 @@ impl ProgPointState {
         ProgPointState {
             mem_overlay: BTreeMap::new(),
             globals,
+            staged_pc: StagedPC::None,
         }
     }
 
@@ -157,6 +170,13 @@ impl ProgPointState {
         let mut changed = false;
         changed |= map_meet_with(&mut self.mem_overlay, &other.mem_overlay);
         changed |= map_meet_with(&mut self.globals, &other.globals);
+        let old_staged_pc = self.staged_pc;
+        self.staged_pc = match (self.staged_pc, other.staged_pc) {
+            (StagedPC::None, x) | (x, StagedPC::None) => x,
+            (StagedPC::Some(pc1), StagedPC::Some(pc2)) if pc1 == pc2 => StagedPC::Some(pc1),
+            _ => StagedPC::Conflict,
+        };
+        changed |= self.staged_pc != old_staged_pc;
         changed
     }
 }

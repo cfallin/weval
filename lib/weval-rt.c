@@ -31,13 +31,9 @@ const void* weval_assume_const_memory(const void* value) {
     }
 }
 
-__attribute__((export_name("weval.loop.pc32")))
-uint32_t weval_loop_pc32(uint32_t pc) {
-    if (__hook) {
-        return 2;
-    } else {
-        return pc;
-    }
+__attribute__((export_name("weval.loop.header")))
+void weval_loop_header() {
+    __hook++;
 }
 
 __attribute__((export_name("weval.loop.pc32.update")))
