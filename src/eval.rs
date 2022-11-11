@@ -504,6 +504,7 @@ impl<'a> Evaluator<'a> {
         target: &BlockTarget,
     ) -> BlockTarget {
         let mut args = vec![];
+        let mut abs_args = vec![];
         log::trace!(
             "evaluate target: block {} context {} to {:?}",
             orig_block,
@@ -521,6 +522,7 @@ impl<'a> Evaluator<'a> {
         {
             let (val, abs) = self.use_value(state.context, orig_block, arg);
             args.push(val);
+            abs_args.push(abs);
             log::trace!(
                 "blockparam: block {} context {} to param {}: val {} abs {:?}",
                 orig_block,
@@ -529,7 +531,17 @@ impl<'a> Evaluator<'a> {
                 val,
                 abs
             );
-            self.def_value(orig_block, target_ctx, blockparam, val, abs);
+        }
+
+        // Parallel-move semantics: read all uses above, then write
+        // all defs below.
+        for (blockparam, (val, abs)) in self.generic.blocks[target.block]
+            .params
+            .iter()
+            .map(|(_, val)| *val)
+            .zip(args.iter().zip(abs_args.iter()))
+        {
+            self.def_value(orig_block, target_ctx, blockparam, *val, *abs);
         }
 
         BlockTarget {
