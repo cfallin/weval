@@ -45,8 +45,8 @@ impl std::convert::TryFrom<waffle::Operator> for WasmVal {
         match op {
             waffle::Operator::I32Const { value } => Ok(WasmVal::I32(value as u32)),
             waffle::Operator::I64Const { value } => Ok(WasmVal::I64(value as u64)),
-            waffle::Operator::F32Const { value } => Ok(WasmVal::F32(value.bits())),
-            waffle::Operator::F64Const { value } => Ok(WasmVal::F64(value.bits())),
+            waffle::Operator::F32Const { value } => Ok(WasmVal::F32(value)),
+            waffle::Operator::F64Const { value } => Ok(WasmVal::F64(value)),
             _ => Err(()),
         }
     }
@@ -136,7 +136,6 @@ impl AbstractValue {
             _ => None,
         }
     }
-
 
     pub fn is_const_truthy(&self) -> Option<bool> {
         self.is_const_u32().map(|k| k != 0)

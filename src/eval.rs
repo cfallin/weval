@@ -139,14 +139,10 @@ fn partially_evaluate_func(
 
 fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {
     match (ty, value) {
-        (Type::I32, WasmVal::I32(k)) => Some(Operator::I32Const { value: k as i32 }),
-        (Type::I64, WasmVal::I64(k)) => Some(Operator::I64Const { value: k as i64 }),
-        (Type::F32, WasmVal::F32(k)) => Some(Operator::F32Const {
-            value: waffle::wasmparser::Ieee32::from_bits(k as u32),
-        }),
-        (Type::F64, WasmVal::F64(k)) => Some(Operator::F64Const {
-            value: waffle::wasmparser::Ieee64::from_bits(k),
-        }),
+        (Type::I32, WasmVal::I32(k)) => Some(Operator::I32Const { value: k }),
+        (Type::I64, WasmVal::I64(k)) => Some(Operator::I64Const { value: k }),
+        (Type::F32, WasmVal::F32(k)) => Some(Operator::F32Const { value: k }),
+        (Type::F64, WasmVal::F64(k)) => Some(Operator::F64Const { value: k }),
         _ => None,
     }
 }
