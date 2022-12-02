@@ -189,6 +189,7 @@ impl<'a> Evaluator<'a> {
                 .cloned()
                 .unwrap(),
         };
+        log::trace!(" -> state = {:?}", state);
 
         // Do the actual constant-prop, carrying the state across the
         // block and updating flow-sensitive state, and updating SSA
@@ -434,7 +435,9 @@ impl<'a> Evaluator<'a> {
                     target,
                     target_context
                 );
-                break Cow::Borrowed(state);
+                let mut state = state.clone();
+                state.flow.pc = None;
+                break Cow::Owned(state);
             } else if elem.1 == target {
                 log::trace!(
                     " -> header block of context {} is target; handling staged PC updated {:?}",
@@ -460,6 +463,7 @@ impl<'a> Evaluator<'a> {
                             .create(Some(parent), ContextElem(pc, elem.1));
                         log::trace!(" -> new context is {} parent {}", target_context, parent);
                         state.flow.staged_pc = StagedPC::None;
+                        state.flow.pc = Some(pc);
                         state.context = target_context;
                         break Cow::Owned(state);
                     }
@@ -487,9 +491,12 @@ impl<'a> Evaluator<'a> {
                 updated_state
             };
 
+        log::trace!(" -> updated state is: {:?}", updated_state);
+
         match self.block_map.entry((updated_state.context, target)) {
             HashEntry::Vacant(_) => {
-                let block = self.create_block(target, updated_state.context, state.flow.clone());
+                let block =
+                    self.create_block(target, updated_state.context, updated_state.flow.clone());
                 log::trace!(" -> created block {}", block);
                 self.block_map
                     .insert((updated_state.context, target), block);
@@ -683,6 +690,12 @@ impl<'a> Evaluator<'a> {
                     state.flow.staged_pc = StagedPC::Some(pc);
                     log::trace!("change PC: stage {:?} for next loop backedge", pc);
                     Some((abs[0], Some(values[0])))
+                } else if Some(function_index) == self.intrinsics.loop_header {
+                    // Just remove the intrinsic call.
+                    Some((
+                        AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
+                        None,
+                    ))
                 } else {
                     None
                 }

@@ -96,6 +96,8 @@ pub struct ProgPointState {
     pub globals: BTreeMap<Global, AbstractValue>,
     /// Staged PC value for next loop backedge in innermost loop.
     pub staged_pc: StagedPC,
+    /// Current PC value.
+    pub pc: Option<PC>,
 }
 
 /// The flow-sensitive part of the state.
@@ -163,13 +165,16 @@ impl ProgPointState {
             mem_overlay: BTreeMap::new(),
             globals,
             staged_pc: StagedPC::None,
+            pc: None,
         }
     }
 
     pub fn meet_with(&mut self, other: &ProgPointState) -> bool {
         let mut changed = false;
+
         changed |= map_meet_with(&mut self.mem_overlay, &other.mem_overlay);
         changed |= map_meet_with(&mut self.globals, &other.globals);
+
         let old_staged_pc = self.staged_pc;
         self.staged_pc = match (self.staged_pc, other.staged_pc) {
             (StagedPC::None, x) | (x, StagedPC::None) => x,
@@ -177,6 +182,11 @@ impl ProgPointState {
             _ => StagedPC::Conflict,
         };
         changed |= self.staged_pc != old_staged_pc;
+
+        let old_pc = self.pc;
+        self.pc = if self.pc == other.pc { self.pc } else { None };
+        changed |= self.pc != old_pc;
+
         changed
     }
 }

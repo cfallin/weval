@@ -39,6 +39,7 @@ struct State {
 bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     insts = weval::assume_const_memory(insts);
     uint32_t pc = 0;
+    uint32_t steps = 0;
 
     // TODO: build an abstraction for `pc`: `InterpreterPC<u32>` (and
     // impls for u64 and T*) that have a `.loop([&](pc) { ... })`
@@ -46,9 +47,12 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     // LoopResult::break_loop(val).
     while (true) {
         weval::loop_header();
+        steps++;
+        printf("%d steps; PC = %d\n", steps, pc);
         const Inst* inst = &insts[pc];
         pc++;
         weval::loop_pc_update(pc);
+        printf("PC = %d\n", pc);
         switch (inst->opcode) {
             case PushConst:
                 if (state->opstack_len + 1 > OPSTACK_SIZE) {
@@ -125,12 +129,15 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                     return false;
                 }
                 state->opstack_len--;
+                printf("gotoif: val = %d\n", state->opstack[state->opstack_len]);
                 if (state->opstack[state->opstack_len] != 0) {
                     pc = inst->imm;
                     weval::loop_pc_update(pc);
+                    continue;
                 }
                 break;
             case Exit:
+                printf("Exiting after %d steps at PC %d.\n", steps, pc);
                 return true;
         }
     }
@@ -139,12 +146,10 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
 Inst prog[] = {
     Inst(PushConst, 0),
     Inst(Dup),
-    Inst(PushConst, 10),
+    Inst(PushConst, 10000000),
     Inst(Sub),
     Inst(GotoIf, 6),
     Inst(Exit),
-    Inst(Dup),
-    Inst(Print),
     Inst(PushConst, 1),
     Inst(Add),
     Inst(Goto, 1),
