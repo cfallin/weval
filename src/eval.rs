@@ -118,17 +118,16 @@ fn partially_evaluate_func(
         queue_set: HashSet::new(),
         header_blocks: HashSet::new(),
     };
-    let ctx = evaluator.state.init_args(
-        body,
-        &mut evaluator.func,
-        image,
-        &directive.const_params[..],
-    );
+    let (ctx, entry_state) = evaluator
+        .state
+        .init_args(body, image, &directive.const_params[..]);
     evaluator.compute_header_blocks();
     log::trace!("after init_args, state is {:?}", evaluator.state);
+    let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
+    evaluator.func.entry = specialized_entry;
     evaluator
         .queue
-        .push_back((evaluator.generic.entry, ctx, evaluator.func.entry));
+        .push_back((evaluator.generic.entry, ctx, specialized_entry));
     evaluator.queue_set.insert((evaluator.generic.entry, ctx));
     evaluator.evaluate();
 
@@ -153,6 +152,7 @@ impl<'a> Evaluator<'a> {
             self.queue_set.remove(&(orig_block, ctx));
             self.evaluate_block(orig_block, ctx, new_block);
         }
+        self.finalize();
     }
 
     fn evaluate_block(&mut self, orig_block: Block, ctx: Context, new_block: Block) {
@@ -166,6 +166,7 @@ impl<'a> Evaluator<'a> {
             ctx,
             new_block
         );
+        debug_assert_eq!(self.block_map.get(&(ctx, orig_block)), Some(&new_block));
 
         // Create program-point state.
         let mut state = PointState {
@@ -202,18 +203,14 @@ impl<'a> Evaluator<'a> {
         let orig_context = context;
         let val_block = self.generic.value_blocks[orig_val];
         loop {
-            if let Some((val, abs)) = self.state.state[context].ssa.values.get(&orig_val) {
-                log::trace!(
-                    " -> found specialized val {} with abstract value {:?} at context {}",
-                    val,
-                    abs,
-                    context
-                );
+            if let Some(&abs) = self.state.state[context].ssa.values.get(&orig_val) {
+                log::trace!(" -> found abstract  value {:?} at context {}", abs, context);
                 self.block_deps
                     .entry((context, val_block))
                     .or_insert_with(|| HashSet::new())
                     .insert((orig_context, orig_block));
-                return (*val, *abs);
+                let &val = self.value_map.get(&(context, orig_val)).unwrap();
+                return (val, abs);
             }
             assert_ne!(context, Context::default());
             context = self.state.contexts.parent(context);
@@ -237,13 +234,14 @@ impl<'a> Evaluator<'a> {
             val,
             abs
         );
+        self.value_map.insert((context, orig_val), val);
         let changed = match self.state.state[context].ssa.values.entry(orig_val) {
             BTreeEntry::Vacant(v) => {
-                v.insert((val, abs));
+                v.insert(abs);
                 true
             }
             BTreeEntry::Occupied(mut o) => {
-                let val_abs = &mut o.get_mut().1;
+                let val_abs = o.get_mut();
                 let updated = AbstractValue::meet(*val_abs, abs);
                 let changed = updated != *val_abs;
                 *val_abs = updated;
@@ -378,8 +376,15 @@ impl<'a> Evaluator<'a> {
         state: ProgPointState,
     ) -> Block {
         let block = self.func.add_block();
+        log::trace!(
+            "create_block: orig_block {} context {} -> {}",
+            orig_block,
+            context,
+            block
+        );
         for &(ty, param) in &self.generic.blocks[orig_block].params {
             let new_param = self.func.add_blockparam(block, ty);
+            log::trace!(" -> blockparam {} maps to {}", param, new_param);
             self.value_map.insert((context, param), new_param);
         }
         self.block_map.insert((context, orig_block), block);
@@ -618,7 +623,9 @@ impl<'a> Evaluator<'a> {
             }
             &Terminator::Unreachable => Terminator::Unreachable,
         };
-        self.func.set_terminator(new_block, new_term);
+        // Note: we don't use `set_terminator`, because it adds edges;
+        // we add edges once, in a separate pass at the end.
+        self.func.blocks[new_block].terminator = new_term;
     }
 
     fn abstract_eval(
@@ -1106,5 +1113,14 @@ impl<'a> Evaluator<'a> {
                 }
             }
         }
+    }
+
+    fn finalize(&mut self) {
+        for block in self.func.blocks.iter() {
+            debug_assert!(self.func.blocks[block].succs.is_empty());
+            let term = self.func.blocks[block].terminator.clone();
+            term.visit_successors(|succ| self.func.add_edge(block, succ));
+        }
+        self.func.validate().unwrap();
     }
 }

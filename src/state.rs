@@ -82,9 +82,9 @@ impl Contexts {
 /// The flow-insensitive part of the satte.
 #[derive(Clone, Debug, Default)]
 pub struct SSAState {
-    /// AbstractValues and SSA `Value`s in specialized function of
-    /// generic function's SSA `Value`s.
-    pub values: BTreeMap<Value, (Value, AbstractValue)>,
+    /// AbstractValues in specialized function of generic function's
+    /// SSA `Value`s.
+    pub values: BTreeMap<Value, AbstractValue>,
 }
 
 /// The flow-sensitive part of the state.
@@ -192,38 +192,21 @@ impl FunctionState {
     pub fn init_args(
         &mut self,
         orig_body: &FunctionBody,
-        specialized_body: &FunctionBody,
         im: &Image,
         args: &[AbstractValue],
-    ) -> Context {
+    ) -> (Context, ProgPointState) {
         // For each blockparam of the entry block, set the value of the SSA arg.
         debug_assert_eq!(args.len(), orig_body.blocks[orig_body.entry].params.len());
-        debug_assert_eq!(
-            args.len(),
-            specialized_body.blocks[specialized_body.entry].params.len()
-        );
         let ctx = self
             .contexts
             .create(None, ContextElem(None, orig_body.entry));
-        for (((_, orig_value), (_, spec_value)), abs) in orig_body.blocks[orig_body.entry]
+        for ((_, orig_value), abs) in orig_body.blocks[orig_body.entry]
             .params
             .iter()
-            .zip(
-                specialized_body.blocks[specialized_body.entry]
-                    .params
-                    .iter(),
-            )
             .zip(args.iter())
         {
-            self.state[ctx]
-                .ssa
-                .values
-                .insert(*orig_value, (*spec_value, *abs));
+            self.state[ctx].ssa.values.insert(*orig_value, *abs);
         }
-        let entry_state = ProgPointState::entry(im);
-        self.state[ctx]
-            .block_entry
-            .insert(orig_body.entry, entry_state);
-        ctx
+        (ctx, ProgPointState::entry(im))
     }
 }
