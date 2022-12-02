@@ -617,7 +617,7 @@ impl<'a> Evaluator<'a> {
             }
             &Terminator::Unreachable => Terminator::Unreachable,
         };
-        self.func.blocks[new_block].terminator = new_term;
+        self.func.set_terminator(new_block, new_term);
     }
 
     fn abstract_eval(
