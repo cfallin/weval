@@ -478,6 +478,7 @@ impl<'a> Evaluator<'a> {
         match self.block_map.entry((updated_state.context, target)) {
             HashEntry::Vacant(_) => {
                 let block = self.create_block(target, updated_state.context, state.flow.clone());
+                log::trace!(" -> created block {}", block);
                 self.block_map
                     .insert((updated_state.context, target), block);
                 self.queue_set.insert((target, updated_state.context));
@@ -486,9 +487,11 @@ impl<'a> Evaluator<'a> {
             }
             HashEntry::Occupied(o) => {
                 let target_specialized = *o.get();
+                log::trace!(" -> already existing block {}", target_specialized);
                 let changed =
                     self.meet_into_block_entry(target, updated_state.context, &updated_state.flow);
                 if changed {
+                    log::trace!("   -> changed");
                     if self.queue_set.insert((target, updated_state.context)) {
                         self.queue
                             .push_back((target, updated_state.context, target_specialized));
@@ -516,20 +519,14 @@ impl<'a> Evaluator<'a> {
 
         let (target_block, target_ctx) = self.target_block(state, orig_block, target.block);
 
-        for (blockparam, arg) in self.generic.blocks[target.block]
-            .params
-            .iter()
-            .map(|(_, val)| *val)
-            .zip(target.args.iter().copied())
-        {
-            let (val, abs) = self.use_value(state.context, orig_block, arg);
+        for arg in &target.args {
+            let (val, abs) = self.use_value(state.context, orig_block, *arg);
             args.push(val);
             abs_args.push(abs);
             log::trace!(
-                "blockparam: block {} context {} to param {}: val {} abs {:?}",
+                "blockparam: block {} context {}: val {} abs {:?}",
                 orig_block,
                 state.context,
-                blockparam,
                 val,
                 abs
             );
@@ -537,13 +534,14 @@ impl<'a> Evaluator<'a> {
 
         // Parallel-move semantics: read all uses above, then write
         // all defs below.
-        for (blockparam, (val, abs)) in self.generic.blocks[target.block]
+        for (blockparam, abs) in self.generic.blocks[target.block]
             .params
             .iter()
             .map(|(_, val)| *val)
-            .zip(args.iter().zip(abs_args.iter()))
+            .zip(abs_args.iter())
         {
-            self.def_value(orig_block, target_ctx, blockparam, *val, *abs);
+            let &val = self.value_map.get(&(target_ctx, blockparam)).unwrap();
+            self.def_value(orig_block, target_ctx, blockparam, val, *abs);
         }
 
         BlockTarget {
