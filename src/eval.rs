@@ -378,8 +378,9 @@ impl<'a> Evaluator<'a> {
         state: ProgPointState,
     ) -> Block {
         let block = self.func.add_block();
-        for (ty, _) in &self.generic.blocks[orig_block].params {
-            self.func.add_blockparam(block, *ty);
+        for &(ty, param) in &self.generic.blocks[orig_block].params {
+            let new_param = self.func.add_blockparam(block, ty);
+            self.value_map.insert((context, param), new_param);
         }
         self.block_map.insert((context, orig_block), block);
         self.state.state[context]
