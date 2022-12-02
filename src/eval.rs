@@ -1135,13 +1135,13 @@ impl<'a> Evaluator<'a> {
         _z_val: Value,
         _state: &mut PointState,
     ) -> AbstractValue {
-        match (op, x) {
+        match (op, z) {
             (Operator::Select, AbstractValue::Concrete(v, _t))
             | (Operator::TypedSelect { .. }, AbstractValue::Concrete(v, _t)) => {
                 if v.is_truthy() {
-                    y
+                    x
                 } else {
-                    z
+                    y
                 }
             }
             _ => AbstractValue::Runtime(ValueTags::default()),
