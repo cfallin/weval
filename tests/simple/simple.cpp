@@ -163,7 +163,9 @@ struct Func {
     }
 
     bool invoke(State* state) {
+        printf("Inspecting func ptr at: %p\n", &specialized);
         if (specialized) {
+            printf("Calling specialized function: %p\n", specialized);
             return specialized(insts, ninsts, state);
         }
         return Interpret(insts, ninsts, state);

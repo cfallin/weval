@@ -19,7 +19,7 @@ use std::collections::{
 };
 use waffle::cfg::CFGInfo;
 use waffle::{
-    entity::EntityRef, Block, BlockTarget, FunctionBody, Module, Operator, Terminator, Type, Value,
+    Block, BlockTarget, Func, FunctionBody, Module, Operator, Table, Terminator, Type, Value,
     ValueDef,
 };
 
@@ -66,11 +66,23 @@ pub fn partially_evaluate(
     log::trace!("intrinsics: {:?}", intrinsics);
     let mut mem_updates = HashMap::new();
     for directive in directives {
-        log::trace!("Processing directive {:?}", directive);
+        log::info!("Processing directive {:?}", directive);
         if let Some(idx) = partially_evaluate_func(module, im, &intrinsics, directive)? {
-            log::trace!("New func index {}", idx);
+            // Append to table.
+            let func_table = module.table_mut(Table::from(0));
+            let table_idx = {
+                let func_table_elts = func_table.func_elements.as_mut().unwrap();
+                let table_idx = func_table_elts.len();
+                func_table_elts.push(idx);
+                table_idx
+            } as u32;
+            if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
+                func_table.max = Some(table_idx + 1);
+            }
+            log::info!("New func index {} -> table index {}", idx, table_idx);
+            log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
             // Update memory image.
-            mem_updates.insert(directive.func_index_out_addr, idx);
+            mem_updates.insert(directive.func_index_out_addr, table_idx);
         }
     }
 
@@ -87,7 +99,7 @@ fn partially_evaluate_func(
     image: &Image,
     intrinsics: &Intrinsics,
     directive: &Directive,
-) -> anyhow::Result<Option<u32>> {
+) -> anyhow::Result<Option<Func>> {
     // Get function body.
     let body = module
         .func(directive.func)
@@ -133,7 +145,7 @@ fn partially_evaluate_func(
 
     log::debug!("Adding func:\n{}", evaluator.func.display("| "));
     let func = module.add_func(sig, evaluator.func);
-    Ok(Some(func.index() as u32))
+    Ok(Some(func))
 }
 
 fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {

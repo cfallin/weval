@@ -215,7 +215,7 @@ bool weval(impl::FuncPtr<Ret, Args...>* dest, impl::FuncPtr<Ret, Args...> generi
     req->func = (weval_func_t)generic;
     req->args = arg_storage;
     req->nargs = nargs;
-    req->specialized = (weval_func_t*)(&dest);
+    req->specialized = (weval_func_t*)dest;
 
     weval_request(req);
 
