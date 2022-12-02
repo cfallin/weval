@@ -178,6 +178,7 @@ impl<'a> Evaluator<'a> {
         // Create program-point state.
         let mut state = PointState {
             context: ctx,
+            pending_context: None,
             flow: self.state.state[ctx]
                 .block_entry
                 .get(&orig_block)
@@ -198,7 +199,7 @@ impl<'a> Evaluator<'a> {
     /// and SSA value in the specialized function.
     fn use_value(
         &mut self,
-        mut context: Context,
+        context: Context,
         orig_block: Block,
         orig_val: Value,
     ) -> (Value, AbstractValue) {
@@ -208,22 +209,16 @@ impl<'a> Evaluator<'a> {
             orig_block,
             context
         );
-        let orig_context = context;
-        let val_block = self.generic.value_blocks[orig_val];
-        loop {
-            if let Some(&abs) = self.state.state[context].ssa.values.get(&orig_val) {
-                log::trace!(" -> found abstract  value {:?} at context {}", abs, context);
-                self.block_deps
-                    .entry((context, val_block))
-                    .or_insert_with(|| HashSet::new())
-                    .insert((orig_context, orig_block));
-                let &val = self.value_map.get(&(context, orig_val)).unwrap();
-                return (val, abs);
-            }
-            assert_ne!(context, Context::default());
-            context = self.state.contexts.parent(context);
-            log::trace!(" -> going up to parent context {}", context);
+        if let Some(&abs) = self.state.state[context].ssa.values.get(&orig_val) {
+            log::trace!(" -> found abstract  value {:?} at context {}", abs, context);
+            let &val = self.value_map.get(&(context, orig_val)).unwrap();
+            log::trace!(" -> runtime value {}", val);
+            return (val, abs);
         }
+        panic!(
+            "Could not find value for {} in context {}",
+            orig_val, context
+        );
     }
 
     fn def_value(
@@ -233,7 +228,7 @@ impl<'a> Evaluator<'a> {
         orig_val: Value,
         val: Value,
         abs: AbstractValue,
-    ) {
+    ) -> bool {
         log::trace!(
             "defining val {} in block {} context {} with specialized val {} abs {:?}",
             orig_val,
@@ -243,7 +238,7 @@ impl<'a> Evaluator<'a> {
             abs
         );
         self.value_map.insert((context, orig_val), val);
-        let changed = match self.state.state[context].ssa.values.entry(orig_val) {
+        match self.state.state[context].ssa.values.entry(orig_val) {
             BTreeEntry::Vacant(v) => {
                 v.insert(abs);
                 true
@@ -252,19 +247,15 @@ impl<'a> Evaluator<'a> {
                 let val_abs = o.get_mut();
                 let updated = AbstractValue::meet(*val_abs, abs);
                 let changed = updated != *val_abs;
+                log::trace!(
+                    " -> meet: cur {:?} input {:?} result {:?} (changed: {})",
+                    val_abs,
+                    abs,
+                    updated,
+                    changed,
+                );
                 *val_abs = updated;
                 changed
-            }
-        };
-
-        if changed {
-            // We need to enqueue all blocks that have read a value
-            // from this block.
-            if let Some(deps) = self.block_deps.remove(&(context, block)) {
-                for (ctx, block) in &deps {
-                    self.enqueue_block_if_existing(*block, *ctx);
-                }
-                self.block_deps.insert((context, block), deps);
             }
         }
     }
@@ -415,90 +406,8 @@ impl<'a> Evaluator<'a> {
             state.context
         );
 
-        let mut target_context = state.context;
-
-        // Update context according to target block.
-        log::trace!(
-            " -> finding new context for {} branching to {}",
-            target_context,
-            target
-        );
-        let mut has_update = None;
-        let mut has_pop = false;
-        loop {
-            let leaf = self.state.contexts.leaf_element(target_context);
-            log::trace!(" -> context leaf is {:?}", leaf);
-            match leaf {
-                ContextElem::Root => break,
-                // If target block dominates element's block, we
-                // have crossed out of the dom-subtree in which we
-                // *must* maintain this context elem, so we can
-                // merge it upward into its parent,
-                // potentially. Or we can update it otherwise.
-                ContextElem::Pop(block) if self.cfg.dominates(target, block) => {
-                    has_pop = true;
-                    target_context = self.state.contexts.parent(target_context);
-                    log::trace!(
-                        " -> entering block that dominates leaf; going to parent {}",
-                        target_context
-                    );
-                }
-                ContextElem::Update(pc, block) if self.cfg.dominates(target, block) => {
-                    has_update.get_or_insert(pc);
-                    target_context = self.state.contexts.parent(target_context);
-                    log::trace!(
-                        " -> entering block that dominates leaf; going to parent {}",
-                        target_context
-                    );
-                }
-                ContextElem::Loop(pc, block) if self.cfg.dominates(target, block) => {
-                    if has_pop {
-                        log::trace!(" -> applying queued pop to loop leaf");
-                        target_context = self.state.contexts.parent(target_context);
-                        log::trace!(" -> going to parent {}", target_context);
-                    } else if let Some(pc) = has_update {
-                        log::trace!(" -> applying queued PC update ({:?}) to loop leaf", pc);
-                        target_context = self.state.contexts.parent(target_context);
-                        target_context = self
-                            .state
-                            .contexts
-                            .create(Some(target_context), ContextElem::Loop(pc, target));
-                        log::trace!(" -> going to sibling {}", target_context);
-                    } else if block != target {
-                        log::trace!(" -> going further up domtree in loop context");
-                        target_context = self.state.contexts.parent(target_context);
-                        target_context = self
-                            .state
-                            .contexts
-                            .create(Some(target_context), ContextElem::Loop(pc, target));
-                        log::trace!(" -> updated to sibling {} with new block", target_context);
-                    }
-                    has_pop = false;
-                    has_update = None;
-                    break;
-                }
-                _ => {
-                    break;
-                }
-            }
-        }
-
-        // If remaining pop or update, place it back in the context stack.
-        if has_pop {
-            target_context = self
-                .state
-                .contexts
-                .create(Some(target_context), ContextElem::Pop(target));
-            log::trace!(" -> remaining pop");
-        } else if let Some(pc) = has_update {
-            target_context = self
-                .state
-                .contexts
-                .create(Some(target_context), ContextElem::Update(pc, target));
-            log::trace!(" -> remaining update to PC {:?}", pc);
-        }
-
-        log::trace!(" -> target context is {}", target_context);
+        let target_context = state.pending_context.unwrap_or(state.context);
+        log::trace!(" -> new context {}", target_context);
 
         match self.block_map.entry((target_context, target)) {
             HashEntry::Vacant(_) => {
@@ -557,6 +466,7 @@ impl<'a> Evaluator<'a> {
 
         // Parallel-move semantics: read all uses above, then write
         // all defs below.
+        let mut changed = false;
         for (blockparam, abs) in self.generic.blocks[target.block]
             .params
             .iter()
@@ -564,7 +474,15 @@ impl<'a> Evaluator<'a> {
             .zip(abs_args.iter())
         {
             let &val = self.value_map.get(&(target_ctx, blockparam)).unwrap();
-            self.def_value(orig_block, target_ctx, blockparam, val, *abs);
+            log::trace!(
+                "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?}",
+                target.block, target_ctx, blockparam, val, abs);
+            changed |= self.def_value(orig_block, target_ctx, blockparam, val, *abs);
+        }
+
+        // If blockparam inputs changed, re-enqueue target for evaluation.
+        if changed {
+            self.enqueue_block_if_existing(target.block, target_ctx);
         }
 
         BlockTarget {
@@ -679,7 +597,7 @@ impl<'a> Evaluator<'a> {
 
     fn abstract_eval_intrinsic(
         &mut self,
-        orig_block: Block,
+        _orig_block: Block,
         op: Operator,
         abs: &[AbstractValue],
         values: &[Value],
@@ -691,32 +609,41 @@ impl<'a> Evaluator<'a> {
                     Some((abs[0].with_tags(ValueTags::const_memory()), Some(values[0])))
                 } else if Some(function_index) == self.intrinsics.push_context {
                     let pc = abs[0].is_const_u32();
-                    state.context = self
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let child = self
                         .state
                         .contexts
-                        .create(Some(state.context), ContextElem::Loop(pc, orig_block));
-                    log::trace!("push context (pc {:?}): now {}", pc, state.context);
+                        .create(Some(instantaneous_context), ContextElem::Loop(pc));
+                    state.pending_context = Some(child);
+                    log::trace!("push context (pc {:?}): now {}", pc, child);
                     Some((
                         AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
                         None,
                     ))
                 } else if Some(function_index) == self.intrinsics.pop_context {
-                    state.context = self
-                        .state
-                        .contexts
-                        .create(Some(state.context), ContextElem::Pop(orig_block));
-                    log::trace!("pop context: now {}", state.context);
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let parent = match self.state.contexts.leaf_element(instantaneous_context) {
+                        ContextElem::Root => instantaneous_context,
+                        _ => self.state.contexts.parent(instantaneous_context),
+                    };
+                    state.pending_context = Some(parent);
+                    log::trace!("pop context: now {}", parent);
                     Some((
                         AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
                         None,
                     ))
                 } else if Some(function_index) == self.intrinsics.update_context {
                     let pc = abs[0].is_const_u32();
-                    state.context = self
-                        .state
-                        .contexts
-                        .create(Some(state.context), ContextElem::Update(pc, orig_block));
-                    log::trace!("update context (pc {:?}): now {}", pc, state.context);
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let sibling = match self.state.contexts.leaf_element(instantaneous_context) {
+                        ContextElem::Root => instantaneous_context,
+                        _ => self.state.contexts.create(
+                            Some(self.state.contexts.parent(instantaneous_context)),
+                            ContextElem::Loop(pc),
+                        ),
+                    };
+                    state.pending_context = Some(sibling);
+                    log::trace!("update context (pc {:?}): now {}", pc, sibling);
                     Some((
                         AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
                         None,

@@ -45,39 +45,11 @@ waffle::declare_entity!(Context, "context");
 
 pub type PC = Option<u32>;
 
-/// One element in the context stack. The block indicates where the
-/// context was set, and the "update" variant allows for immediate
-/// context updates while preserving value lookup: we push these
-/// first, then squash them into parent contexts as we move up the
-/// domtree and values go out of scope.
-///
-/// TODO: document the invariant: context stack follows domtree
-/// nesting.
+/// One element in the context stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ContextElem {
     Root,
-    Loop(PC, Block),
-    Update(PC, Block),
-    Pop(Block),
-}
-
-impl ContextElem {
-    pub fn block(&self) -> Block {
-        match self {
-            &ContextElem::Root => panic!(),
-            &ContextElem::Loop(_, block) => block,
-            &ContextElem::Update(_, block) => block,
-            &ContextElem::Pop(block) => block,
-        }
-    }
-    pub fn with_block(&self, block: Block) -> Self {
-        match self {
-            &ContextElem::Root => ContextElem::Root,
-            &ContextElem::Loop(pc, _) => ContextElem::Loop(pc, block),
-            &ContextElem::Update(pc, _) => ContextElem::Update(pc, block),
-            &ContextElem::Pop(_) => ContextElem::Pop(block),
-        }
-    }
+    Loop(PC),
 }
 
 /// Arena of contexts.
@@ -144,6 +116,7 @@ pub struct PerContextState {
 #[derive(Clone, Debug)]
 pub struct PointState {
     pub context: Context,
+    pub pending_context: Option<Context>,
     pub flow: ProgPointState,
 }
 
