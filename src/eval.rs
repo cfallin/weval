@@ -13,7 +13,6 @@ use crate::image::Image;
 use crate::intrinsics::Intrinsics;
 use crate::state::*;
 use crate::value::{AbstractValue, ValueTags, WasmVal};
-use std::borrow::Cow;
 use std::collections::{
     btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, HashMap, HashSet, VecDeque,
 };
@@ -52,8 +51,6 @@ struct Evaluator<'a> {
     queue: VecDeque<(Block, Context, Block)>,
     /// Set to deduplicate `queue`.
     queue_set: HashSet<(Block, Context)>,
-    /// Header blocks.
-    header_blocks: HashSet<Block>,
 }
 
 /// Partially evaluates according to the given directives.
@@ -128,12 +125,10 @@ fn partially_evaluate_func(
         value_map: HashMap::new(),
         queue: VecDeque::new(),
         queue_set: HashSet::new(),
-        header_blocks: HashSet::new(),
     };
     let (ctx, entry_state) = evaluator
         .state
         .init_args(body, image, &directive.const_params[..]);
-    evaluator.compute_header_blocks();
     log::trace!("after init_args, state is {:?}", evaluator.state);
     let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
     evaluator.func.entry = specialized_entry;
@@ -421,102 +416,111 @@ impl<'a> Evaluator<'a> {
         );
 
         let mut target_context = state.context;
-        // Pop and/or update PC if needed.
-        let updated_state = loop {
-            let elem = self.state.contexts.leaf_element(target_context);
-            if elem.1 == self.generic.entry {
-                break Cow::Borrowed(state);
-            }
-            if !self.cfg.dominates(elem.1, target) {
-                target_context = self.state.contexts.parent(target_context);
-                log::trace!(
-                    " -> header block of context {} does not dominate {}; popping to parent {}",
-                    elem.1,
-                    target,
-                    target_context
-                );
-                let mut state = state.clone();
-                state.flow.pc = None;
-                break Cow::Owned(state);
-            } else if elem.1 == target {
-                log::trace!(
-                    " -> header block of context {} is target; handling staged PC updated {:?}",
-                    target_context,
-                    state.flow.staged_pc
-                );
-                // If we have a staged PC update, make it now.
-                match state.flow.staged_pc {
-                    StagedPC::None => {
-                        break Cow::Borrowed(state);
-                    }
-                    StagedPC::Conflict => {
-                        let mut state = state.clone();
-                        state.flow.staged_pc = StagedPC::None;
-                        break Cow::Owned(state);
-                    }
-                    StagedPC::Some(pc) => {
-                        let mut state = state.clone();
-                        let parent = self.state.contexts.parent(target_context);
+
+        // Update context according to target block.
+        log::trace!(
+            " -> finding new context for {} branching to {}",
+            target_context,
+            target
+        );
+        let mut has_update = None;
+        let mut has_pop = false;
+        loop {
+            let leaf = self.state.contexts.leaf_element(target_context);
+            log::trace!(" -> context leaf is {:?}", leaf);
+            match leaf {
+                ContextElem::Root => break,
+                // If target block dominates element's block, we
+                // have crossed out of the dom-subtree in which we
+                // *must* maintain this context elem, so we can
+                // merge it upward into its parent,
+                // potentially. Or we can update it otherwise.
+                ContextElem::Pop(block) if self.cfg.dominates(target, block) => {
+                    has_pop = true;
+                    target_context = self.state.contexts.parent(target_context);
+                    log::trace!(
+                        " -> entering block that dominates leaf; going to parent {}",
+                        target_context
+                    );
+                }
+                ContextElem::Update(pc, block) if self.cfg.dominates(target, block) => {
+                    has_update.get_or_insert(pc);
+                    target_context = self.state.contexts.parent(target_context);
+                    log::trace!(
+                        " -> entering block that dominates leaf; going to parent {}",
+                        target_context
+                    );
+                }
+                ContextElem::Loop(pc, block) if self.cfg.dominates(target, block) => {
+                    if has_pop {
+                        log::trace!(" -> applying queued pop to loop leaf");
+                        target_context = self.state.contexts.parent(target_context);
+                        log::trace!(" -> going to parent {}", target_context);
+                    } else if let Some(pc) = has_update {
+                        log::trace!(" -> applying queued PC update ({:?}) to loop leaf", pc);
+                        target_context = self.state.contexts.parent(target_context);
                         target_context = self
                             .state
                             .contexts
-                            .create(Some(parent), ContextElem(pc, elem.1));
-                        log::trace!(" -> new context is {} parent {}", target_context, parent);
-                        state.flow.staged_pc = StagedPC::None;
-                        state.flow.pc = Some(pc);
-                        state.context = target_context;
-                        break Cow::Owned(state);
+                            .create(Some(target_context), ContextElem::Loop(pc, target));
+                        log::trace!(" -> going to sibling {}", target_context);
+                    } else if block != target {
+                        log::trace!(" -> going further up domtree in loop context");
+                        target_context = self.state.contexts.parent(target_context);
+                        target_context = self
+                            .state
+                            .contexts
+                            .create(Some(target_context), ContextElem::Loop(pc, target));
+                        log::trace!(" -> updated to sibling {} with new block", target_context);
                     }
+                    has_pop = false;
+                    has_update = None;
+                    break;
                 }
-            } else {
-                break Cow::Borrowed(state);
+                _ => {
+                    break;
+                }
             }
-        };
-        // Push new context elem if entering a loop.
-        let updated_state =
-            if self.header_blocks.contains(&target) && !self.cfg.dominates(target, orig_block) {
-                let context = self
-                    .state
-                    .contexts
-                    .create(Some(updated_state.context), ContextElem(None, target));
-                let mut updated_state = updated_state.into_owned();
-                updated_state.context = context;
-                log::trace!(
-                    "pushing context for loop header {}: now {}",
-                    target,
-                    context
-                );
-                Cow::Owned(updated_state)
-            } else {
-                updated_state
-            };
+        }
 
-        log::trace!(" -> updated state is: {:?}", updated_state);
+        // If remaining pop or update, place it back in the context stack.
+        if has_pop {
+            target_context = self
+                .state
+                .contexts
+                .create(Some(target_context), ContextElem::Pop(target));
+            log::trace!(" -> remaining pop");
+        } else if let Some(pc) = has_update {
+            target_context = self
+                .state
+                .contexts
+                .create(Some(target_context), ContextElem::Update(pc, target));
+            log::trace!(" -> remaining update to PC {:?}", pc);
+        }
 
-        match self.block_map.entry((updated_state.context, target)) {
+        log::trace!(" -> target context is {}", target_context);
+
+        match self.block_map.entry((target_context, target)) {
             HashEntry::Vacant(_) => {
-                let block =
-                    self.create_block(target, updated_state.context, updated_state.flow.clone());
+                let block = self.create_block(target, target_context, state.flow.clone());
                 log::trace!(" -> created block {}", block);
-                self.block_map
-                    .insert((updated_state.context, target), block);
-                self.queue_set.insert((target, updated_state.context));
-                self.queue.push_back((target, updated_state.context, block));
-                (block, updated_state.context)
+                self.block_map.insert((target_context, target), block);
+                self.queue_set.insert((target, target_context));
+                self.queue.push_back((target, target_context, block));
+                (block, target_context)
             }
             HashEntry::Occupied(o) => {
                 let target_specialized = *o.get();
                 log::trace!(" -> already existing block {}", target_specialized);
-                let changed =
-                    self.meet_into_block_entry(target, updated_state.context, &updated_state.flow);
+                let changed = self.meet_into_block_entry(target, target_context, &state.flow);
                 if changed {
                     log::trace!("   -> changed");
-                    if self.queue_set.insert((target, updated_state.context)) {
+                    if self.queue_set.insert((target, target_context)) {
                         self.queue
-                            .push_back((target, updated_state.context, target_specialized));
+                            .push_back((target, target_context, target_specialized));
                     }
                 }
-                (target_specialized, updated_state.context)
+                (target_specialized, target_context)
             }
         }
     }
@@ -675,7 +679,7 @@ impl<'a> Evaluator<'a> {
 
     fn abstract_eval_intrinsic(
         &mut self,
-        _orig_block: Block,
+        orig_block: Block,
         op: Operator,
         abs: &[AbstractValue],
         values: &[Value],
@@ -685,13 +689,34 @@ impl<'a> Evaluator<'a> {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.assume_const_memory {
                     Some((abs[0].with_tags(ValueTags::const_memory()), Some(values[0])))
-                } else if Some(function_index) == self.intrinsics.loop_pc32_update {
-                    let pc = abs[0].is_const_u32().map(|pc| pc as u64);
-                    state.flow.staged_pc = StagedPC::Some(pc);
-                    log::trace!("change PC: stage {:?} for next loop backedge", pc);
-                    Some((abs[0], Some(values[0])))
-                } else if Some(function_index) == self.intrinsics.loop_header {
-                    // Just remove the intrinsic call.
+                } else if Some(function_index) == self.intrinsics.push_context {
+                    let pc = abs[0].is_const_u32();
+                    state.context = self
+                        .state
+                        .contexts
+                        .create(Some(state.context), ContextElem::Loop(pc, orig_block));
+                    log::trace!("push context (pc {:?}): now {}", pc, state.context);
+                    Some((
+                        AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
+                        None,
+                    ))
+                } else if Some(function_index) == self.intrinsics.pop_context {
+                    state.context = self
+                        .state
+                        .contexts
+                        .create(Some(state.context), ContextElem::Pop(orig_block));
+                    log::trace!("pop context: now {}", state.context);
+                    Some((
+                        AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
+                        None,
+                    ))
+                } else if Some(function_index) == self.intrinsics.update_context {
+                    let pc = abs[0].is_const_u32();
+                    state.context = self
+                        .state
+                        .contexts
+                        .create(Some(state.context), ContextElem::Update(pc, orig_block));
+                    log::trace!("update context (pc {:?}): now {}", pc, state.context);
                     Some((
                         AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
                         None,
@@ -1120,21 +1145,6 @@ impl<'a> Evaluator<'a> {
                 }
             }
             _ => AbstractValue::Runtime(ValueTags::default()),
-        }
-    }
-
-    fn compute_header_blocks(&mut self) {
-        for (block, block_def) in self.generic.blocks.entries() {
-            for &inst in &block_def.insts {
-                if let ValueDef::Operator(Operator::Call { function_index }, ..) =
-                    &self.generic.values[inst]
-                {
-                    if Some(*function_index) == self.intrinsics.loop_header {
-                        self.header_blocks.insert(block);
-                        break;
-                    }
-                }
-            }
         }
     }
 

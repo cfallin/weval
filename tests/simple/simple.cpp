@@ -45,13 +45,13 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     // impls for u64 and T*) that have a `.loop([&](pc) { ... })`
     // method that returns either LoopResult::next_pc(pc) or
     // LoopResult::break_loop(val).
+    weval::push_context(pc);
     while (true) {
-        weval::loop_header();
         steps++;
         printf("%d steps; PC = %d\n", steps, pc);
         const Inst* inst = &insts[pc];
         pc++;
-        weval::loop_pc_update(pc);
+        weval::update_context(pc);
         printf("PC = %d\n", pc);
         switch (inst->opcode) {
             case PushConst:
@@ -119,7 +119,7 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                     return false;
                 }
                 pc = inst->imm;
-                weval::loop_pc_update(pc);
+                weval::update_context(pc);
                 break;
             case GotoIf:
                 if (state->opstack_len == 0) {
@@ -132,7 +132,7 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                 printf("gotoif: val = %d\n", state->opstack[state->opstack_len]);
                 if (state->opstack[state->opstack_len] != 0) {
                     pc = inst->imm;
-                    weval::loop_pc_update(pc);
+                    weval::update_context(pc);
                     continue;
                 }
                 break;
@@ -141,6 +141,7 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                 return true;
         }
     }
+    weval::pop_context();
 }
 
 Inst prog[] = {
