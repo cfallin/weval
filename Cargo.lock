@@ -492,6 +492,8 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 [[package]]
 name = "waffle"
 version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "337ba4c841b91403395b778b327bab0521882695951592a9144a924713274cd0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -502,17 +504,8 @@ dependencies = [
  "rayon",
  "smallvec",
  "structopt",
- "wasm-encoder 0.20.0",
- "wasmparser 0.95.0",
-]
-
-[[package]]
-name = "wasm-encoder"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d443c5a7daae71697d97ec12ad70b4fe8766d3a0f4db16158ac8b781365892f7"
-dependencies = [
- "leb128",
+ "wasm-encoder",
+ "wasmparser",
 ]
 
 [[package]]
@@ -523,12 +516,6 @@ checksum = "05632e0a66a6ed8cca593c24223aabd6262f256c3693ad9822c315285f010614"
 dependencies = [
  "leb128",
 ]
-
-[[package]]
-name = "wasmparser"
-version = "0.77.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b35c86d22e720a07d954ebbed772d01180501afe7d03d464f413bb5f8914a8d6"
 
 [[package]]
 name = "wasmparser"
@@ -549,8 +536,8 @@ dependencies = [
  "log",
  "structopt",
  "waffle",
- "wasm-encoder 0.16.0",
- "wasmparser 0.77.0",
+ "wasm-encoder",
+ "wasmparser",
 ]
 
 [[package]]
