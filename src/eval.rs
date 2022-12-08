@@ -13,7 +13,6 @@ use crate::image::Image;
 use crate::intrinsics::Intrinsics;
 use crate::state::*;
 use crate::value::{AbstractValue, ValueTags, WasmVal};
-use std::borrow::Cow;
 use std::collections::{
     btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, HashMap, HashSet, VecDeque,
 };
@@ -52,8 +51,6 @@ struct Evaluator<'a> {
     queue: VecDeque<(Block, Context, Block)>,
     /// Set to deduplicate `queue`.
     queue_set: HashSet<(Block, Context)>,
-    /// Header blocks.
-    header_blocks: HashSet<Block>,
 }
 
 /// Partially evaluates according to the given directives.
@@ -128,12 +125,10 @@ fn partially_evaluate_func(
         value_map: HashMap::new(),
         queue: VecDeque::new(),
         queue_set: HashSet::new(),
-        header_blocks: HashSet::new(),
     };
     let (ctx, entry_state) = evaluator
         .state
         .init_args(body, image, &directive.const_params[..]);
-    evaluator.compute_header_blocks();
     log::trace!("after init_args, state is {:?}", evaluator.state);
     let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
     evaluator.func.entry = specialized_entry;
@@ -183,6 +178,7 @@ impl<'a> Evaluator<'a> {
         // Create program-point state.
         let mut state = PointState {
             context: ctx,
+            pending_context: None,
             flow: self.state.state[ctx]
                 .block_entry
                 .get(&orig_block)
@@ -203,7 +199,7 @@ impl<'a> Evaluator<'a> {
     /// and SSA value in the specialized function.
     fn use_value(
         &mut self,
-        mut context: Context,
+        context: Context,
         orig_block: Block,
         orig_val: Value,
     ) -> (Value, AbstractValue) {
@@ -213,22 +209,16 @@ impl<'a> Evaluator<'a> {
             orig_block,
             context
         );
-        let orig_context = context;
-        let val_block = self.generic.value_blocks[orig_val];
-        loop {
-            if let Some(&abs) = self.state.state[context].ssa.values.get(&orig_val) {
-                log::trace!(" -> found abstract  value {:?} at context {}", abs, context);
-                self.block_deps
-                    .entry((context, val_block))
-                    .or_insert_with(|| HashSet::new())
-                    .insert((orig_context, orig_block));
-                let &val = self.value_map.get(&(context, orig_val)).unwrap();
-                return (val, abs);
-            }
-            assert_ne!(context, Context::default());
-            context = self.state.contexts.parent(context);
-            log::trace!(" -> going up to parent context {}", context);
+        if let Some(&abs) = self.state.state[context].ssa.values.get(&orig_val) {
+            log::trace!(" -> found abstract  value {:?} at context {}", abs, context);
+            let &val = self.value_map.get(&(context, orig_val)).unwrap();
+            log::trace!(" -> runtime value {}", val);
+            return (val, abs);
         }
+        panic!(
+            "Could not find value for {} in context {}",
+            orig_val, context
+        );
     }
 
     fn def_value(
@@ -238,7 +228,7 @@ impl<'a> Evaluator<'a> {
         orig_val: Value,
         val: Value,
         abs: AbstractValue,
-    ) {
+    ) -> bool {
         log::trace!(
             "defining val {} in block {} context {} with specialized val {} abs {:?}",
             orig_val,
@@ -248,7 +238,7 @@ impl<'a> Evaluator<'a> {
             abs
         );
         self.value_map.insert((context, orig_val), val);
-        let changed = match self.state.state[context].ssa.values.entry(orig_val) {
+        match self.state.state[context].ssa.values.entry(orig_val) {
             BTreeEntry::Vacant(v) => {
                 v.insert(abs);
                 true
@@ -257,19 +247,15 @@ impl<'a> Evaluator<'a> {
                 let val_abs = o.get_mut();
                 let updated = AbstractValue::meet(*val_abs, abs);
                 let changed = updated != *val_abs;
+                log::trace!(
+                    " -> meet: cur {:?} input {:?} result {:?} (changed: {})",
+                    val_abs,
+                    abs,
+                    updated,
+                    changed,
+                );
                 *val_abs = updated;
                 changed
-            }
-        };
-
-        if changed {
-            // We need to enqueue all blocks that have read a value
-            // from this block.
-            if let Some(deps) = self.block_deps.remove(&(context, block)) {
-                for (ctx, block) in &deps {
-                    self.enqueue_block_if_existing(*block, *ctx);
-                }
-                self.block_deps.insert((context, block), deps);
             }
         }
     }
@@ -420,103 +406,30 @@ impl<'a> Evaluator<'a> {
             state.context
         );
 
-        let mut target_context = state.context;
-        // Pop and/or update PC if needed.
-        let updated_state = loop {
-            let elem = self.state.contexts.leaf_element(target_context);
-            if elem.1 == self.generic.entry {
-                break Cow::Borrowed(state);
-            }
-            if !self.cfg.dominates(elem.1, target) {
-                target_context = self.state.contexts.parent(target_context);
-                log::trace!(
-                    " -> header block of context {} does not dominate {}; popping to parent {}",
-                    elem.1,
-                    target,
-                    target_context
-                );
-                let mut state = state.clone();
-                state.flow.pc = None;
-                break Cow::Owned(state);
-            } else if elem.1 == target {
-                log::trace!(
-                    " -> header block of context {} is target; handling staged PC updated {:?}",
-                    target_context,
-                    state.flow.staged_pc
-                );
-                // If we have a staged PC update, make it now.
-                match state.flow.staged_pc {
-                    StagedPC::None => {
-                        break Cow::Borrowed(state);
-                    }
-                    StagedPC::Conflict => {
-                        let mut state = state.clone();
-                        state.flow.staged_pc = StagedPC::None;
-                        break Cow::Owned(state);
-                    }
-                    StagedPC::Some(pc) => {
-                        let mut state = state.clone();
-                        let parent = self.state.contexts.parent(target_context);
-                        target_context = self
-                            .state
-                            .contexts
-                            .create(Some(parent), ContextElem(pc, elem.1));
-                        log::trace!(" -> new context is {} parent {}", target_context, parent);
-                        state.flow.staged_pc = StagedPC::None;
-                        state.flow.pc = Some(pc);
-                        state.context = target_context;
-                        break Cow::Owned(state);
-                    }
-                }
-            } else {
-                break Cow::Borrowed(state);
-            }
-        };
-        // Push new context elem if entering a loop.
-        let updated_state =
-            if self.header_blocks.contains(&target) && !self.cfg.dominates(target, orig_block) {
-                let context = self
-                    .state
-                    .contexts
-                    .create(Some(updated_state.context), ContextElem(None, target));
-                let mut updated_state = updated_state.into_owned();
-                updated_state.context = context;
-                log::trace!(
-                    "pushing context for loop header {}: now {}",
-                    target,
-                    context
-                );
-                Cow::Owned(updated_state)
-            } else {
-                updated_state
-            };
+        let target_context = state.pending_context.unwrap_or(state.context);
+        log::trace!(" -> new context {}", target_context);
 
-        log::trace!(" -> updated state is: {:?}", updated_state);
-
-        match self.block_map.entry((updated_state.context, target)) {
+        match self.block_map.entry((target_context, target)) {
             HashEntry::Vacant(_) => {
-                let block =
-                    self.create_block(target, updated_state.context, updated_state.flow.clone());
+                let block = self.create_block(target, target_context, state.flow.clone());
                 log::trace!(" -> created block {}", block);
-                self.block_map
-                    .insert((updated_state.context, target), block);
-                self.queue_set.insert((target, updated_state.context));
-                self.queue.push_back((target, updated_state.context, block));
-                (block, updated_state.context)
+                self.block_map.insert((target_context, target), block);
+                self.queue_set.insert((target, target_context));
+                self.queue.push_back((target, target_context, block));
+                (block, target_context)
             }
             HashEntry::Occupied(o) => {
                 let target_specialized = *o.get();
                 log::trace!(" -> already existing block {}", target_specialized);
-                let changed =
-                    self.meet_into_block_entry(target, updated_state.context, &updated_state.flow);
+                let changed = self.meet_into_block_entry(target, target_context, &state.flow);
                 if changed {
                     log::trace!("   -> changed");
-                    if self.queue_set.insert((target, updated_state.context)) {
+                    if self.queue_set.insert((target, target_context)) {
                         self.queue
-                            .push_back((target, updated_state.context, target_specialized));
+                            .push_back((target, target_context, target_specialized));
                     }
                 }
-                (target_specialized, updated_state.context)
+                (target_specialized, target_context)
             }
         }
     }
@@ -554,6 +467,7 @@ impl<'a> Evaluator<'a> {
 
         // Parallel-move semantics: read all uses above, then write
         // all defs below.
+        let mut changed = false;
         for (blockparam, abs) in self.generic.blocks[target.block]
             .params
             .iter()
@@ -561,7 +475,15 @@ impl<'a> Evaluator<'a> {
             .zip(abs_args.iter())
         {
             let &val = self.value_map.get(&(target_ctx, blockparam)).unwrap();
-            self.def_value(orig_block, target_ctx, blockparam, val, *abs);
+            log::trace!(
+                "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?}",
+                target.block, target_ctx, blockparam, val, abs);
+            changed |= self.def_value(orig_block, target_ctx, blockparam, val, *abs);
+        }
+
+        // If blockparam inputs changed, re-enqueue target for evaluation.
+        if changed {
+            self.enqueue_block_if_existing(target.block, target_ctx);
         }
 
         BlockTarget {
@@ -686,13 +608,43 @@ impl<'a> Evaluator<'a> {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.assume_const_memory {
                     Some((abs[0].with_tags(ValueTags::const_memory()), Some(values[0])))
-                } else if Some(function_index) == self.intrinsics.loop_pc32_update {
-                    let pc = abs[0].is_const_u32().map(|pc| pc as u64);
-                    state.flow.staged_pc = StagedPC::Some(pc);
-                    log::trace!("change PC: stage {:?} for next loop backedge", pc);
-                    Some((abs[0], Some(values[0])))
-                } else if Some(function_index) == self.intrinsics.loop_header {
-                    // Just remove the intrinsic call.
+                } else if Some(function_index) == self.intrinsics.push_context {
+                    let pc = abs[0].is_const_u32();
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let child = self
+                        .state
+                        .contexts
+                        .create(Some(instantaneous_context), ContextElem::Loop(pc));
+                    state.pending_context = Some(child);
+                    log::trace!("push context (pc {:?}): now {}", pc, child);
+                    Some((
+                        AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
+                        None,
+                    ))
+                } else if Some(function_index) == self.intrinsics.pop_context {
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let parent = match self.state.contexts.leaf_element(instantaneous_context) {
+                        ContextElem::Root => instantaneous_context,
+                        _ => self.state.contexts.parent(instantaneous_context),
+                    };
+                    state.pending_context = Some(parent);
+                    log::trace!("pop context: now {}", parent);
+                    Some((
+                        AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
+                        None,
+                    ))
+                } else if Some(function_index) == self.intrinsics.update_context {
+                    let pc = abs[0].is_const_u32();
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let sibling = match self.state.contexts.leaf_element(instantaneous_context) {
+                        ContextElem::Root => instantaneous_context,
+                        _ => self.state.contexts.create(
+                            Some(self.state.contexts.parent(instantaneous_context)),
+                            ContextElem::Loop(pc),
+                        ),
+                    };
+                    state.pending_context = Some(sibling);
+                    log::trace!("update context (pc {:?}): now {}", pc, sibling);
                     Some((
                         AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
                         None,
@@ -1111,31 +1063,16 @@ impl<'a> Evaluator<'a> {
         _z_val: Value,
         _state: &mut PointState,
     ) -> AbstractValue {
-        match (op, x) {
+        match (op, z) {
             (Operator::Select, AbstractValue::Concrete(v, _t))
             | (Operator::TypedSelect { .. }, AbstractValue::Concrete(v, _t)) => {
                 if v.is_truthy() {
-                    y
+                    x
                 } else {
-                    z
+                    y
                 }
             }
             _ => AbstractValue::Runtime(ValueTags::default()),
-        }
-    }
-
-    fn compute_header_blocks(&mut self) {
-        for (block, block_def) in self.generic.blocks.entries() {
-            for &inst in &block_def.insts {
-                if let ValueDef::Operator(Operator::Call { function_index }, ..) =
-                    &self.generic.values[inst]
-                {
-                    if Some(*function_index) == self.intrinsics.loop_header {
-                        self.header_blocks.insert(block);
-                        break;
-                    }
-                }
-            }
         }
     }
 

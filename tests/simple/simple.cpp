@@ -45,14 +45,12 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     // impls for u64 and T*) that have a `.loop([&](pc) { ... })`
     // method that returns either LoopResult::next_pc(pc) or
     // LoopResult::break_loop(val).
+    weval::push_context(pc);
     while (true) {
-        weval::loop_header();
         steps++;
-        printf("%d steps; PC = %d\n", steps, pc);
         const Inst* inst = &insts[pc];
         pc++;
-        weval::loop_pc_update(pc);
-        printf("PC = %d\n", pc);
+        weval::update_context(pc);
         switch (inst->opcode) {
             case PushConst:
                 if (state->opstack_len + 1 > OPSTACK_SIZE) {
@@ -119,7 +117,7 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                     return false;
                 }
                 pc = inst->imm;
-                weval::loop_pc_update(pc);
+                weval::update_context(pc);
                 break;
             case GotoIf:
                 if (state->opstack_len == 0) {
@@ -129,18 +127,21 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                     return false;
                 }
                 state->opstack_len--;
-                printf("gotoif: val = %d\n", state->opstack[state->opstack_len]);
                 if (state->opstack[state->opstack_len] != 0) {
                     pc = inst->imm;
-                    weval::loop_pc_update(pc);
+                    weval::update_context(pc);
                     continue;
                 }
                 break;
             case Exit:
-                printf("Exiting after %d steps at PC %d.\n", steps, pc);
-                return true;
+                goto out;
         }
     }
+out:
+    weval::pop_context();
+
+    printf("Exiting after %d steps at PC %d.\n", steps, pc);
+    return true;
 }
 
 Inst prog[] = {
@@ -182,4 +183,5 @@ Func prog_func(prog, sizeof(prog)/sizeof(Inst));
 int main() {
     State* state = (State*)calloc(sizeof(State), 1);
     prog_func.invoke(state);
+    fflush(stdout);
 }

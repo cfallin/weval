@@ -5,8 +5,9 @@ use waffle::{ExportKind, Func, FuncDecl, Module, Operator, Terminator, Type, Val
 #[derive(Clone, Debug)]
 pub struct Intrinsics {
     pub assume_const_memory: Option<Func>,
-    pub loop_header: Option<Func>,
-    pub loop_pc32_update: Option<Func>,
+    pub push_context: Option<Func>,
+    pub pop_context: Option<Func>,
+    pub update_context: Option<Func>,
 }
 
 impl Intrinsics {
@@ -18,15 +19,9 @@ impl Intrinsics {
                 &[Type::I32],
                 &[Type::I32],
             ),
-            // TODO: return a unique token from the header intrinsic
-            // to pass into pc32_update
-            loop_header: find_exported_func(module, "weval.loop.header", &[], &[]),
-            loop_pc32_update: find_exported_func(
-                module,
-                "weval.loop.pc32.update",
-                &[Type::I32],
-                &[Type::I32],
-            ),
+            push_context: find_exported_func(module, "weval.push.context", &[Type::I32], &[]),
+            pop_context: find_exported_func(module, "weval.pop.context", &[], &[]),
+            update_context: find_exported_func(module, "weval.update.context", &[Type::I32], &[]),
         }
     }
 }

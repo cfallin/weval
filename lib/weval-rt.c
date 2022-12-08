@@ -4,6 +4,7 @@ weval_req_t* weval_req_pending_head;
 weval_req_t* weval_req_freelist_head;
 
 static int __hook = 0;
+static int __accum = 0;
 
 __attribute__((export_name("weval.hook")))
 void set_hook() {
@@ -31,20 +32,20 @@ const void* weval_assume_const_memory(const void* value) {
     }
 }
 
-__attribute__((export_name("weval.loop.header")))
-void weval_loop_header() {
-    __hook++;
+__attribute__((export_name("weval.push.context")))
+void weval_push_context(uint32_t pc) {
+    __accum += pc + 1;
 }
 
-__attribute__((export_name("weval.loop.pc32.update")))
-uint32_t weval_loop_pc32_update(uint32_t pc) {
-    if (__hook) {
-        return 3;
-    } else {
-        return pc;
-    }
+__attribute__((export_name("weval.update.context")))
+void weval_update_context(uint32_t pc) {
+    __accum += pc + 2;
 }
 
+__attribute__((export_name("weval.pop.context")))
+void weval_pop_context() {
+    __accum += 3;
+}
 
 __attribute__((export_name("weval.pending.head")))
 weval_req_t** __weval_pending_head() {

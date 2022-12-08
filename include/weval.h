@@ -71,9 +71,11 @@ void marker(int magic);
 __attribute__((noinline))
 const void* weval_assume_const_memory(const void* p);
 __attribute__((noinline))
-void weval_loop_header();
+void weval_push_context(uint32_t pc);
 __attribute__((noinline))
-uint32_t weval_loop_pc32_update(uint32_t pc);
+void weval_pop_context();
+__attribute__((noinline))
+void weval_update_context(uint32_t pc);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -86,12 +88,16 @@ const T* assume_const_memory(const T* t) {
     return (const T*)weval_assume_const_memory((const void*)t);
 }
 
-void loop_header() {
-    weval_loop_header();
+static void push_context(uint32_t pc) {
+    weval_push_context(pc);
 }
-    
-uint32_t loop_pc_update(uint32_t pc) {
-    return weval_loop_pc32_update(pc);
+
+static void pop_context() {
+    weval_pop_context();
+}
+
+static void update_context(uint32_t pc) {
+    weval_update_context(pc);
 }
 
 }  // namespace weval

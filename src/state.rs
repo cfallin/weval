@@ -43,13 +43,14 @@ use waffle::{Block, FunctionBody, Global, Value};
 
 waffle::declare_entity!(Context, "context");
 
-pub type PC = Option<u64>;
+pub type PC = Option<u32>;
 
-/// One element in the context stack: the loop PC, and the block that
-/// dominates the context (we automatically leave the context when
-/// crossing the dominance frontier of this block).
+/// One element in the context stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ContextElem(pub PC, pub Block);
+pub enum ContextElem {
+    Root,
+    Loop(PC),
+}
 
 /// Arena of contexts.
 #[derive(Clone, Default, Debug)]
@@ -65,6 +66,7 @@ impl Contexts {
             Entry::Occupied(o) => *o.get(),
             Entry::Vacant(v) => {
                 let id = self.contexts.push((parent, elem));
+                log::trace!("create context: {}: parent {} leaf {:?}", id, parent, elem);
                 *v.insert(id)
             }
         }
@@ -94,18 +96,6 @@ pub struct ProgPointState {
     pub mem_overlay: BTreeMap<u32, AbstractValue>,
     /// Global values.
     pub globals: BTreeMap<Global, AbstractValue>,
-    /// Staged PC value for next loop backedge in innermost loop.
-    pub staged_pc: StagedPC,
-    /// Current PC value.
-    pub pc: Option<PC>,
-}
-
-/// The flow-sensitive part of the state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StagedPC {
-    None,
-    Some(PC),
-    Conflict,
 }
 
 /// The state for a function body during analysis.
@@ -126,6 +116,7 @@ pub struct PerContextState {
 #[derive(Clone, Debug)]
 pub struct PointState {
     pub context: Context,
+    pub pending_context: Option<Context>,
     pub flow: ProgPointState,
 }
 
@@ -164,29 +155,13 @@ impl ProgPointState {
         ProgPointState {
             mem_overlay: BTreeMap::new(),
             globals,
-            staged_pc: StagedPC::None,
-            pc: None,
         }
     }
 
     pub fn meet_with(&mut self, other: &ProgPointState) -> bool {
         let mut changed = false;
-
         changed |= map_meet_with(&mut self.mem_overlay, &other.mem_overlay);
         changed |= map_meet_with(&mut self.globals, &other.globals);
-
-        let old_staged_pc = self.staged_pc;
-        self.staged_pc = match (self.staged_pc, other.staged_pc) {
-            (StagedPC::None, x) | (x, StagedPC::None) => x,
-            (StagedPC::Some(pc1), StagedPC::Some(pc2)) if pc1 == pc2 => StagedPC::Some(pc1),
-            _ => StagedPC::Conflict,
-        };
-        changed |= self.staged_pc != old_staged_pc;
-
-        let old_pc = self.pc;
-        self.pc = if self.pc == other.pc { self.pc } else { None };
-        changed |= self.pc != old_pc;
-
         changed
     }
 }
@@ -207,9 +182,7 @@ impl FunctionState {
     ) -> (Context, ProgPointState) {
         // For each blockparam of the entry block, set the value of the SSA arg.
         debug_assert_eq!(args.len(), orig_body.blocks[orig_body.entry].params.len());
-        let ctx = self
-            .contexts
-            .create(None, ContextElem(None, orig_body.entry));
+        let ctx = self.contexts.create(None, ContextElem::Root);
         for ((_, orig_value), abs) in orig_body.blocks[orig_body.entry]
             .params
             .iter()

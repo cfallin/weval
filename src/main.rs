@@ -28,6 +28,9 @@ fn main() -> anyhow::Result<()> {
     // Load module.
     let bytes = std::fs::read(&opts.input_module)?;
     let mut module = waffle::Module::from_wasm_bytes(&bytes[..])?;
+    // Pre-optimize, and convert to maximal SSA, which we require.
+    module.optimize();
+    module.convert_to_max_ssa();
 
     // Build module image.
     let mut im = image::build_image(&module)?;
