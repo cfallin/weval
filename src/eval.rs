@@ -457,8 +457,9 @@ impl<'a> Evaluator<'a> {
 
         let (target_block, target_ctx) = self.target_block(state, orig_block, target.block);
 
-        for arg in &target.args {
-            let (val, abs) = self.use_value(state.context, orig_block, *arg);
+        for &arg in &target.args {
+            let arg = self.generic.resolve_alias(arg);
+            let (val, abs) = self.use_value(state.context, orig_block, arg);
             args.push(val);
             abs_args.push(abs);
             log::trace!(
