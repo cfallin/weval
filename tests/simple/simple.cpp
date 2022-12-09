@@ -40,6 +40,11 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     insts = weval::assume_const_memory(insts);
     uint32_t pc = 0;
     uint32_t steps = 0;
+    uint32_t* opstack = state->opstack;
+    uint32_t* locals = state->locals;
+    int opstack_len = state->opstack_len;
+    opstack = weval::make_symbolic_ptr(opstack);
+    locals = weval::make_symbolic_ptr(locals);
 
     // TODO: build an abstraction for `pc`: `InterpreterPC<u32>` (and
     // impls for u64 and T*) that have a `.loop([&](pc) { ... })`
@@ -53,64 +58,64 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
         weval::update_context(pc);
         switch (inst->opcode) {
             case PushConst:
-                if (state->opstack_len + 1 > OPSTACK_SIZE) {
+                if (opstack_len + 1 > OPSTACK_SIZE) {
                     return false;
                 }
-                state->opstack[state->opstack_len++] = inst->imm;
+                opstack[opstack_len++] = inst->imm;
                 break;
             case Drop:
-                if (state->opstack_len == 0) {
+                if (opstack_len == 0) {
                     return false;
                 }
-                state->opstack_len--;
+                opstack_len--;
                 break;
             case Dup:
-                if (state->opstack_len + 1 > OPSTACK_SIZE) {
+                if (opstack_len + 1 > OPSTACK_SIZE) {
                     return false;
                 }
-                if (state->opstack_len == 0) {
+                if (opstack_len == 0) {
                     return false;
                 }
-                state->opstack[state->opstack_len] = state->opstack[state->opstack_len - 1];
-                state->opstack_len++;
+                opstack[opstack_len] = opstack[opstack_len - 1];
+                opstack_len++;
                 break;
             case GetLocal:
-                if (state->opstack_len + 1 > OPSTACK_SIZE) {
+                if (opstack_len + 1 > OPSTACK_SIZE) {
                     return false;
                 }
                 if (inst->imm >= LOCAL_SIZE) {
                     return false;
                 }
-                state->opstack[state->opstack_len++] = state->locals[inst->imm];
+                opstack[opstack_len++] = locals[inst->imm];
                 break;
             case SetLocal:
-                if (state->opstack_len == 0) {
+                if (opstack_len == 0) {
                     return false;
                 }
                 if (inst->imm >= LOCAL_SIZE) {
                     return false;
                 }
-                state->locals[inst->imm] = state->opstack[--state->opstack_len];
+                locals[inst->imm] = opstack[--opstack_len];
                 break;
             case Add:
-                if (state->opstack_len < 2) {
+                if (opstack_len < 2) {
                     return false;
                 }
-                state->opstack[state->opstack_len - 2] += state->opstack[state->opstack_len - 1];
-                state->opstack_len--;
+                opstack[opstack_len - 2] += opstack[opstack_len - 1];
+                opstack_len--;
                 break;
             case Sub:
-                if (state->opstack_len < 2) {
+                if (opstack_len < 2) {
                     return false;
                 }
-                state->opstack[state->opstack_len - 2] -= state->opstack[state->opstack_len - 1];
-                state->opstack_len--;
+                opstack[opstack_len - 2] -= opstack[opstack_len - 1];
+                opstack_len--;
                 break;
             case Print:
-                if (state->opstack_len == 0) {
+                if (opstack_len == 0) {
                     return false;
                 }
-                printf("%u\n", state->opstack[--state->opstack_len]);
+                printf("%u\n", opstack[--opstack_len]);
                 break;
             case Goto:
                 if (inst->imm >= ninsts) {
@@ -120,14 +125,14 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                 weval::update_context(pc);
                 break;
             case GotoIf:
-                if (state->opstack_len == 0) {
+                if (opstack_len == 0) {
                     return false;
                 }
                 if (inst->imm >= ninsts) {
                     return false;
                 }
-                state->opstack_len--;
-                if (state->opstack[state->opstack_len] != 0) {
+                opstack_len--;
+                if (opstack[opstack_len] != 0) {
                     pc = inst->imm;
                     weval::update_context(pc);
                     continue;
@@ -139,6 +144,9 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     }
 out:
     weval::pop_context();
+    state->opstack_len = opstack_len;
+    weval::flush_to_mem(opstack, OPSTACK_SIZE);
+    weval::flush_to_mem(locals, LOCAL_SIZE);
 
     printf("Exiting after %d steps at PC %d.\n", steps, pc);
     return true;

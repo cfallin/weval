@@ -67,7 +67,6 @@ static void weval_free() {
 extern "C" {
 #endif
 
-void marker(int magic);
 __attribute__((noinline))
 const void* weval_assume_const_memory(const void* p);
 __attribute__((noinline))
@@ -76,6 +75,10 @@ __attribute__((noinline))
 void weval_pop_context();
 __attribute__((noinline))
 void weval_update_context(uint32_t pc);
+__attribute__((noinline))
+void* weval_make_symbolic_ptr(void* p);
+__attribute__((noinline))
+void weval_flush_to_mem(void* p, uint32_t len);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -98,6 +101,14 @@ static void pop_context() {
 
 static void update_context(uint32_t pc) {
     weval_update_context(pc);
+}
+template<typename T>
+static T* make_symbolic_ptr(T* t) {
+    return (T*)weval_make_symbolic_ptr((void*)t);
+}
+template<typename T>
+void flush_to_mem(T* p, size_t len) {
+    weval_flush_to_mem((void*)p, (uint32_t)len);
 }
 
 }  // namespace weval

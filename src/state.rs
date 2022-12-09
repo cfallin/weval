@@ -93,10 +93,13 @@ pub struct SSAState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProgPointState {
     /// Memory overlay. We store only aligned u32s here.
-    pub mem_overlay: BTreeMap<u32, AbstractValue>,
+    pub mem_overlay: BTreeMap<SymbolicAddr, AbstractValue>,
     /// Global values.
     pub globals: BTreeMap<Global, AbstractValue>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SymbolicAddr(u32, u32);
 
 /// The state for a function body during analysis.
 #[derive(Clone, Debug)]

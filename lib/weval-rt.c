@@ -32,6 +32,20 @@ const void* weval_assume_const_memory(const void* value) {
     }
 }
 
+__attribute__((export_name("weval.make.symbolic.ptr")))
+void* weval_make_symbolic_ptr(void* value) {
+    if (__hook) {
+        return (void*)4;
+    } else {
+        return value;
+    }
+}
+
+__attribute__((export_name("weval.flush.to.mem")))
+void weval_flush_to_mem(void* value, uint32_t len) {
+    __accum += (int)value + (int)len;
+}
+
 __attribute__((export_name("weval.push.context")))
 void weval_push_context(uint32_t pc) {
     __accum += pc + 1;

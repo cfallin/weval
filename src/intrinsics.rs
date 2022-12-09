@@ -5,6 +5,8 @@ use waffle::{ExportKind, Func, FuncDecl, Module, Operator, Terminator, Type, Val
 #[derive(Clone, Debug)]
 pub struct Intrinsics {
     pub assume_const_memory: Option<Func>,
+    pub make_symbolic_ptr: Option<Func>,
+    pub flush_to_mem: Option<Func>,
     pub push_context: Option<Func>,
     pub pop_context: Option<Func>,
     pub update_context: Option<Func>,
@@ -18,6 +20,18 @@ impl Intrinsics {
                 "weval.assume.const.memory",
                 &[Type::I32],
                 &[Type::I32],
+            ),
+            make_symbolic_ptr: find_exported_func(
+                module,
+                "weval.make.symbolic.ptr",
+                &[Type::I32],
+                &[Type::I32],
+            ),
+            flush_to_mem: find_exported_func(
+                module,
+                "weval.flush.to.mem",
+                &[Type::I32, Type::I32],
+                &[],
             ),
             push_context: find_exported_func(module, "weval.push.context", &[Type::I32], &[]),
             pop_context: find_exported_func(module, "weval.pop.context", &[], &[]),

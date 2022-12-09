@@ -17,6 +17,7 @@ use std::collections::{
     btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, HashMap, HashSet, VecDeque,
 };
 use waffle::cfg::CFGInfo;
+use waffle::entity::EntityRef;
 use waffle::{
     Block, BlockTarget, Func, FunctionBody, Module, Operator, Table, Terminator, Type, Value,
     ValueDef,
@@ -46,6 +47,10 @@ struct Evaluator<'a> {
     block_deps: HashMap<(Context, Block), HashSet<(Context, Block)>>,
     /// Map of (ctx, value_in_generic) to specialized value_in_func.
     value_map: HashMap<(Context, Value), Value>,
+    /// Side-outs of transfer function: points at which we need to
+    /// flush renamed-memory values to memory. Placed before the given
+    /// (specialized) `Value` key appears as an inst.
+    memory_flushes: HashMap<Value, Vec<(SymbolicAddr, Option<usize>)>>,
     /// Queue of blocks to (re)compute. List of (block_in_generic,
     /// ctx, block_in_func).
     queue: VecDeque<(Block, Context, Block)>,
@@ -123,6 +128,7 @@ fn partially_evaluate_func(
         block_map: HashMap::new(),
         block_deps: HashMap::new(),
         value_map: HashMap::new(),
+        memory_flushes: HashMap::new(),
         queue: VecDeque::new(),
         queue_set: HashSet::new(),
     };
@@ -607,6 +613,9 @@ impl<'a> Evaluator<'a> {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.assume_const_memory {
                     Some((abs[0].with_tags(ValueTags::const_memory()), Some(values[0])))
+                } else if Some(function_index) == self.intrinsics.make_symbolic_ptr {
+                    let label_index = values[0].index() as u32;
+                    Some((AbstractValue::SymbolicPtr(label_index, 0), Some(values[0])))
                 } else if Some(function_index) == self.intrinsics.push_context {
                     let pc = abs[0].is_const_u32();
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
