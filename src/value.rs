@@ -60,7 +60,7 @@ pub enum AbstractValue {
     /// A pointer value tracked symbolically. Usually used to allow
     /// for "renamed memory". First arg is a unique label; second is
     /// an offset.
-    SymbolicPtr(u32, u32),
+    SymbolicPtr(u32, i64),
     /// A value known at specialization time.
     ///
     /// May have special "tags" attached, to mark that e.g. derived

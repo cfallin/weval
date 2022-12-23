@@ -36,10 +36,10 @@
 
 use crate::image::Image;
 use crate::value::{AbstractValue, ValueTags};
-use std::collections::BTreeMap;
 use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use waffle::entity::{EntityRef, EntityVec, PerEntity};
-use waffle::{Block, FunctionBody, Global, Value};
+use waffle::{Block, FunctionBody, Global, Type, Value};
 
 waffle::declare_entity!(Context, "context");
 
@@ -93,13 +93,43 @@ pub struct SSAState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProgPointState {
     /// Memory overlay. We store only aligned u32s here.
-    pub mem_overlay: BTreeMap<SymbolicAddr, AbstractValue>,
+    pub mem_overlay: BTreeMap<SymbolicAddr, MemValue>,
+    /// Escaped symbolic labels. We can't track any memory relative to
+    /// these bases anymore at this program point.
+    pub escaped_labels: BTreeSet<u32>,
     /// Global values.
     pub globals: BTreeMap<Global, AbstractValue>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SymbolicAddr(u32, u32);
+pub struct SymbolicAddr(pub u32, pub i64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MemValue {
+    Value(Value, Type),
+    BlockParam(Type),
+    Escaped,
+}
+
+impl MemValue {
+    fn meet(a: MemValue, b: MemValue) -> MemValue {
+        match (a, b) {
+            (a, b) if a == b => a,
+            (MemValue::Value(_, t1), MemValue::Value(_, t2)) if t1 == t2 => {
+                MemValue::BlockParam(t1)
+            }
+            _ => MemValue::Escaped,
+        }
+    }
+
+    fn ty(&self) -> Option<Type> {
+        match self {
+            &MemValue::Value(_, t) => Some(t),
+            &MemValue::BlockParam(t) => Some(t),
+            _ => None,
+        }
+    }
+}
 
 /// The state for a function body during analysis.
 #[derive(Clone, Debug)]
@@ -123,29 +153,46 @@ pub struct PointState {
     pub flow: ProgPointState,
 }
 
-fn map_meet_with<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
-    this: &mut BTreeMap<K, AbstractValue>,
-    other: &BTreeMap<K, AbstractValue>,
+fn map_meet_with<
+    K: PartialEq + Eq + PartialOrd + Ord + Copy,
+    V: Copy + PartialEq + Eq,
+    Meet: Fn(V, V) -> V,
+>(
+    this: &mut BTreeMap<K, V>,
+    other: &BTreeMap<K, V>,
+    meet: Meet,
+    bot: V,
 ) -> bool {
     let mut changed = false;
     for (k, val) in this.iter_mut() {
         if let Some(other_val) = other.get(k) {
-            let met = AbstractValue::meet(*val, *other_val);
+            let met = meet(*val, *other_val);
             changed |= met != *val;
             *val = met;
         } else {
-            *val = AbstractValue::Top;
-            // N.B.: not changed: Top should not have an effect (every
-            // non-present key is conceptually already Top).
+            let old = *val;
+            *val = bot;
+            changed |= old != *val;
         }
     }
     for other_k in other.keys() {
         if !this.contains_key(other_k) {
-            this.insert(*other_k, AbstractValue::Runtime(ValueTags::default()));
+            this.insert(*other_k, bot);
             changed = true;
         }
     }
     changed
+}
+
+fn set_union<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
+    this: &mut BTreeSet<K>,
+    other: &BTreeSet<K>,
+) -> bool {
+    let mut inserted = false;
+    for &elt in other {
+        inserted |= this.insert(elt);
+    }
+    inserted
 }
 
 impl ProgPointState {
@@ -157,15 +204,61 @@ impl ProgPointState {
             .collect();
         ProgPointState {
             mem_overlay: BTreeMap::new(),
+            escaped_labels: BTreeSet::new(),
             globals,
         }
     }
 
     pub fn meet_with(&mut self, other: &ProgPointState) -> bool {
         let mut changed = false;
-        changed |= map_meet_with(&mut self.mem_overlay, &other.mem_overlay);
-        changed |= map_meet_with(&mut self.globals, &other.globals);
+        changed |= map_meet_with(
+            &mut self.mem_overlay,
+            &other.mem_overlay,
+            MemValue::meet,
+            MemValue::Escaped,
+        );
+
+        // TODO: check mem overlay for overlapping values of different
+        // types
+
+        changed |= map_meet_with(
+            &mut self.globals,
+            &other.globals,
+            AbstractValue::meet,
+            AbstractValue::Runtime(ValueTags::default()),
+        );
+        changed |= set_union(&mut self.escaped_labels, &other.escaped_labels);
         changed
+    }
+
+    pub fn escape_label(&mut self, label: u32) {
+        log::trace!("escaping label {}", label);
+        if !self.escaped_labels.insert(label) {
+            return;
+        }
+
+        for (_k, v) in self
+            .mem_overlay
+            .range_mut(SymbolicAddr(label, i64::MIN)..SymbolicAddr(label + 1, i64::MIN))
+        {
+            *v = MemValue::Escaped;
+        }
+    }
+
+    /// Invoked at block entry; may lift a merged-blockparam state to
+    /// the corresponding blockparam value.
+    pub fn update_at_block_entry<F: FnMut(SymbolicAddr, Type) -> Value>(
+        &mut self,
+        get_blockparam: &mut F,
+    ) {
+        // Any `MemValue::BlockParam` needs a blockparam, and an
+        // upgrade to `Value`.
+        for (addr, val) in &mut self.mem_overlay {
+            if let MemValue::BlockParam(ty) = val {
+                let blockparam = get_blockparam(*addr, *ty);
+                *val = MemValue::Value(blockparam, *ty);
+            }
+        }
     }
 }
 
