@@ -231,7 +231,14 @@ impl<'a> Evaluator<'a> {
         // Do the actual constant-prop, carrying the state across the
         // block and updating flow-sensitive state, and updating SSA
         // vals as well.
-        self.evaluate_block_body(orig_block, &mut state, new_block)?;
+        self.evaluate_block_body(orig_block, &mut state, new_block)
+            .map_err(|e| {
+                e.context(anyhow::anyhow!(
+                    "Evaluating block body {} in func:\n{}",
+                    orig_block,
+                    self.generic.display("| ")
+                ))
+            })?;
 
         // Store the exit state at this point for later use.
         self.state.state[ctx]
@@ -327,6 +334,12 @@ impl<'a> Evaluator<'a> {
         let mut arg_abs_values = vec![];
         let mut arg_values = vec![];
 
+        log::debug!("evaluate_block_body: {}: state {:?}", orig_block, state);
+        for &(_, param) in &self.generic.blocks[orig_block].params {
+            let (_, abs) = self.use_value(state.context, orig_block, param);
+            log::debug!(" -> param {}: {:?}", param, abs);
+        }
+
         for &inst in &self.generic.blocks[orig_block].insts {
             let input_ctx = state.context;
             if let Some((result_value, result_abs)) = match &self.generic.values[inst] {
@@ -359,6 +372,7 @@ impl<'a> Evaluator<'a> {
                     // Eval the transfer-function for this operator.
                     let result = self.abstract_eval(
                         orig_block,
+                        inst,
                         *op,
                         &arg_abs_values[..],
                         &arg_values[..],
@@ -513,10 +527,11 @@ impl<'a> Evaluator<'a> {
             let (val, abs) = self.use_value(state.context, orig_block, arg);
             args.push(val);
             abs_args.push(abs);
-            log::trace!(
-                "blockparam: block {} context {}: val {} abs {:?}",
+            log::debug!(
+                "blockparam: block {} context {}: arg {} has val {} abs {:?}",
                 orig_block,
                 state.context,
+                arg,
                 val,
                 abs
             );
@@ -532,7 +547,7 @@ impl<'a> Evaluator<'a> {
             .zip(abs_args.iter())
         {
             let &val = self.value_map.get(&(target_ctx, blockparam)).unwrap();
-            log::trace!(
+            log::debug!(
                 "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?}",
                 target.block, target_ctx, blockparam, val, abs);
             changed |= self.def_value(orig_block, target_ctx, blockparam, val, *abs);
@@ -628,11 +643,21 @@ impl<'a> Evaluator<'a> {
     fn abstract_eval(
         &mut self,
         orig_block: Block,
+        orig_inst: Value,
         op: Operator,
         abs: &[AbstractValue],
         values: &[Value],
         state: &mut PointState,
     ) -> anyhow::Result<EvalResult> {
+        log::debug!(
+            "abstract eval of {} {}: op {:?} abs {:?} state {:?}",
+            orig_block,
+            orig_inst,
+            op,
+            abs,
+            state
+        );
+
         debug_assert_eq!(abs.len(), values.len());
 
         let intrinsic_result = self.abstract_eval_intrinsic(orig_block, op, abs, values, state);
@@ -640,7 +665,8 @@ impl<'a> Evaluator<'a> {
             return Ok(intrinsic_result);
         }
 
-        let mem_overlay_result = self.abstract_eval_mem_overlay(op, abs, values, state)?;
+        let mem_overlay_result =
+            self.abstract_eval_mem_overlay(orig_inst, op, abs, values, state)?;
         if mem_overlay_result.is_handled() {
             return Ok(mem_overlay_result);
         }
@@ -720,6 +746,7 @@ impl<'a> Evaluator<'a> {
 
     fn abstract_eval_mem_overlay(
         &mut self,
+        inst: Value,
         op: Operator,
         abs: &[AbstractValue],
         vals: &[Value],
@@ -816,7 +843,11 @@ impl<'a> Evaluator<'a> {
                     op,
                     abs,
                 );
-                anyhow::bail!("Escaped symbolic pointer!");
+                anyhow::bail!(
+                    "Escaped symbolic pointer! inst {} has inputs {:?}",
+                    inst,
+                    abs
+                );
             }
         }
 
