@@ -404,7 +404,7 @@ impl<'a> Evaluator<'a> {
                         }
                         EvalResult::Normal(av) => Some((
                             ValueDef::Operator(*op, std::mem::take(&mut arg_values), tys.clone()),
-                            AbstractValue::Runtime(av.tags()),
+                            av,
                         )),
                     }
                 }
@@ -764,7 +764,7 @@ impl<'a> Evaluator<'a> {
                 let expected_ty = match op {
                     Operator::I32Load { .. } => Type::I32,
                     Operator::I64Load { .. } => Type::I64,
-                    _ => unreachable!(),
+                    _ => anyhow::bail!("Bad load type to symbolic ptr"),
                 };
                 log::trace!("load from symbolic loc {:?}", abs[0]);
                 match state.flow.mem_overlay.get(&SymbolicAddr(label, off)) {
@@ -782,9 +782,7 @@ impl<'a> Evaluator<'a> {
                         anyhow::bail!("Type punning in memory renaming");
                     }
                     Some(MemValue::Conflict) | None => {
-                        log::trace!(" -> escaped or no value");
-                        // Let the load proceed as normal.
-                        return Ok(EvalResult::Unhandled);
+                        anyhow::bail!(" -> escaped or no value");
                     }
                 }
             }
@@ -794,9 +792,9 @@ impl<'a> Evaluator<'a> {
             ) => {
                 let off = off + (memory.offset as i64);
                 let data_ty = match op {
-                    Operator::I32Load { .. } => Type::I32,
-                    Operator::I64Load { .. } => Type::I64,
-                    _ => unreachable!(),
+                    Operator::I32Store { .. } => Type::I32,
+                    Operator::I64Store { .. } => Type::I64,
+                    _ => anyhow::bail!("Bad store type to symbolic ptr"),
                 };
                 log::trace!("store to symbolic loc {:?}: value {}", abs[0], vals[1]);
                 // TODO: check for overlapping values
