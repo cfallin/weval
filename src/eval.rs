@@ -19,8 +19,8 @@ use std::collections::{
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
-    Block, BlockTarget, Func, FunctionBody, Module, Operator, Table, Terminator, Type, Value,
-    ValueDef,
+    entity::PerEntity, Block, BlockTarget, Func, FunctionBody, Module, Operator, Table, Terminator,
+    Type, Value, ValueDef,
 };
 
 struct Evaluator<'a> {
@@ -41,6 +41,8 @@ struct Evaluator<'a> {
     func: FunctionBody,
     /// Map of (ctx, block_in_generic) to specialized block_in_func.
     block_map: HashMap<(Context, Block), Block>,
+    /// Reverse map from specialized block to its original ctx/block.
+    block_rev_map: PerEntity<Block, (Context, Block)>,
     /// Dependencies for updates: some use in a given block with a
     /// given context occurs of a value defined in another block at
     /// another context.
@@ -124,6 +126,7 @@ fn partially_evaluate_func(
         state: FunctionState::new(),
         func: FunctionBody::new(module, sig),
         block_map: HashMap::new(),
+        block_rev_map: PerEntity::default(),
         block_deps: HashMap::new(),
         value_map: HashMap::new(),
         mem_blockparam_map: HashMap::new(),
@@ -219,10 +222,12 @@ impl<'a> Evaluator<'a> {
                 .or_insert_with(|| {
                     let param = self.func.add_placeholder(ty);
                     log::trace!(
-                        "new blockparam {} for addr {:?} on block {}",
+                        "new blockparam {} for addr {:?} on block {} (ctx {} orig {})",
                         param,
                         addr,
-                        new_block
+                        new_block,
+                        ctx,
+                        orig_block,
                     );
                     param
                 })
@@ -430,12 +435,15 @@ impl<'a> Evaluator<'a> {
         context: Context,
         state: &ProgPointState,
     ) -> bool {
+        let mut state = state.clone();
+        state.update_across_edge();
+
         match self.state.state[context].block_entry.entry(block) {
             BTreeEntry::Vacant(v) => {
-                v.insert(state.clone());
+                v.insert(state);
                 true
             }
-            BTreeEntry::Occupied(mut o) => o.get_mut().meet_with(state),
+            BTreeEntry::Occupied(mut o) => o.get_mut().meet_with(&state),
         }
     }
 
@@ -443,8 +451,9 @@ impl<'a> Evaluator<'a> {
         &mut self,
         orig_block: Block,
         context: Context,
-        state: ProgPointState,
+        mut state: ProgPointState,
     ) -> Block {
+        state.update_across_edge();
         let block = self.func.add_block();
         log::trace!(
             "create_block: orig_block {} context {} -> {}",
@@ -458,6 +467,7 @@ impl<'a> Evaluator<'a> {
             self.value_map.insert((context, param), new_param);
         }
         self.block_map.insert((context, orig_block), block);
+        self.block_rev_map[block] = (context, orig_block);
         self.state.state[context]
             .block_entry
             .insert(orig_block, state);
@@ -1272,9 +1282,57 @@ impl<'a> Evaluator<'a> {
     }
 
     fn add_blockparam_mem_args(&mut self) -> anyhow::Result<()> {
-        // TODO: examine mem_overlay in block input state of each
+        // Examine mem_overlay in block input state of each
         // specialized block, and create blockparams for all values
         // that in the end were `BlockParam`.
+        for (&(ctx, orig_block), &block) in &self.block_map {
+            let succ_state = self.state.state[ctx].block_entry.get(&orig_block).unwrap();
+
+            for (&addr, &val) in &succ_state.mem_overlay {
+                let ty = val.to_type().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Inconsistent type on symbolic addr {:?} at block {}",
+                        addr,
+                        orig_block
+                    )
+                })?;
+                let blockparam = self.func.add_blockparam(block, ty);
+                let orig_val = *self
+                    .mem_blockparam_map
+                    .get(&(ctx, orig_block, addr))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "placeholder val not found for addr {:?} at block {} (ctx {} orig {})",
+                            addr,
+                            block,
+                            ctx,
+                            orig_block,
+                        )
+                    })?;
+                self.func.set_alias(orig_val, blockparam);
+            }
+
+            for pred_idx in 0..self.func.blocks[block].preds.len() {
+                let pred = self.func.blocks[block].preds[pred_idx];
+                let (pred_ctx, pred_orig_block) = self.block_rev_map[pred];
+                let pred_state = self.state.state[pred_ctx]
+                    .block_exit
+                    .get(&pred_orig_block)
+                    .unwrap();
+                let pred_succ_idx = self.func.blocks[block].pos_in_pred_succ[pred_idx];
+
+                for &addr in succ_state.mem_overlay.keys() {
+                    let pred_val = *pred_state.mem_overlay.get(&addr).unwrap();
+                    let pred_val = pred_val.to_value().unwrap();
+                    self.func.blocks[pred]
+                        .terminator
+                        .update_target(pred_succ_idx, |target| {
+                            target.args.push(pred_val);
+                        });
+                }
+            }
+        }
+
         //
         // Also check for escaping symbolic pointers: any values that
         // are SymboilcPtr in a block arg but Runtime at blockparam of

@@ -127,6 +127,21 @@ impl MemValue {
             }
         }
     }
+
+    pub fn to_value(&self) -> Option<Value> {
+        match self {
+            MemValue::Value { data, .. } => Some(*data),
+            _ => None,
+        }
+    }
+
+    pub fn to_type(&self) -> Option<Type> {
+        match self {
+            MemValue::Value { ty, .. } => Some(*ty),
+            MemValue::TypedMerge(ty) => Some(*ty),
+            _ => None,
+        }
+    }
 }
 
 /// The state for a function body during analysis.
@@ -244,7 +259,16 @@ impl ProgPointState {
         changed
     }
 
-    /// the corresponding blockparam value.
+    pub fn update_across_edge(&mut self) {
+        for value in self.mem_overlay.values_mut() {
+            if let MemValue::Value { ty, .. } = *value {
+                // Ensure all mem-overlay values become blockparams,
+                // even if only one pred.
+                *value = MemValue::TypedMerge(ty);
+            }
+        }
+    }
+
     pub fn update_at_block_entry<F: FnMut(SymbolicAddr, Type) -> Value>(
         &mut self,
         get_blockparam: &mut F,
