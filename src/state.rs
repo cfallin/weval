@@ -103,12 +103,8 @@ pub struct SymbolicAddr(pub u32, pub i64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemValue {
-    Value {
-        addr: Value,
-        offset: u32,
-        data: Value,
-        ty: Type,
-    },
+    Value { data: Value, ty: Type },
+    TypedMerge(Type),
     Conflict,
 }
 
@@ -116,19 +112,19 @@ impl MemValue {
     fn meet(a: MemValue, b: MemValue) -> MemValue {
         match (a, b) {
             (a, b) if a == b => a,
-            _ => MemValue::Conflict,
-        }
-    }
-
-    pub fn unwrap(&self) -> Option<(Value, Value, u32, Type)> {
-        match self {
-            MemValue::Value {
-                addr,
-                data,
-                offset,
-                ty,
-            } => Some((*addr, *data, *offset, *ty)),
-            _ => None,
+            (MemValue::Value { ty: ty1, .. }, MemValue::Value { ty: ty2, .. }) if ty1 == ty2 => {
+                MemValue::TypedMerge(ty1)
+            }
+            (MemValue::TypedMerge(ty), MemValue::Value { ty: ty1, .. })
+            | (MemValue::Value { ty: ty1, .. }, MemValue::TypedMerge(ty))
+                if ty == ty1 =>
+            {
+                MemValue::TypedMerge(ty)
+            }
+            _ => {
+                log::trace!("Values {:?} and {:?} meeting to Conflict", a, b);
+                MemValue::Conflict
+            }
         }
     }
 }
@@ -167,9 +163,10 @@ fn map_meet_with<
     this: &mut BTreeMap<K, V>,
     other: &BTreeMap<K, V>,
     meet: Meet,
-    bot: V,
+    bot: Option<V>,
 ) -> bool {
     let mut changed = false;
+    let mut to_remove = vec![];
     for (k, val) in this.iter_mut() {
         if let Some(other_val) = other.get(k) {
             let met = meet(*val, *other_val);
@@ -177,13 +174,25 @@ fn map_meet_with<
             *val = met;
         } else {
             let old = *val;
-            *val = bot;
-            changed |= old != *val;
+            if let Some(bot) = bot {
+                *val = bot;
+                changed |= old != *val;
+            } else {
+                to_remove.push(k.clone());
+                changed = true;
+            }
         }
+    }
+    for k in to_remove {
+        this.remove(&k);
     }
     for other_k in other.keys() {
         if !this.contains_key(other_k) {
-            this.insert(*other_k, bot);
+            if let Some(bot) = bot {
+                this.insert(*other_k, bot);
+            } else {
+                this.remove(other_k);
+            }
             changed = true;
         }
     }
@@ -220,7 +229,7 @@ impl ProgPointState {
             &mut self.mem_overlay,
             &other.mem_overlay,
             MemValue::meet,
-            MemValue::Conflict,
+            None,
         );
 
         // TODO: check mem overlay for overlapping values of different
@@ -230,7 +239,7 @@ impl ProgPointState {
             &mut self.globals,
             &other.globals,
             AbstractValue::meet,
-            AbstractValue::Runtime(ValueTags::default()),
+            Some(AbstractValue::Runtime(ValueTags::default())),
         );
         changed
     }
@@ -238,9 +247,21 @@ impl ProgPointState {
     /// the corresponding blockparam value.
     pub fn update_at_block_entry<F: FnMut(SymbolicAddr, Type) -> Value>(
         &mut self,
-        _get_blockparam: &mut F,
-    ) {
-        // TODO
+        get_blockparam: &mut F,
+    ) -> anyhow::Result<()> {
+        for (&addr, value) in &mut self.mem_overlay {
+            match *value {
+                MemValue::Value { .. } => {}
+                MemValue::TypedMerge(ty) => {
+                    let param = get_blockparam(addr, ty);
+                    *value = MemValue::Value { data: param, ty };
+                }
+                MemValue::Conflict => {
+                    anyhow::bail!("Conflicting types for merge at addr {:?}", addr);
+                }
+            }
+        }
+        Ok(())
     }
 }
 

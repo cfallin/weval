@@ -226,7 +226,7 @@ impl<'a> Evaluator<'a> {
                     );
                     param
                 })
-        });
+        })?;
 
         // Do the actual constant-prop, carrying the state across the
         // block and updating flow-sensitive state, and updating SSA
@@ -768,7 +768,7 @@ impl<'a> Evaluator<'a> {
                 };
                 log::trace!("load from symbolic loc {:?}", abs[0]);
                 match state.flow.mem_overlay.get(&SymbolicAddr(label, off)) {
-                    Some(MemValue::Value { data, ty, .. }) if *ty == expected_ty => {
+                    Some(MemValue::Value { data, ty }) if *ty == expected_ty => {
                         let abs = self.state.state[state.context]
                             .ssa
                             .values
@@ -778,11 +778,8 @@ impl<'a> Evaluator<'a> {
                         log::trace!(" -> have value {} with abs {:?}", data, abs);
                         return Ok(EvalResult::Alias(abs, *data));
                     }
-                    Some(MemValue::Value { .. }) => {
-                        anyhow::bail!("Type punning in memory renaming");
-                    }
-                    Some(MemValue::Conflict) | None => {
-                        anyhow::bail!(" -> escaped or no value");
+                    Some(_) | None => {
+                        anyhow::bail!(" -> conflict");
                     }
                 }
             }
@@ -801,8 +798,6 @@ impl<'a> Evaluator<'a> {
                 state.flow.mem_overlay.insert(
                     SymbolicAddr(label, off),
                     MemValue::Value {
-                        addr: vals[0],
-                        offset: memory.offset,
                         data: vals[1],
                         ty: data_ty,
                     },
