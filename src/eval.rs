@@ -736,6 +736,9 @@ impl<'a> Evaluator<'a> {
                     state.pending_context = Some(sibling);
                     log::trace!("update context (pc {:?}): now {}", pc, sibling);
                     EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.flush_to_mem {
+                    // Just elide it for now. TODO: handle properly.
+                    EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
                 }
@@ -812,7 +815,8 @@ impl<'a> Evaluator<'a> {
             }
             (
                 Operator::I32Add,
-                &[AbstractValue::SymbolicPtr(label, off), AbstractValue::Concrete(WasmVal::I32(k), _)],
+                &[AbstractValue::SymbolicPtr(label, off), AbstractValue::Concrete(WasmVal::I32(k), _)]
+                | &[AbstractValue::Concrete(WasmVal::I32(k), _), AbstractValue::SymbolicPtr(label, off)],
             ) => {
                 // TODO: check for wraparound
                 return Ok(EvalResult::Normal(AbstractValue::SymbolicPtr(
@@ -822,7 +826,8 @@ impl<'a> Evaluator<'a> {
             }
             (
                 Operator::I32Sub,
-                &[AbstractValue::SymbolicPtr(label, off), AbstractValue::Concrete(WasmVal::I32(k), _)],
+                &[AbstractValue::SymbolicPtr(label, off), AbstractValue::Concrete(WasmVal::I32(k), _)]
+                | &[AbstractValue::Concrete(WasmVal::I32(k), _), AbstractValue::SymbolicPtr(label, off)],
             ) => {
                 // TODO: check for wraparound
                 return Ok(EvalResult::Normal(AbstractValue::SymbolicPtr(
