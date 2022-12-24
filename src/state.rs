@@ -94,9 +94,6 @@ pub struct SSAState {
 pub struct ProgPointState {
     /// Memory overlay. We store only aligned u32s here.
     pub mem_overlay: BTreeMap<SymbolicAddr, MemValue>,
-    /// Escaped symbolic labels. We can't track any memory relative to
-    /// these bases anymore at this program point.
-    pub escaped_labels: BTreeSet<u32>,
     /// Global values.
     pub globals: BTreeMap<Global, AbstractValue>,
 }
@@ -106,26 +103,31 @@ pub struct SymbolicAddr(pub u32, pub i64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemValue {
-    Value(Value, Type),
-    BlockParam(Type),
-    Escaped,
+    Value {
+        addr: Value,
+        offset: u32,
+        data: Value,
+        ty: Type,
+    },
+    Conflict,
 }
 
 impl MemValue {
     fn meet(a: MemValue, b: MemValue) -> MemValue {
         match (a, b) {
             (a, b) if a == b => a,
-            (MemValue::Value(_, t1), MemValue::Value(_, t2)) if t1 == t2 => {
-                MemValue::BlockParam(t1)
-            }
-            _ => MemValue::Escaped,
+            _ => MemValue::Conflict,
         }
     }
 
-    fn ty(&self) -> Option<Type> {
+    pub fn unwrap(&self) -> Option<(Value, Value, u32, Type)> {
         match self {
-            &MemValue::Value(_, t) => Some(t),
-            &MemValue::BlockParam(t) => Some(t),
+            MemValue::Value {
+                addr,
+                data,
+                offset,
+                ty,
+            } => Some((*addr, *data, *offset, *ty)),
             _ => None,
         }
     }
@@ -142,7 +144,11 @@ pub struct FunctionState {
 #[derive(Clone, Debug, Default)]
 pub struct PerContextState {
     pub ssa: SSAState,
+    /// State at top of basic block.
     pub block_entry: BTreeMap<Block, ProgPointState>,
+    /// State at end of basic block, just prior to terminator and
+    /// successor-specific updates.
+    pub block_exit: BTreeMap<Block, ProgPointState>,
 }
 
 /// State carried during a pass through a block.
@@ -204,7 +210,6 @@ impl ProgPointState {
             .collect();
         ProgPointState {
             mem_overlay: BTreeMap::new(),
-            escaped_labels: BTreeSet::new(),
             globals,
         }
     }
@@ -215,7 +220,7 @@ impl ProgPointState {
             &mut self.mem_overlay,
             &other.mem_overlay,
             MemValue::meet,
-            MemValue::Escaped,
+            MemValue::Conflict,
         );
 
         // TODO: check mem overlay for overlapping values of different
@@ -227,38 +232,15 @@ impl ProgPointState {
             AbstractValue::meet,
             AbstractValue::Runtime(ValueTags::default()),
         );
-        changed |= set_union(&mut self.escaped_labels, &other.escaped_labels);
         changed
     }
 
-    pub fn escape_label(&mut self, label: u32) {
-        log::trace!("escaping label {}", label);
-        if !self.escaped_labels.insert(label) {
-            return;
-        }
-
-        for (_k, v) in self
-            .mem_overlay
-            .range_mut(SymbolicAddr(label, i64::MIN)..SymbolicAddr(label + 1, i64::MIN))
-        {
-            *v = MemValue::Escaped;
-        }
-    }
-
-    /// Invoked at block entry; may lift a merged-blockparam state to
     /// the corresponding blockparam value.
     pub fn update_at_block_entry<F: FnMut(SymbolicAddr, Type) -> Value>(
         &mut self,
-        get_blockparam: &mut F,
+        _get_blockparam: &mut F,
     ) {
-        // Any `MemValue::BlockParam` needs a blockparam, and an
-        // upgrade to `Value`.
-        for (addr, val) in &mut self.mem_overlay {
-            if let MemValue::BlockParam(ty) = val {
-                let blockparam = get_blockparam(*addr, *ty);
-                *val = MemValue::Value(blockparam, *ty);
-            }
-        }
+        // TODO
     }
 }
 

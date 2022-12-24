@@ -14,8 +14,7 @@ use crate::intrinsics::Intrinsics;
 use crate::state::*;
 use crate::value::{AbstractValue, ValueTags, WasmVal};
 use std::collections::{
-    btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, BTreeMap, HashMap, HashSet,
-    VecDeque,
+    btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, HashMap, HashSet, VecDeque,
 };
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
@@ -50,17 +49,6 @@ struct Evaluator<'a> {
     value_map: HashMap<(Context, Value), Value>,
     /// Map of (ctx, block, sym_addr) to blockparam value.
     mem_blockparam_map: HashMap<(Context, Block, SymbolicAddr), Value>,
-    /// List of new blockparams added by memory-renaming to a given
-    /// block. BTreeMap for deterministic processing order in
-    /// post-pass.
-    mem_blockparams: BTreeMap<Block, Vec<SymbolicAddr>>,
-    /// Outgoing values for each symbolic address from a given
-    /// *specialized* block.
-    mem_outgoing: HashMap<(Block, SymbolicAddr), Value>,
-    /// Side-outs of transfer function: points at which we need to
-    /// flush renamed-memory values to memory. Placed before the given
-    /// (specialized) `Value` key appears as an inst.
-    memory_flushes: HashMap<Value, Vec<(SymbolicAddr, Option<usize>)>>,
     /// Queue of blocks to (re)compute. List of (block_in_generic,
     /// ctx, block_in_func).
     queue: VecDeque<(Block, Context, Block)>,
@@ -139,9 +127,6 @@ fn partially_evaluate_func(
         block_deps: HashMap::new(),
         value_map: HashMap::new(),
         mem_blockparam_map: HashMap::new(),
-        mem_blockparams: BTreeMap::new(),
-        mem_outgoing: HashMap::new(),
-        memory_flushes: HashMap::new(),
         queue: VecDeque::new(),
         queue_set: HashSet::new(),
     };
@@ -155,7 +140,7 @@ fn partially_evaluate_func(
         .queue
         .push_back((evaluator.generic.entry, ctx, specialized_entry));
     evaluator.queue_set.insert((evaluator.generic.entry, ctx));
-    evaluator.evaluate();
+    evaluator.evaluate()?;
 
     log::debug!("Adding func:\n{}", evaluator.func.display("| "));
     let func = module.add_func(sig, evaluator.func);
@@ -172,16 +157,37 @@ fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {
     }
 }
 
+enum EvalResult {
+    Unhandled,
+    Elide,
+    Alias(AbstractValue, Value),
+    Normal(AbstractValue),
+}
+impl EvalResult {
+    fn is_handled(&self) -> bool {
+        match self {
+            &EvalResult::Unhandled => false,
+            _ => true,
+        }
+    }
+}
+
 impl<'a> Evaluator<'a> {
-    fn evaluate(&mut self) {
+    fn evaluate(&mut self) -> anyhow::Result<()> {
         while let Some((orig_block, ctx, new_block)) = self.queue.pop_front() {
             self.queue_set.remove(&(orig_block, ctx));
-            self.evaluate_block(orig_block, ctx, new_block);
+            self.evaluate_block(orig_block, ctx, new_block)?;
         }
-        self.finalize();
+        self.finalize()?;
+        Ok(())
     }
 
-    fn evaluate_block(&mut self, orig_block: Block, ctx: Context, new_block: Block) {
+    fn evaluate_block(
+        &mut self,
+        orig_block: Block,
+        ctx: Context,
+        new_block: Block,
+    ) -> anyhow::Result<()> {
         // Clear the block body each time we rebuild it -- we may be
         // recomputing a specialization with an existing output.
         self.func.blocks[new_block].insts.clear();
@@ -211,11 +217,7 @@ impl<'a> Evaluator<'a> {
                 .mem_blockparam_map
                 .entry((ctx, orig_block, addr))
                 .or_insert_with(|| {
-                    let param = self.func.add_blockparam(new_block, ty);
-                    self.mem_blockparams
-                        .entry(new_block)
-                        .or_insert_with(Vec::new)
-                        .push(addr);
+                    let param = self.func.add_placeholder(ty);
                     log::trace!(
                         "new blockparam {} for addr {:?} on block {}",
                         param,
@@ -229,8 +231,16 @@ impl<'a> Evaluator<'a> {
         // Do the actual constant-prop, carrying the state across the
         // block and updating flow-sensitive state, and updating SSA
         // vals as well.
-        self.evaluate_block_body(orig_block, &mut state, new_block);
+        self.evaluate_block_body(orig_block, &mut state, new_block)?;
+
+        // Store the exit state at this point for later use.
+        self.state.state[ctx]
+            .block_exit
+            .insert(orig_block, state.flow.clone());
+
         self.evaluate_term(orig_block, &mut state, new_block);
+
+        Ok(())
     }
 
     /// For a given value in the generic function, accessed in the
@@ -307,7 +317,12 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn evaluate_block_body(&mut self, orig_block: Block, state: &mut PointState, new_block: Block) {
+    fn evaluate_block_body(
+        &mut self,
+        orig_block: Block,
+        state: &mut PointState,
+        new_block: Block,
+    ) -> anyhow::Result<()> {
         // Reused below for each instruction.
         let mut arg_abs_values = vec![];
         let mut arg_values = vec![];
@@ -342,20 +357,21 @@ impl<'a> Evaluator<'a> {
                     }
 
                     // Eval the transfer-function for this operator.
-                    let (result_abs_value, replace_value) = self.abstract_eval(
+                    let result = self.abstract_eval(
                         orig_block,
                         *op,
                         &arg_abs_values[..],
                         &arg_values[..],
                         state,
-                    );
+                    )?;
                     // Transcribe either the original operation, or a
                     // constant, to the output.
 
-                    match (replace_value, result_abs_value) {
-                        (_, AbstractValue::Top) => unreachable!(),
-                        (Some(val), av) => Some((ValueDef::Alias(val), av)),
-                        (_, AbstractValue::Concrete(bits, t)) if tys.len() == 1 => {
+                    match result {
+                        EvalResult::Unhandled => unreachable!(),
+                        EvalResult::Alias(av, val) => Some((ValueDef::Alias(val), av)),
+                        EvalResult::Elide => None,
+                        EvalResult::Normal(AbstractValue::Concrete(bits, t)) if tys.len() == 1 => {
                             if let Some(const_op) = const_operator(tys[0], bits) {
                                 Some((
                                     ValueDef::Operator(const_op, vec![], tys.clone()),
@@ -372,7 +388,7 @@ impl<'a> Evaluator<'a> {
                                 ))
                             }
                         }
-                        (_, av) => Some((
+                        EvalResult::Normal(av) => Some((
                             ValueDef::Operator(*op, std::mem::take(&mut arg_values), tys.clone()),
                             AbstractValue::Runtime(av.tags()),
                         )),
@@ -391,12 +407,7 @@ impl<'a> Evaluator<'a> {
             }
         }
 
-        // Save memory-overlay outputs.
-        for (&addr, &val) in &state.flow.mem_overlay {
-            if let MemValue::Value(v, _) = val {
-                self.mem_outgoing.insert((new_block, addr), v);
-            }
-        }
+        Ok(())
     }
 
     fn meet_into_block_entry(
@@ -524,33 +535,7 @@ impl<'a> Evaluator<'a> {
             log::trace!(
                 "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?}",
                 target.block, target_ctx, blockparam, val, abs);
-            let old = self.state.state[target_ctx]
-                .ssa
-                .values
-                .get(&blockparam)
-                .cloned()
-                .unwrap_or(AbstractValue::Top);
             changed |= self.def_value(orig_block, target_ctx, blockparam, val, *abs);
-            let new = *self.state.state[target_ctx]
-                .ssa
-                .values
-                .get(&blockparam)
-                .unwrap();
-            match (old, new) {
-                (AbstractValue::SymbolicPtr(label, _), AbstractValue::Runtime(_)) => {
-                    log::trace!(
-                        "blockparam {} transition from symbolic to runtime escapes label {}",
-                        blockparam,
-                        label
-                    );
-                    self.state.state[target_ctx]
-                        .block_entry
-                        .get_mut(&target.block)
-                        .unwrap()
-                        .escape_label(label);
-                }
-                _ => {}
-            }
         }
 
         // If blockparam inputs changed, re-enqueue target for evaluation.
@@ -647,23 +632,17 @@ impl<'a> Evaluator<'a> {
         abs: &[AbstractValue],
         values: &[Value],
         state: &mut PointState,
-    ) -> (AbstractValue, Option<Value>) {
+    ) -> anyhow::Result<EvalResult> {
         debug_assert_eq!(abs.len(), values.len());
 
-        if let Some((ret, replace_val)) =
-            self.abstract_eval_intrinsic(orig_block, op, abs, values, state)
-        {
-            return (ret, replace_val);
+        let intrinsic_result = self.abstract_eval_intrinsic(orig_block, op, abs, values, state);
+        if intrinsic_result.is_handled() {
+            return Ok(intrinsic_result);
         }
 
-        match self.abstract_eval_mem_overlay(op, abs, values, state) {
-            Some((ret, Some(replace_val))) => {
-                return (ret, Some(replace_val));
-            }
-            Some((_, None)) => {
-                return (AbstractValue::default(), None);
-            }
-            _ => {}
+        let mem_overlay_result = self.abstract_eval_mem_overlay(op, abs, values, state)?;
+        if mem_overlay_result.is_handled() {
+            return Ok(mem_overlay_result);
         }
 
         let ret = match abs.len() {
@@ -675,7 +654,8 @@ impl<'a> Evaluator<'a> {
             ),
             _ => AbstractValue::Runtime(ValueTags::default()),
         };
-        (ret, None)
+
+        Ok(EvalResult::Normal(ret))
     }
 
     fn abstract_eval_intrinsic(
@@ -685,11 +665,11 @@ impl<'a> Evaluator<'a> {
         abs: &[AbstractValue],
         values: &[Value],
         state: &mut PointState,
-    ) -> Option<(AbstractValue, Option<Value>)> {
+    ) -> EvalResult {
         match op {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.assume_const_memory {
-                    Some((abs[0].with_tags(ValueTags::const_memory()), Some(values[0])))
+                    EvalResult::Alias(abs[0].with_tags(ValueTags::const_memory()), values[0])
                 } else if Some(function_index) == self.intrinsics.make_symbolic_ptr {
                     let label_index = values[0].index() as u32;
                     log::trace!(
@@ -697,7 +677,7 @@ impl<'a> Evaluator<'a> {
                         values[0],
                         label_index
                     );
-                    Some((AbstractValue::SymbolicPtr(label_index, 0), Some(values[0])))
+                    EvalResult::Alias(AbstractValue::SymbolicPtr(label_index, 0), values[0])
                 } else if Some(function_index) == self.intrinsics.push_context {
                     let pc = abs[0].is_const_u32();
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
@@ -707,10 +687,7 @@ impl<'a> Evaluator<'a> {
                         .create(Some(instantaneous_context), ContextElem::Loop(pc));
                     state.pending_context = Some(child);
                     log::trace!("push context (pc {:?}): now {}", pc, child);
-                    Some((
-                        AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
-                        None,
-                    ))
+                    EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.pop_context {
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
                     let parent = match self.state.contexts.leaf_element(instantaneous_context) {
@@ -719,10 +696,7 @@ impl<'a> Evaluator<'a> {
                     };
                     state.pending_context = Some(parent);
                     log::trace!("pop context: now {}", parent);
-                    Some((
-                        AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
-                        None,
-                    ))
+                    EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.update_context {
                     let pc = abs[0].is_const_u32();
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
@@ -735,15 +709,12 @@ impl<'a> Evaluator<'a> {
                     };
                     state.pending_context = Some(sibling);
                     log::trace!("update context (pc {:?}): now {}", pc, sibling);
-                    Some((
-                        AbstractValue::Concrete(WasmVal::I32(0), ValueTags::default()),
-                        None,
-                    ))
+                    EvalResult::Elide
                 } else {
-                    None
+                    EvalResult::Unhandled
                 }
             }
-            _ => None,
+            _ => EvalResult::Unhandled,
         }
     }
 
@@ -753,7 +724,7 @@ impl<'a> Evaluator<'a> {
         abs: &[AbstractValue],
         vals: &[Value],
         state: &mut PointState,
-    ) -> Option<(AbstractValue, Option<Value>)> {
+    ) -> anyhow::Result<EvalResult> {
         match (op, abs) {
             (
                 Operator::I32Load { memory } | Operator::I64Load { memory },
@@ -767,26 +738,23 @@ impl<'a> Evaluator<'a> {
                 };
                 log::trace!("load from symbolic loc {:?}", abs[0]);
                 match state.flow.mem_overlay.get(&SymbolicAddr(label, off)) {
-                    Some(MemValue::Value(val, ty)) if *ty == expected_ty => {
+                    Some(MemValue::Value { data, ty, .. }) if *ty == expected_ty => {
                         let abs = self.state.state[state.context]
                             .ssa
                             .values
-                            .get(val)
+                            .get(data)
                             .cloned()
                             .unwrap_or(AbstractValue::default());
-                        log::trace!(" -> have value {} with abs {:?}", val, abs);
-                        return Some((abs, Some(*val)));
+                        log::trace!(" -> have value {} with abs {:?}", data, abs);
+                        return Ok(EvalResult::Alias(abs, *data));
                     }
-                    Some(MemValue::Value(_, _)) => {
-                        panic!("Type punning in memory renaming");
+                    Some(MemValue::Value { .. }) => {
+                        anyhow::bail!("Type punning in memory renaming");
                     }
-                    Some(MemValue::Escaped) | None => {
+                    Some(MemValue::Conflict) | None => {
                         log::trace!(" -> escaped or no value");
                         // Let the load proceed as normal.
-                        return None;
-                    }
-                    Some(MemValue::BlockParam(_)) => {
-                        unreachable!("Should have been rewritten at top of block")
+                        return Ok(EvalResult::Unhandled);
                     }
                 }
             }
@@ -802,33 +770,38 @@ impl<'a> Evaluator<'a> {
                 };
                 log::trace!("store to symbolic loc {:?}: value {}", abs[0], vals[1]);
                 // TODO: check for overlapping values
-                state
-                    .flow
-                    .mem_overlay
-                    .insert(SymbolicAddr(label, off), MemValue::Value(vals[1], data_ty));
+                state.flow.mem_overlay.insert(
+                    SymbolicAddr(label, off),
+                    MemValue::Value {
+                        addr: vals[0],
+                        offset: memory.offset,
+                        data: vals[1],
+                        ty: data_ty,
+                    },
+                );
 
                 // Elide the store.
-                return Some((AbstractValue::Top, None));
+                return Ok(EvalResult::Elide);
             }
             (
                 Operator::I32Add,
                 &[AbstractValue::SymbolicPtr(label, off), AbstractValue::Concrete(WasmVal::I32(k), _)],
             ) => {
                 // TODO: check for wraparound
-                return Some((
-                    AbstractValue::SymbolicPtr(label, off + (k as i32 as i64)),
-                    None,
-                ));
+                return Ok(EvalResult::Normal(AbstractValue::SymbolicPtr(
+                    label,
+                    off + (k as i32 as i64),
+                )));
             }
             (
                 Operator::I32Sub,
                 &[AbstractValue::SymbolicPtr(label, off), AbstractValue::Concrete(WasmVal::I32(k), _)],
             ) => {
                 // TODO: check for wraparound
-                return Some((
-                    AbstractValue::SymbolicPtr(label, off - (k as i32 as i64)),
-                    None,
-                ));
+                return Ok(EvalResult::Normal(AbstractValue::SymbolicPtr(
+                    label,
+                    off - (k as i32 as i64),
+                )));
             }
             _ => {}
         }
@@ -836,18 +809,18 @@ impl<'a> Evaluator<'a> {
         // If not handled above, any symbolic ptr value flowing into
         // an operator must cause the label to be marked as escaped.
         for &a in abs {
-            if let AbstractValue::SymbolicPtr(label, _) = a {
+            if let AbstractValue::SymbolicPtr(_, _) = a {
                 log::trace!(
                     "abs {:?} flowing into op {} (args {:?}) causes label escape",
                     a,
                     op,
                     abs,
                 );
-                state.flow.escape_label(label);
+                anyhow::bail!("Escaped symbolic pointer!");
             }
         }
 
-        None
+        Ok(EvalResult::Unhandled)
     }
 
     fn abstract_eval_nullary(&mut self, op: Operator, state: &mut PointState) -> AbstractValue {
@@ -1269,36 +1242,18 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn add_blockparam_mem_args(&mut self) {
-        for (&block, addrs) in &self.mem_blockparams {
-            for pred_idx in 0..self.func.blocks[block].preds.len() {
-                let pred = self.func.blocks[block].preds[pred_idx];
-                let pred_pos = self.func.blocks[block].pos_in_pred_succ[pred_idx];
-                self.func.blocks[pred]
-                    .terminator
-                    .update_target(pred_pos, |target| {
-                        for &addr in addrs {
-                            let pred_outgoing = *self.mem_outgoing.get(&(pred, addr)).unwrap();
-                            log::trace!(
-                                "adding arg {} to pred {} out-edge {} to block {} for addr {:?}",
-                                pred_outgoing,
-                                pred,
-                                pred_idx,
-                                block,
-                                addr
-                            );
-                            target.args.push(pred_outgoing);
-                        }
-                    });
-            }
-        }
+    fn add_blockparam_mem_args(&mut self) -> anyhow::Result<()> {
+        // TODO: examine mem_overlay in block input state of each
+        // specialized block, and create blockparams for all values
+        // that in the end were `BlockParam`.
+        //
+        // Also check for escaping symbolic pointers: any values that
+        // are SymboilcPtr in a block arg but Runtime at blockparam of
+        // succ.
+        Ok(())
     }
 
-    fn add_mem_spills(&mut self) {
-        // TODO
-    }
-
-    fn finalize(&mut self) {
+    fn finalize(&mut self) -> anyhow::Result<()> {
         for block in self.func.blocks.iter() {
             debug_assert!(self.func.blocks[block].succs.is_empty());
             let term = self.func.blocks[block].terminator.clone();
@@ -1306,11 +1261,10 @@ impl<'a> Evaluator<'a> {
         }
 
         // Add blockparam args for symbolic addrs to each branch.
-        self.add_blockparam_mem_args();
-
-        // Add memory-renaming spills.
-        self.add_mem_spills();
+        self.add_blockparam_mem_args()?;
 
         self.func.validate().unwrap();
+
+        Ok(())
     }
 }
