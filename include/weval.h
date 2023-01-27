@@ -11,32 +11,13 @@
 typedef void (*weval_func_t)();
 
 typedef struct weval_req_t weval_req_t;
-typedef struct weval_req_arg_t weval_req_arg_t;
 
 struct weval_req_t {
     weval_req_t* next;
     weval_func_t func;
-    weval_req_arg_t* args;
-    uint32_t nargs;
+    uint64_t func_ctx;
+    uint64_t pc_ctx;
     weval_func_t* specialized;
-};
-
-typedef enum {
-    weval_req_arg_i32 = 0,
-    weval_req_arg_i64 = 1,
-    weval_req_arg_f32 = 2,
-    weval_req_arg_f64 = 3,
-} weval_req_arg_type;
-
-struct weval_req_arg_t {
-    uint32_t specialize;
-    uint32_t ty;
-    union {
-        uint32_t i32;
-        uint64_t i64;
-        float f32;
-        double f64;
-    } u;
 };
 
 extern weval_req_t* weval_req_pending_head;
@@ -67,18 +48,37 @@ static void weval_free() {
 extern "C" {
 #endif
 
+/* "bless" a pointer so that all loads from it, directly and
+ * indirectly, are "const" and allowed to see values during partial
+ * evaluation. */
 __attribute__((noinline))
 const void* weval_assume_const_memory(const void* p);
+
+/* Start a specialized region. Should come before any unrolled
+ * loop. Returns the function context. */
 __attribute__((noinline))
-void weval_push_context(uint32_t pc);
+uint64_t weval_start(uint64_t func_ctx, uint64_t pc_ctx, void* funcptr);
+/* Within a specialized region, update the PC ctx. Value returned
+ * should be used for all accesses throughout the specialized
+ * region. If updated, next basic block edge goes to block of new
+ * context. */
 __attribute__((noinline))
-void weval_pop_context();
+uint64_t weval_pc_ctx(uint64_t pc_ctx);
+/* End a specialized region. Should come after any loop. */
 __attribute__((noinline))
-void weval_update_context(uint32_t pc);
+void weval_end();
+
+/* Note a func_ctx/pc_ctx pair that may occur, with the funcptr
+ * associated with it. */
+__attribute__((noinline))
+void weval_register(uint64_t func_ctx, uint64_t pc_ctx, void* funcptr);
+
+/* "bless" a pointer for memory renaming. */
 __attribute__((noinline))
 void* weval_make_symbolic_ptr(void* p);
+/* flush a region of renamed memory back to memory, returning a pointer. */
 __attribute__((noinline))
-void weval_flush_to_mem(void* p, uint32_t len);
+void* weval_flush_to_mem(void* p, uint32_t len);
 
 #ifdef __cplusplus
 }  // extern "C"
