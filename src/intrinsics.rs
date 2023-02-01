@@ -7,9 +7,9 @@ pub struct Intrinsics {
     pub assume_const_memory: Option<Func>,
     pub make_symbolic_ptr: Option<Func>,
     pub flush_to_mem: Option<Func>,
-    pub push_context: Option<Func>,
-    pub pop_context: Option<Func>,
-    pub update_context: Option<Func>,
+    pub start: Option<Func>,
+    pub end: Option<Func>,
+    pub pc_ctx: Option<Func>,
 }
 
 impl Intrinsics {
@@ -33,9 +33,14 @@ impl Intrinsics {
                 &[Type::I32, Type::I32],
                 &[],
             ),
-            push_context: find_exported_func(module, "weval.push.context", &[Type::I32], &[]),
-            pop_context: find_exported_func(module, "weval.pop.context", &[], &[]),
-            update_context: find_exported_func(module, "weval.update.context", &[Type::I32], &[]),
+            start: find_exported_func(
+                module,
+                "weval.start",
+                &[Type::I64, Type::I64, Type::I32],
+                &[Type::I64],
+            ),
+            end: find_exported_func(module, "weval.end", &[], &[]),
+            pc_ctx: find_exported_func(module, "weval.pc.ctx", &[Type::I64], &[Type::I64]),
         }
     }
 }

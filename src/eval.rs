@@ -1,13 +1,5 @@
 //! Partial evaluation.
 
-/* TODO:
-- inlining
-- "memory renaming": connecting symbolic ops through the operand-stack
-  memory region
-- more general memory-region handling: symbolic but unique
-  (non-escaped) pointers, stack, operand-stack region, ...
-*/
-
 use crate::directive::Directive;
 use crate::image::Image;
 use crate::intrinsics::Intrinsics;
@@ -32,6 +24,9 @@ struct Evaluator<'a> {
     image: &'a Image,
     /// Domtree for function body.
     cfg: CFGInfo,
+    /// Block in generic function following the `weval_start` call
+    /// (there must only be one).
+    start_block: Block,
     /// State of SSA values and program points:
     /// - per context:
     ///   - per SSA number, an abstract value
@@ -67,25 +62,37 @@ pub fn partially_evaluate(
     let intrinsics = Intrinsics::find(module);
     log::trace!("intrinsics: {:?}", intrinsics);
     let mut mem_updates = HashMap::new();
-    for directive in directives {
-        log::info!("Processing directive {:?}", directive);
-        if let Some(idx) = partially_evaluate_func(module, im, &intrinsics, directive)? {
-            // Append to table.
-            let func_table = module.table_mut(Table::from(0));
-            let table_idx = {
-                let func_table_elts = func_table.func_elements.as_mut().unwrap();
-                let table_idx = func_table_elts.len();
-                func_table_elts.push(idx);
-                table_idx
-            } as u32;
-            if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
-                func_table.max = Some(table_idx + 1);
-            }
-            log::info!("New func index {} -> table index {}", idx, table_idx);
-            log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
-            // Update memory image.
-            mem_updates.insert(directive.func_index_out_addr, table_idx);
-        }
+
+    let mut directives = directives.to_vec();
+    directives.sort_by_key(|dir| dir.func);
+
+    for directives in directives.group_by(|dir| dir.func) {
+        let func = directives[0].func;
+        log::info!("Processing directives {:?} for func {}", directives, func);
+        partially_evaluate_func(
+            module,
+            im,
+            &intrinsics,
+            func,
+            directives,
+            |directive, idx| {
+                // Append to table.
+                let func_table = module.table_mut(Table::from(0));
+                let table_idx = {
+                    let func_table_elts = func_table.func_elements.as_mut().unwrap();
+                    let table_idx = func_table_elts.len();
+                    func_table_elts.push(idx);
+                    table_idx
+                } as u32;
+                if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
+                    func_table.max = Some(table_idx + 1);
+                }
+                log::info!("New func index {} -> table index {}", idx, table_idx);
+                log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
+                // Update memory image.
+                mem_updates.insert(directive.func_index_out_addr, table_idx);
+            },
+        )?;
     }
 
     // Update memory.
@@ -96,20 +103,81 @@ pub fn partially_evaluate(
     Ok(())
 }
 
-fn partially_evaluate_func(
+/// Returns the pre-block (block that calls weval_start()), the index
+/// of the blockparam on the start block that contains the func ctx
+/// (if any), and the start block.
+fn find_start_block(
+    module: &Module,
+    func: Func,
+    intrinsics: &Intrinsics,
+) -> anyhow::Result<(Block, Option<usize>, Block)> {
+    let func_body = module
+        .func(func)
+        .body()
+        .ok_or_else(|| anyhow::anyhow!("Func {} named in directive is an import", func))?;
+
+    // Find the block and inst of a call to `intrinsics.start`, if any.
+    let is_start_call = |value_def: &ValueDef| match value_def {
+        &ValueDef::Operator(Operator::Call { function_index }, _, _)
+            if Some(function_index) == intrinsics.start =>
+        {
+            true
+        }
+        _ => false,
+    };
+
+    let callsites = func_body
+        .blocks
+        .entries()
+        .flat_map(|(block, block_data)| {
+            std::iter::repeat(block).zip(block_data.insts.iter().cloned())
+        })
+        .filter(|&(_, inst)| is_start_call(&func_body.values[inst]))
+        .collect::<Vec<(Block, Value)>>();
+
+    if callsites.len() != 1 {
+        anyhow::bail!(
+            "Func {} does not have exactly one call to weval_start()",
+            func
+        );
+    }
+
+    // Get successor blocks; there must be exactly one.
+    let call_block = callsites[0].0;
+    let func_ctx_value = callsites[0].1;
+    let succs = &func_body.blocks[call_block].succs[..];
+    if succs.len() != 1 {
+        anyhow::bail!(
+            "Func {} does not have one successor block from weval_start()",
+            func
+        );
+    }
+    let start_block = succs[0];
+
+    let func_ctx_arg_idx = match &func_body.blocks[call_block].terminator {
+        Terminator::Br { target } => target.args.iter().position(|&arg| arg == func_ctx_value),
+        _ => anyhow::bail!("Invalid terminator on start block in func {}", func),
+    };
+
+    Ok((call_block, func_ctx_arg_idx, start_block))
+}
+
+fn partially_evaluate_func<F: FnMut(&Directive, Func)>(
     module: &mut Module,
     image: &Image,
     intrinsics: &Intrinsics,
-    directive: &Directive,
-) -> anyhow::Result<Option<Func>> {
+    func: Func,
+    directives: &[Directive],
+    mut write_specialized_func: F,
+) -> anyhow::Result<()> {
     // Get function body.
     let body = module
-        .func(directive.func)
+        .func(func)
         .body()
         .ok_or_else(|| anyhow::anyhow!("Attempt to specialize an import"))?;
-    let sig = module.func(directive.func).sig();
+    let sig = module.func(func).sig();
 
-    log::trace!("Specializing: {}", directive.func);
+    log::trace!("Specializing: {}", func);
     log::trace!("body:\n{}", body.display("| "));
 
     // Compute CFG info.
@@ -117,37 +185,52 @@ fn partially_evaluate_func(
 
     log::trace!("CFGInfo: {:?}", cfg);
 
-    // Build the evaluator.
-    let mut evaluator = Evaluator {
-        generic: body,
-        intrinsics,
-        image,
-        cfg,
-        state: FunctionState::new(),
-        func: FunctionBody::new(module, sig),
-        block_map: HashMap::new(),
-        block_rev_map: PerEntity::default(),
-        block_deps: HashMap::new(),
-        value_map: HashMap::new(),
-        mem_blockparam_map: HashMap::new(),
-        queue: VecDeque::new(),
-        queue_set: HashSet::new(),
-    };
-    let (ctx, entry_state) = evaluator
-        .state
-        .init_args(body, image, &directive.const_params[..]);
-    log::trace!("after init_args, state is {:?}", evaluator.state);
-    let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
-    evaluator.func.entry = specialized_entry;
-    evaluator
-        .queue
-        .push_back((evaluator.generic.entry, ctx, specialized_entry));
-    evaluator.queue_set.insert((evaluator.generic.entry, ctx));
-    evaluator.evaluate()?;
+    // Find the single block following a call to `weval_start`, if
+    // any, or fail.
+    let (pre_block, start_block_func_ctx_arg_idx, start_block) =
+        find_start_block(module, func, intrinsics)?;
 
-    log::debug!("Adding func:\n{}", evaluator.func.display("| "));
-    let func = module.add_func(sig, evaluator.func);
-    Ok(Some(func))
+    // For each individual directive, do the specialization.
+    for directive in directives {
+        // Build the evaluator.
+        let mut evaluator = Evaluator {
+            generic: body,
+            intrinsics,
+            image,
+            cfg,
+            start_block,
+            state: FunctionState::new(),
+            func: FunctionBody::new(module, sig),
+            block_map: HashMap::new(),
+            block_rev_map: PerEntity::default(),
+            block_deps: HashMap::new(),
+            value_map: HashMap::new(),
+            mem_blockparam_map: HashMap::new(),
+            queue: VecDeque::new(),
+            queue_set: HashSet::new(),
+        };
+        let (ctx, entry_state) =
+            evaluator
+                .state
+                .init_args(body, image, &directive.const_params[..]);
+        log::trace!("after init_args, state is {:?}", evaluator.state);
+        let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
+        evaluator.func.entry = specialized_entry;
+        evaluator
+            .queue
+            .push_back((evaluator.generic.entry, ctx, specialized_entry));
+        evaluator.queue_set.insert((evaluator.generic.entry, ctx));
+        evaluator.evaluate()?;
+
+        log::debug!("Adding func:\n{}", evaluator.func.display("| "));
+        let func = module.add_func(sig, evaluator.func);
+
+        write_specialized_func(directive, func);
+    }
+
+    // TODO: rewrite pre-start block.
+
+    Ok(())
 }
 
 fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {
