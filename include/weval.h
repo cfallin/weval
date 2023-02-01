@@ -17,7 +17,7 @@ struct weval_req_t {
     weval_func_t func;
     uint64_t func_ctx;
     uint64_t pc_ctx;
-    weval_func_t* specialized;
+    void** specialized;
 };
 
 extern weval_req_t* weval_req_pending_head;
@@ -32,9 +32,6 @@ static void weval_free() {
     weval_req_t* next = NULL;
     for (; weval_req_freelist_head; weval_req_freelist_head = next) {
         next = weval_req_freelist_head->next;
-        if (weval_req_freelist_head->args) {
-            free(weval_req_freelist_head->args);
-        }
         free(weval_req_freelist_head);
     }
     weval_req_freelist_head = NULL;
@@ -57,7 +54,7 @@ const void* weval_assume_const_memory(const void* p);
 /* Start a specialized region. Should come before any unrolled
  * loop. Returns the function context. */
 __attribute__((noinline))
-uint64_t weval_start(uint64_t func_ctx, uint64_t pc_ctx, void* funcptr);
+uint64_t weval_start(uint64_t func_ctx, uint64_t pc_ctx, void* const* specialized);
 /* Within a specialized region, update the PC ctx. Value returned
  * should be used for all accesses throughout the specialized
  * region. If updated, next basic block edge goes to block of new
@@ -67,11 +64,6 @@ uint64_t weval_pc_ctx(uint64_t pc_ctx);
 /* End a specialized region. Should come after any loop. */
 __attribute__((noinline))
 void weval_end();
-
-/* Note a func_ctx/pc_ctx pair that may occur, with the funcptr
- * associated with it. */
-__attribute__((noinline))
-void weval_register(uint64_t func_ctx, uint64_t pc_ctx, void* funcptr);
 
 /* "bless" a pointer for memory renaming. */
 __attribute__((noinline))
@@ -84,161 +76,77 @@ void* weval_flush_to_mem(void* p, uint32_t len);
 }  // extern "C"
 #endif
 
+static int weval_enroll(weval_func_t func, uint64_t func_ctx, uint64_t pc_ctx, void** specialized) {
+    weval_req_t* req = (weval_req_t*)malloc(sizeof(weval_req_t));
+    if (!req) {
+        return 0;
+    }
+
+    req->func = func;
+    req->func_ctx = func_ctx;
+    req->pc_ctx = pc_ctx;
+    req->specialized = specialized;
+
+    weval_request(req);
+
+    return 1;
+}
+
+/* ------------------------------------------------------------------------- */
+/*            C++ wrapper (`weval` namespace)                                */
+/* ------------------------------------------------------------------------- */
+
 #ifdef __cplusplus
+
 namespace weval {
+    
 template<typename T>
-const T* assume_const_memory(const T* t) {
-    return (const T*)weval_assume_const_memory((const void*)t);
+T* make_symbolic_ptr(T* ptr) {
+    return reinterpret_cast<T*>(weval_make_symbolic_ptr(reinterpret_cast<void*>(ptr)));
 }
 
-static void push_context(uint32_t pc) {
-    weval_push_context(pc);
+template<typename T>
+T* assume_const_memory(T* ptr) {
+    return reinterpret_cast<T*>(weval_make_symbolic_ptr(reinterpret_cast<void*>(ptr)));
 }
 
-static void pop_context() {
-    weval_pop_context();
+template<typename T>
+const T* assume_const_memory(const T* ptr) {
+    return reinterpret_cast<const T*>(weval_make_symbolic_ptr(reinterpret_cast<void*>(const_cast<T*>(ptr))));
 }
 
-static void update_context(uint32_t pc) {
-    weval_update_context(pc);
-}
 template<typename T>
-static T* make_symbolic_ptr(T* t) {
-    return (T*)weval_make_symbolic_ptr((void*)t);
+void flush_to_mem(T* ptr, size_t count) {
+    weval_flush_to_mem(reinterpret_cast<void*>(ptr), sizeof(T) * count);
 }
+
 template<typename T>
-void flush_to_mem(T* p, size_t len) {
-    weval_flush_to_mem((void*)p, (uint32_t)len);
+void flush_to_mem(const T* ptr, size_t count) {
+    weval_flush_to_mem(reinterpret_cast<void*>(ptr), sizeof(T) * count);
+}
+    
+template<typename Func>
+Func* start(Func* func_ctx, uint64_t pc_ctx, void* const* specialized) {
+    return reinterpret_cast<Func*>(weval_start(reinterpret_cast<uint64_t>(func_ctx), pc_ctx, specialized));
+}
+
+template<typename Func>
+const Func* start(const Func* func_ctx, uint64_t pc_ctx, void* const* specialized) {
+    return reinterpret_cast<const Func*>(weval_start(reinterpret_cast<uint64_t>(func_ctx), pc_ctx, specialized));
+}
+
+static uint64_t pc_ctx(uint64_t pc) {
+    return weval_pc_ctx(pc);
+}
+
+static void end() {
+    weval_end();
+}
+
+template<typename InterpretFunc, typename Func>
+void enroll(InterpretFunc interpret, const Func* func, uint64_t pc_ctx, void** specialized) {
+    weval_enroll(reinterpret_cast<weval_func_t>(interpret), reinterpret_cast<uint64_t>(func), pc_ctx, specialized);
 }
 
 }  // namespace weval
 #endif  // __cplusplus
-
-/* ------------------------------------------------------------------------- */
-/* C++ type-safe wrapper for partial evaluation of functions                 */
-/* ------------------------------------------------------------------------- */
-
-#ifdef __cplusplus
-namespace weval {
-
-template<typename T>
-struct Specialize {
-    typedef T value_t;
-    bool is_specialized;
-    T value;
-
-    Specialize() : is_specialized(false) {}
-    explicit Specialize(T value_) : is_specialized(true), value(value_) {}
-};
-
-template<typename T>
-static Specialize<T> Runtime() {
-    return Specialize<T>();
-}
-
-namespace impl {
-template<typename Ret, typename... Args>
-using FuncPtr = Ret (*)(Args...);
-
-template<typename T>
-struct StoreArg;
-
-template<>
-struct StoreArg<uint32_t> {
-    void operator()(weval_req_arg_t* arg, uint32_t value) {
-        arg->specialize = 1;
-        arg->ty = weval_req_arg_i32;
-        arg->u.i32 = value;
-    }
-};
-template<>
-struct StoreArg<uint64_t> {
-    void operator()(weval_req_arg_t* arg, uint64_t value) {
-        arg->specialize = 1;
-        arg->ty = weval_req_arg_i64;
-        arg->u.i64 = value;
-    }
-};
-template<>
-struct StoreArg<float> {
-    void operator()(weval_req_arg_t* arg, float value) {
-        arg->specialize = 1;
-        arg->ty = weval_req_arg_f32;
-        arg->u.f32 = value;
-    }
-};
-template<>
-struct StoreArg<double> {
-    void operator()(weval_req_arg_t* arg, double value) {
-        arg->specialize = 1;
-        arg->ty = weval_req_arg_f64;
-        arg->u.f64 = value;
-    }
-};
-template<typename T>
-struct StoreArg<T*> {
-    void operator()(weval_req_arg_t* arg, T* value) {
-        static_assert(sizeof(T*) == 4, "Only 32-bit Wasm supported");
-        arg->specialize = 1;
-        arg->ty = weval_req_arg_i32;
-        arg->u.i32 = reinterpret_cast<uint32_t>(value);
-    }
-};
-template<typename T>
-struct StoreArg<const T*> {
-    void operator()(weval_req_arg_t* arg, const T* value) {
-        static_assert(sizeof(const T*) == 4, "Only 32-bit Wasm supported");
-        arg->specialize = 1;
-        arg->ty = weval_req_arg_i32;
-        arg->u.i32 = reinterpret_cast<uint32_t>(value);
-    }
-};
-
-template<typename... Args>
-struct StoreArgs {};
-
-template<>
-struct StoreArgs<> {
-    void operator()(weval_req_arg_t* args) {}
-};
-
-template<typename Arg, typename... Rest>
-struct StoreArgs<Arg, Rest...> {
-    void operator()(weval_req_arg_t* args, Arg arg0, Rest... rest) {
-        if (arg0.is_specialized) {
-            StoreArg<typename Arg::value_t>()(args, arg0.value);
-        } else {
-            args[0].specialize = 0;
-        }
-        StoreArgs<Rest...>()(args + 1, rest...);
-    }
-};
-
-}  // impl
-
-template<typename Ret, typename... Args, typename... WrappedArgs>
-bool weval(impl::FuncPtr<Ret, Args...>* dest, impl::FuncPtr<Ret, Args...> generic, Specialize<Args>... args) {
-    weval_req_t* req = (weval_req_t*)malloc(sizeof(weval_req_t));
-    if (!req) {
-        return false;
-    }
-    uint32_t nargs = sizeof...(Args);
-    weval_req_arg_t* arg_storage = (weval_req_arg_t*)malloc(sizeof(weval_req_arg_t) * nargs);
-    if (!arg_storage) {
-        return false;
-    }
-    impl::StoreArgs<Specialize<Args>...>()(arg_storage, args...);
-
-    req->func = (weval_func_t)generic;
-    req->args = arg_storage;
-    req->nargs = nargs;
-    req->specialized = (weval_func_t*)dest;
-
-    weval_request(req);
-
-    return true;
-}
-
-}  // namespace weval
-
-#endif // __cplusplus

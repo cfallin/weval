@@ -69,6 +69,38 @@ void* weval_make_symbolic_ptr(void* value) {
     }
 }
 
+__attribute__((export_name("weval.flush.to.mem")))
+void* weval_flush_to_mem(void* ptr, uint32_t len) {
+    if (__hook) {
+        return (void*)24;
+    } else {
+        return ptr;
+    }
+}
+
+__attribute__((export_name("weval.start")))
+uint64_t weval_start(uint64_t func_ctx, uint64_t pc_ctx, void* const* specialized) {
+    if (__hook) {
+        return 2;
+    } else {
+        return func_ctx;
+    }
+}
+
+__attribute__((export_name("weval.pc.ctx")))
+uint64_t weval_pc_ctx(uint64_t pc_ctx) {
+    if (__hook) {
+        return 3;
+    } else {
+        return pc_ctx;
+    }
+}
+
+__attribute__((export_name("weval.end")))
+void weval_end() {
+    __accum += 2;
+}
+
 // Allows the tool to find the linked list. Must have a very specific
 // form: return a constant, with no longer logic.
 __attribute__((export_name("weval.pending.head")))

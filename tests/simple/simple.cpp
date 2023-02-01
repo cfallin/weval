@@ -35,8 +35,27 @@ struct State {
     uint32_t locals[LOCAL_SIZE];
 };
 
-bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
-    insts = weval::assume_const_memory(insts);
+struct Func {
+    const Inst* insts;
+    uint32_t ninsts;
+    void* specialized;
+
+    Func(const Inst* insts_, uint32_t ninsts_);
+    bool invoke(State* state);
+};
+
+bool Interpret(const Func* func_, State* state);
+
+Func::Func(const Inst* insts_, uint32_t ninsts_)
+    : insts(insts_), ninsts(ninsts_), specialized(nullptr) {
+    weval::enroll(Interpret, this, 0, &specialized);
+}
+
+bool Func::invoke(State* state) {
+    return Interpret(this, state);
+}
+
+bool Interpret(const Func* func_, State* state) {
     uint32_t pc = 0;
     uint32_t steps = 0;
     uint32_t* opstack = state->opstack;
@@ -45,16 +64,12 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     opstack = weval::make_symbolic_ptr(opstack);
     locals = weval::make_symbolic_ptr(locals);
 
-    // TODO: build an abstraction for `pc`: `InterpreterPC<u32>` (and
-    // impls for u64 and T*) that have a `.loop([&](pc) { ... })`
-    // method that returns either LoopResult::next_pc(pc) or
-    // LoopResult::break_loop(val).
-    weval::push_context(pc);
+    const Func* func = weval::start(func_, pc, &func->specialized);
+    const Inst* insts = weval::assume_const_memory(func->insts);
     while (true) {
         steps++;
         const Inst* inst = &insts[pc];
         pc++;
-        weval::update_context(pc);
         switch (inst->opcode) {
             case PushConst:
                 if (sp + 1 > OPSTACK_SIZE) {
@@ -117,32 +132,31 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                 printf("%u\n", opstack[--sp]);
                 break;
             case Goto:
-                if (inst->imm >= ninsts) {
+                if (inst->imm >= func->ninsts) {
                     return false;
                 }
                 pc = inst->imm;
-                weval::update_context(pc);
                 break;
             case GotoIf:
                 if (sp == 0) {
                     return false;
                 }
-                if (inst->imm >= ninsts) {
+                if (inst->imm >= func->ninsts) {
                     return false;
                 }
                 sp--;
                 if (opstack[sp] != 0) {
                     pc = inst->imm;
-                    weval::update_context(pc);
-                    continue;
                 }
                 break;
             case Exit:
                 goto out;
         }
+
+        pc = weval::pc_ctx(pc);
     }
 out:
-    weval::pop_context();
+    weval::end();
     weval::flush_to_mem(opstack, OPSTACK_SIZE);
     weval::flush_to_mem(locals, LOCAL_SIZE);
 
@@ -162,31 +176,9 @@ Inst prog[] = {
     Inst(Goto, 1),
 };
 
-typedef bool (*InterpretFunc)(const Inst* insts, uint32_t ninsts, State* state);
-
-struct Func {
-    const Inst* insts;
-    uint32_t ninsts;
-    InterpretFunc specialized;
-
-    Func(const Inst* insts_, uint32_t ninsts_)
-        : insts(insts_), ninsts(ninsts_), specialized(nullptr) {
-        weval::weval(&specialized, Interpret, weval::Specialize(insts), weval::Specialize(ninsts), weval::Runtime<State*>());
-    }
-
-    bool invoke(State* state) {
-        printf("Inspecting func ptr at: %p\n", &specialized);
-        if (specialized) {
-            printf("Calling specialized function: %p\n", specialized);
-            return specialized(insts, ninsts, state);
-        }
-        return Interpret(insts, ninsts, state);
-    }
-};
-
 Func prog_func(prog, sizeof(prog)/sizeof(Inst));
 
-int main() {
+int main(int argc, char** argv) {
     State* state = (State*)calloc(sizeof(State), 1);
     prog_func.invoke(state);
     fflush(stdout);
