@@ -34,8 +34,9 @@
 //! examine the state at a given program point and using a different
 //! context implies leaving the current loop.
 
+use crate::eval::SpecializedRegion;
 use crate::image::Image;
-use crate::value::{AbstractValue, ValueTags};
+use crate::value::{AbstractValue, ValueTags, WasmVal};
 use std::collections::{hash_map::Entry, HashMap};
 use std::collections::{BTreeMap, BTreeSet};
 use waffle::entity::{EntityRef, EntityVec, PerEntity};
@@ -297,21 +298,26 @@ impl FunctionState {
         }
     }
 
-    pub fn init_args(
+    pub(crate) fn init_args(
         &mut self,
         orig_body: &FunctionBody,
         im: &Image,
-        args: &[AbstractValue],
+        region: &SpecializedRegion,
+        func_ctx: u64,
     ) -> (Context, ProgPointState) {
-        // For each blockparam of the entry block, set the value of the SSA arg.
-        debug_assert_eq!(args.len(), orig_body.blocks[orig_body.entry].params.len());
         let ctx = self.contexts.create(None, ContextElem::Root);
-        for ((_, orig_value), abs) in orig_body.blocks[orig_body.entry]
+        for (i, &(ty, orig_value)) in orig_body.blocks[region.start_block]
             .params
             .iter()
-            .zip(args.iter())
+            .enumerate()
         {
-            self.state[ctx].ssa.values.insert(*orig_value, *abs);
+            let abs = if Some(i) == region.func_ctx_arg_idx {
+                assert_eq!(ty, Type::I64);
+                AbstractValue::Concrete(WasmVal::I64(func_ctx), ValueTags::default())
+            } else {
+                AbstractValue::Runtime(ValueTags::default())
+            };
+            self.state[ctx].ssa.values.insert(orig_value, abs);
         }
         (ctx, ProgPointState::entry(im))
     }

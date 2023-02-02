@@ -12,8 +12,8 @@ use std::collections::{
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
-    entity::PerEntity, Block, BlockTarget, Func, FunctionBody, Module, Operator, Table, Terminator,
-    Type, Value, ValueDef,
+    entity::PerEntity, Block, BlockTarget, Func, FuncDecl, FunctionBody, Module, Operator, Table,
+    Terminator, Type, Value, ValueDef,
 };
 
 struct Evaluator<'a> {
@@ -69,30 +69,24 @@ pub fn partially_evaluate(
     for (func, directives) in &directives.into_iter().group_by(|dir| dir.func) {
         let directives = directives.collect::<Vec<_>>();
         log::info!("Processing directives {:?} for func {}", directives, func);
-        partially_evaluate_func(
-            module,
-            im,
-            &intrinsics,
-            func,
-            &directives[..],
-            |directive, idx| {
-                // Append to table.
-                let func_table = module.table_mut(Table::from(0));
-                let table_idx = {
-                    let func_table_elts = func_table.func_elements.as_mut().unwrap();
-                    let table_idx = func_table_elts.len();
-                    func_table_elts.push(idx);
-                    table_idx
-                } as u32;
-                if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
-                    func_table.max = Some(table_idx + 1);
-                }
-                log::info!("New func index {} -> table index {}", idx, table_idx);
-                log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
-                // Update memory image.
-                mem_updates.insert(directive.func_index_out_addr, table_idx);
-            },
-        )?;
+        let results = partially_evaluate_func(module, im, &intrinsics, func, &directives[..])?;
+        for (directive, idx) in results {
+            // Append to table.
+            let func_table = &mut module.tables[Table::from(0)];
+            let table_idx = {
+                let func_table_elts = func_table.func_elements.as_mut().unwrap();
+                let table_idx = func_table_elts.len();
+                func_table_elts.push(idx);
+                table_idx
+            } as u32;
+            if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
+                func_table.max = Some(table_idx + 1);
+            }
+            log::info!("New func index {} -> table index {}", idx, table_idx);
+            log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
+            // Update memory image.
+            mem_updates.insert(directive.func_index_out_addr, table_idx);
+        }
     }
 
     // Update memory.
@@ -104,23 +98,23 @@ pub fn partially_evaluate(
 }
 
 #[derive(Clone, Debug)]
-struct SpecializedRegion {
+pub(crate) struct SpecializedRegion {
     /// The block that calls `weval_start()`. Must have one successor,
     /// namely `start_block`.
-    call_block: Block,
+    pub(crate) call_block: Block,
     /// The block-arg index on `start_block` for the function context,
     /// if any.
-    func_ctx_arg_idx: Option<usize>,
+    pub(crate) func_ctx_arg_idx: Option<usize>,
     /// The block after the block that calls `weval_start()`. This
     /// forms the entry to the specialized functions.
-    start_block: Block,
+    pub(crate) start_block: Block,
     /// The block that includes the `weval_end()` call. There must be
     /// only one.
-    end_block: Block,
+    pub(crate) end_block: Block,
     /// Blocks included in the specialized region. These are generated
     /// into the specialized functions (and the fallback function) and
     /// not in the interpreter function.
-    specialized_blocks: HashSet<Block>,
+    pub(crate) specialized_blocks: HashSet<Block>,
 }
 
 fn is_intrinsic_call(func_body: &FunctionBody, inst: Value, intrinsic: Option<Func>) -> bool {
@@ -160,8 +154,7 @@ fn find_specialized_region(
     func: Func,
     intrinsics: &Intrinsics,
 ) -> anyhow::Result<SpecializedRegion> {
-    let func_body = module
-        .func(func)
+    let func_body = module.funcs[func]
         .body()
         .ok_or_else(|| anyhow::anyhow!("Func {} named in directive is an import", func))?;
 
@@ -256,17 +249,15 @@ fn find_specialized_region(
     })
 }
 
-fn partially_evaluate_func<F: FnMut(&Directive, Func)>(
+fn partially_evaluate_func<'a>(
     module: &mut Module,
     image: &Image,
     intrinsics: &Intrinsics,
     func: Func,
-    directives: &[Directive],
-    mut write_specialized_func: F,
-) -> anyhow::Result<()> {
+    directives: &'a [Directive],
+) -> anyhow::Result<Vec<(&'a Directive, Func)>> {
     // Get function body.
-    let body = module
-        .func(func)
+    let body = module.funcs[func]
         .body()
         .ok_or_else(|| anyhow::anyhow!("Attempt to specialize an import"))?;
 
@@ -284,7 +275,7 @@ fn partially_evaluate_func<F: FnMut(&Directive, Func)>(
 
     // Create a signature ID from the entry block's blockparams (as
     // args) and end block's blockparams (as returns).
-    let specialized_sig = module.add_signature(waffle::SignatureData {
+    let specialized_sig = module.signatures.push(waffle::SignatureData {
         params: body.blocks[specialized_region.start_block]
             .params
             .iter()
@@ -297,7 +288,11 @@ fn partially_evaluate_func<F: FnMut(&Directive, Func)>(
             .collect::<Vec<_>>(),
     });
 
+    // TODO: create the generic function with a copy of the original
+    // interpreter body.
+
     // For each individual directive, do the specialization.
+    let mut funcs: Vec<(&'a Directive, FunctionBody)> = vec![];
     for directive in directives {
         // Build the evaluator.
         let mut evaluator = Evaluator {
@@ -318,28 +313,38 @@ fn partially_evaluate_func<F: FnMut(&Directive, Func)>(
             queue: VecDeque::new(),
             queue_set: HashSet::new(),
         };
-        let (ctx, entry_state) =
-            evaluator
-                .state
-                .init_args(body, image, &directive.const_params[..]);
+        let (ctx, entry_state) = evaluator.state.init_args(
+            body,
+            image,
+            &evaluator.specialized_region,
+            directive.func_ctx,
+        );
         log::trace!("after init_args, state is {:?}", evaluator.state);
-        let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
+        let entry = evaluator.specialized_region.start_block;
+        let specialized_entry = evaluator.create_block(entry, ctx, entry_state);
         evaluator.func.entry = specialized_entry;
-        evaluator
-            .queue
-            .push_back((evaluator.generic.entry, ctx, specialized_entry));
-        evaluator.queue_set.insert((evaluator.generic.entry, ctx));
+        evaluator.queue.push_back((entry, ctx, specialized_entry));
+        evaluator.queue_set.insert((entry, ctx));
         evaluator.evaluate()?;
 
         log::debug!("Adding func:\n{}", evaluator.func.display("| "));
-        let func = module.add_func(sig, evaluator.func);
-
-        write_specialized_func(directive, func);
+        funcs.push((directive, evaluator.func));
     }
 
-    // TODO: rewrite pre-start block.
+    let func_ids: Vec<(&'a Directive, Func)> = funcs
+        .into_iter()
+        .map(|(directive, body)| {
+            (
+                directive,
+                module.funcs.push(FuncDecl::Body(specialized_sig, body)),
+            )
+        })
+        .collect();
 
-    Ok(())
+    // TODO: rewrite pre-start block and remove all of the specialized
+    // blocks.
+
+    Ok(func_ids)
 }
 
 fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {
@@ -906,26 +911,7 @@ impl<'a> Evaluator<'a> {
                         label_index
                     );
                     EvalResult::Alias(AbstractValue::SymbolicPtr(label_index, 0), values[0])
-                } else if Some(function_index) == self.intrinsics.push_context {
-                    let pc = abs[0].is_const_u32();
-                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
-                    let child = self
-                        .state
-                        .contexts
-                        .create(Some(instantaneous_context), ContextElem::Loop(pc));
-                    state.pending_context = Some(child);
-                    log::trace!("push context (pc {:?}): now {}", pc, child);
-                    EvalResult::Elide
-                } else if Some(function_index) == self.intrinsics.pop_context {
-                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
-                    let parent = match self.state.contexts.leaf_element(instantaneous_context) {
-                        ContextElem::Root => instantaneous_context,
-                        _ => self.state.contexts.parent(instantaneous_context),
-                    };
-                    state.pending_context = Some(parent);
-                    log::trace!("pop context: now {}", parent);
-                    EvalResult::Elide
-                } else if Some(function_index) == self.intrinsics.update_context {
+                } else if Some(function_index) == self.intrinsics.pc_ctx {
                     let pc = abs[0].is_const_u32();
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
                     let sibling = match self.state.contexts.leaf_element(instantaneous_context) {

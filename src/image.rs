@@ -23,26 +23,29 @@ pub struct MemImage {
 pub fn build_image(module: &Module) -> anyhow::Result<Image> {
     Ok(Image {
         memories: module
-            .memories()
+            .memories
+            .entries()
             .flat_map(|(id, mem)| maybe_mem_image(mem).map(|image| (id, image)))
             .collect(),
         globals: module
-            .globals()
+            .globals
+            .entries()
             .flat_map(|(global_id, data)| match data.value {
                 Some(bits) => Some((global_id, WasmVal::from_bits(data.ty, bits)?)),
                 _ => None,
             })
             .collect(),
         tables: module
-            .tables()
+            .tables
+            .entries()
             .map(|(id, data)| (id, data.func_elements.clone().unwrap_or(vec![])))
             .collect(),
         // HACK: assume first global is shadow stack pointer.
-        stack_pointer: module.globals().next().map(|(id, _)| id),
+        stack_pointer: module.globals.entries().next().map(|(id, _)| id),
         // HACK: assume first memory is main heap.
-        main_heap: module.memories().next().map(|(id, _)| id),
+        main_heap: module.memories.entries().next().map(|(id, _)| id),
         // HACK: assume first table is used for function pointers.
-        main_table: module.tables().next().map(|(id, _)| id),
+        main_table: module.tables.entries().next().map(|(id, _)| id),
     })
 }
 
@@ -61,8 +64,8 @@ fn maybe_mem_image(mem: &MemoryData) -> Option<MemImage> {
 
 pub fn update(module: &mut Module, im: &Image) {
     for (&mem_id, mem) in &im.memories {
-        module.memory_mut(mem_id).segments.clear();
-        module.memory_mut(mem_id).segments.push(MemorySegment {
+        module.memories[mem_id].segments.clear();
+        module.memories[mem_id].segments.push(MemorySegment {
             offset: 0,
             data: mem.image.clone(),
         });
