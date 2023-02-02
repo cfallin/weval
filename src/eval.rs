@@ -5,6 +5,7 @@ use crate::image::Image;
 use crate::intrinsics::Intrinsics;
 use crate::state::*;
 use crate::value::{AbstractValue, ValueTags, WasmVal};
+use itertools::Itertools;
 use std::collections::{
     btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, HashMap, HashSet, VecDeque,
 };
@@ -24,9 +25,8 @@ struct Evaluator<'a> {
     image: &'a Image,
     /// Domtree for function body.
     cfg: CFGInfo,
-    /// Block in generic function following the `weval_start` call
-    /// (there must only be one).
-    start_block: Block,
+    /// Region to specialize.
+    specialized_region: SpecializedRegion,
     /// State of SSA values and program points:
     /// - per context:
     ///   - per SSA number, an abstract value
@@ -66,15 +66,15 @@ pub fn partially_evaluate(
     let mut directives = directives.to_vec();
     directives.sort_by_key(|dir| dir.func);
 
-    for directives in directives.group_by(|dir| dir.func) {
-        let func = directives[0].func;
+    for (func, directives) in &directives.into_iter().group_by(|dir| dir.func) {
+        let directives = directives.collect::<Vec<_>>();
         log::info!("Processing directives {:?} for func {}", directives, func);
         partially_evaluate_func(
             module,
             im,
             &intrinsics,
             func,
-            directives,
+            &directives[..],
             |directive, idx| {
                 // Append to table.
                 let func_table = module.table_mut(Table::from(0));
@@ -103,63 +103,157 @@ pub fn partially_evaluate(
     Ok(())
 }
 
-/// Returns the pre-block (block that calls weval_start()), the index
-/// of the blockparam on the start block that contains the func ctx
-/// (if any), and the start block.
-fn find_start_block(
-    module: &Module,
-    func: Func,
-    intrinsics: &Intrinsics,
-) -> anyhow::Result<(Block, Option<usize>, Block)> {
-    let func_body = module
-        .func(func)
-        .body()
-        .ok_or_else(|| anyhow::anyhow!("Func {} named in directive is an import", func))?;
+#[derive(Clone, Debug)]
+struct SpecializedRegion {
+    /// The block that calls `weval_start()`. Must have one successor,
+    /// namely `start_block`.
+    call_block: Block,
+    /// The block-arg index on `start_block` for the function context,
+    /// if any.
+    func_ctx_arg_idx: Option<usize>,
+    /// The block after the block that calls `weval_start()`. This
+    /// forms the entry to the specialized functions.
+    start_block: Block,
+    /// The block that includes the `weval_end()` call. There must be
+    /// only one.
+    end_block: Block,
+    /// Blocks included in the specialized region. These are generated
+    /// into the specialized functions (and the fallback function) and
+    /// not in the interpreter function.
+    specialized_blocks: HashSet<Block>,
+}
 
-    // Find the block and inst of a call to `intrinsics.start`, if any.
-    let is_start_call = |value_def: &ValueDef| match value_def {
+fn is_intrinsic_call(func_body: &FunctionBody, inst: Value, intrinsic: Option<Func>) -> bool {
+    match &func_body.values[inst] {
         &ValueDef::Operator(Operator::Call { function_index }, _, _)
-            if Some(function_index) == intrinsics.start =>
+            if Some(function_index) == intrinsic =>
         {
             true
         }
         _ => false,
-    };
+    }
+}
 
+fn find_only_block_with_intrinsic_call(
+    func_body: &FunctionBody,
+    intrinsic: Option<Func>,
+) -> Option<(Block, Value)> {
+    // Find the block and inst of a call to `intrinsics.start`, if any.
     let callsites = func_body
         .blocks
         .entries()
         .flat_map(|(block, block_data)| {
             std::iter::repeat(block).zip(block_data.insts.iter().cloned())
         })
-        .filter(|&(_, inst)| is_start_call(&func_body.values[inst]))
+        .filter(|&(_, inst)| is_intrinsic_call(func_body, inst, intrinsic))
         .collect::<Vec<(Block, Value)>>();
 
     if callsites.len() != 1 {
-        anyhow::bail!(
-            "Func {} does not have exactly one call to weval_start()",
-            func
-        );
+        return None;
     }
 
+    Some(callsites[0])
+}
+
+fn find_specialized_region(
+    module: &Module,
+    func: Func,
+    intrinsics: &Intrinsics,
+) -> anyhow::Result<SpecializedRegion> {
+    let func_body = module
+        .func(func)
+        .body()
+        .ok_or_else(|| anyhow::anyhow!("Func {} named in directive is an import", func))?;
+
+    let (call_block, func_ctx_value) =
+        find_only_block_with_intrinsic_call(func_body, intrinsics.start).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Func {} does not have exactly one call to `weval_start()`",
+                func
+            )
+        })?;
+
     // Get successor blocks; there must be exactly one.
-    let call_block = callsites[0].0;
-    let func_ctx_value = callsites[0].1;
     let succs = &func_body.blocks[call_block].succs[..];
     if succs.len() != 1 {
         anyhow::bail!(
-            "Func {} does not have one successor block from weval_start()",
+            "Func {} does not have one successor block from `weval_start()`",
             func
         );
     }
     let start_block = succs[0];
 
+    // Get index of `func_ctx` in args, if any.
     let func_ctx_arg_idx = match &func_body.blocks[call_block].terminator {
         Terminator::Br { target } => target.args.iter().position(|&arg| arg == func_ctx_value),
         _ => anyhow::bail!("Invalid terminator on start block in func {}", func),
     };
 
-    Ok((call_block, func_ctx_arg_idx, start_block))
+    // Get end block.
+    let (end_block, _) = find_only_block_with_intrinsic_call(func_body, intrinsics.end)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Func {} does not have exactly one call to `weval_end()`",
+                func
+            )
+        })?;
+
+    if start_block == end_block {
+        anyhow::bail!(
+            "`weval_start()` and `weval_end()` called in same block in func {}",
+            func
+        );
+    }
+
+    // Find all specialized blocks: those reachable from start_block
+    // and stopping at (excluding) end_block.
+    let mut specialized_blocks = HashSet::new();
+    specialized_blocks.insert(start_block);
+    let mut workqueue = vec![start_block];
+    while let Some(block) = workqueue.pop() {
+        for &succ in &func_body.blocks[block].succs {
+            if succ == end_block {
+                continue;
+            }
+            if specialized_blocks.insert(succ) {
+                workqueue.push(succ);
+            }
+        }
+    }
+
+    // Verify that no pred-succ edge crosses the generic-specialized
+    // boundary except for into start_block and out to end_block (and
+    // that there are no returns in the specialized region).
+    for (block, block_data) in func_body.blocks.entries() {
+        for &succ in &block_data.succs {
+            if block == end_block || (succ == start_block && block == call_block) {
+                // Any block inside specialized region, or the call
+                // block, can branch to start block. Any block inside
+                // specialized region or outside it can branch to end
+                // block.
+                continue;
+            }
+            if specialized_blocks.contains(&block) != specialized_blocks.contains(&succ) {
+                anyhow::bail!("Illegal edge from {} to {} in func {}", block, succ, func);
+            }
+        }
+        if specialized_blocks.contains(&block) {
+            if let Terminator::Return { .. } = &block_data.terminator {
+                anyhow::bail!(
+                    "Cannot return from inside specialized region in func {}",
+                    func
+                );
+            }
+        }
+    }
+
+    Ok(SpecializedRegion {
+        call_block,
+        func_ctx_arg_idx,
+        start_block,
+        end_block,
+        specialized_blocks,
+    })
 }
 
 fn partially_evaluate_func<F: FnMut(&Directive, Func)>(
@@ -187,8 +281,7 @@ fn partially_evaluate_func<F: FnMut(&Directive, Func)>(
 
     // Find the single block following a call to `weval_start`, if
     // any, or fail.
-    let (pre_block, start_block_func_ctx_arg_idx, start_block) =
-        find_start_block(module, func, intrinsics)?;
+    let specialized_region = find_specialized_region(module, func, intrinsics)?;
 
     // For each individual directive, do the specialization.
     for directive in directives {
@@ -198,7 +291,7 @@ fn partially_evaluate_func<F: FnMut(&Directive, Func)>(
             intrinsics,
             image,
             cfg,
-            start_block,
+            specialized_region,
             state: FunctionState::new(),
             func: FunctionBody::new(module, sig),
             block_map: HashMap::new(),

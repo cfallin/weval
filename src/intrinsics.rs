@@ -10,6 +10,8 @@ pub struct Intrinsics {
     pub start: Option<Func>,
     pub end: Option<Func>,
     pub pc_ctx: Option<Func>,
+    pub func_call: Option<Func>,
+    pub func_ret: Option<Func>,
 }
 
 impl Intrinsics {
@@ -41,6 +43,13 @@ impl Intrinsics {
             ),
             end: find_exported_func(module, "weval.end", &[], &[]),
             pc_ctx: find_exported_func(module, "weval.pc.ctx", &[Type::I64], &[Type::I64]),
+            func_call: find_exported_func(
+                module,
+                "weval.func.call",
+                &[Type::I64, Type::I64, Type::I32],
+                &[],
+            ),
+            func_ret: find_exported_func(module, "weval.func.ret", &[], &[]),
         }
     }
 }

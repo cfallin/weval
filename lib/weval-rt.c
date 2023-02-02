@@ -96,9 +96,19 @@ uint64_t weval_pc_ctx(uint64_t pc_ctx) {
     }
 }
 
+__attribute__((export_name("weval.func.call")))
+void weval_func_call(uint64_t func_ctx, uint64_t pc_ctx, void* const* specialized) {
+    __accum += 1;
+}
+
+__attribute__((export_name("weval.func.ret")))
+void weval_func_ret() {
+    __accum += 2;
+}
+
 __attribute__((export_name("weval.end")))
 void weval_end() {
-    __accum += 2;
+    __accum += 3;
 }
 
 // Allows the tool to find the linked list. Must have a very specific
@@ -111,4 +121,9 @@ weval_req_t** __weval_pending_head() {
 __attribute__((export_name("weval.freelist.head")))
 weval_req_t** __weval_freelist_head() {
     return &weval_req_freelist_head;
+}
+
+__attribute__((export_name("weval.accum")))
+int __weval_accum() {
+    return __accum;
 }

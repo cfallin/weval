@@ -61,6 +61,12 @@ uint64_t weval_start(uint64_t func_ctx, uint64_t pc_ctx, void* const* specialize
  * context. */
 __attribute__((noinline))
 uint64_t weval_pc_ctx(uint64_t pc_ctx);
+/* Within a specialized region, update the func ctx with a call. */
+__attribute__((noinline))
+void weval_func_call(uint64_t func_ctx, uint64_t pc_ctx, void* const* specialized);
+/* Within a specialized region, update the func ctx with a return. */
+__attribute__((noinline))
+void weval_func_ret();
 /* End a specialized region. Should come after any loop. */
 __attribute__((noinline))
 void weval_end();
