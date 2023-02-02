@@ -24,9 +24,9 @@ struct Evaluator<'a> {
     /// Memory image.
     image: &'a Image,
     /// Domtree for function body.
-    cfg: CFGInfo,
+    cfg: &'a CFGInfo,
     /// Region to specialize.
-    specialized_region: SpecializedRegion,
+    specialized_region: &'a SpecializedRegion,
     /// State of SSA values and program points:
     /// - per context:
     ///   - per SSA number, an abstract value
@@ -269,7 +269,6 @@ fn partially_evaluate_func<F: FnMut(&Directive, Func)>(
         .func(func)
         .body()
         .ok_or_else(|| anyhow::anyhow!("Attempt to specialize an import"))?;
-    let sig = module.func(func).sig();
 
     log::trace!("Specializing: {}", func);
     log::trace!("body:\n{}", body.display("| "));
@@ -283,17 +282,34 @@ fn partially_evaluate_func<F: FnMut(&Directive, Func)>(
     // any, or fail.
     let specialized_region = find_specialized_region(module, func, intrinsics)?;
 
+    // Create a signature ID from the entry block's blockparams (as
+    // args) and end block's blockparams (as returns).
+    let specialized_sig = module.add_signature(waffle::SignatureData {
+        params: body.blocks[specialized_region.start_block]
+            .params
+            .iter()
+            .map(|&(ty, _)| ty)
+            .collect::<Vec<_>>(),
+        returns: body.blocks[specialized_region.end_block]
+            .params
+            .iter()
+            .map(|&(ty, _)| ty)
+            .collect::<Vec<_>>(),
+    });
+
     // For each individual directive, do the specialization.
     for directive in directives {
         // Build the evaluator.
         let mut evaluator = Evaluator {
+            // Input context:
             generic: body,
             intrinsics,
             image,
-            cfg,
-            specialized_region,
+            cfg: &cfg,
+            specialized_region: &specialized_region,
+            // Evaluation state:
             state: FunctionState::new(),
-            func: FunctionBody::new(module, sig),
+            func: FunctionBody::new(module, specialized_sig),
             block_map: HashMap::new(),
             block_rev_map: PerEntity::default(),
             block_deps: HashMap::new(),
