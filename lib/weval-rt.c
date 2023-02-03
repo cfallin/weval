@@ -87,8 +87,8 @@ uint64_t weval_start(uint64_t func_ctx, uint64_t pc_ctx, void* const* specialize
     }
 }
 
-__attribute__((export_name("weval.pc.ctx")))
-uint64_t weval_pc_ctx(uint64_t pc_ctx) {
+__attribute__((export_name("weval.pc")))
+uint64_t weval_pc(uint64_t pc_ctx) {
     if (__hook) {
         return 3;
     } else {
@@ -96,19 +96,24 @@ uint64_t weval_pc_ctx(uint64_t pc_ctx) {
     }
 }
 
+__attribute__((export_name("weval.update.pc")))
+void weval_update_pc(uint64_t pc_ctx) {
+    __accum += 1;
+}
+
 __attribute__((export_name("weval.func.call")))
 void weval_func_call(uint64_t func_ctx, uint64_t pc_ctx, void* const* specialized) {
-    __accum += 1;
+    __accum += 2;
 }
 
 __attribute__((export_name("weval.func.ret")))
 void weval_func_ret() {
-    __accum += 2;
+    __accum += 3;
 }
 
 __attribute__((export_name("weval.end")))
 void weval_end() {
-    __accum += 3;
+    __accum += 4;
 }
 
 // Allows the tool to find the linked list. Must have a very specific

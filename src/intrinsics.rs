@@ -9,7 +9,8 @@ pub struct Intrinsics {
     pub flush_to_mem: Option<Func>,
     pub start: Option<Func>,
     pub end: Option<Func>,
-    pub pc_ctx: Option<Func>,
+    pub pc: Option<Func>,
+    pub update_pc: Option<Func>,
     pub func_call: Option<Func>,
     pub func_ret: Option<Func>,
 }
@@ -42,7 +43,8 @@ impl Intrinsics {
                 &[Type::I64],
             ),
             end: find_exported_func(module, "weval.end", &[], &[]),
-            pc_ctx: find_exported_func(module, "weval.pc.ctx", &[Type::I64], &[Type::I64]),
+            pc: find_exported_func(module, "weval.pc", &[Type::I64], &[Type::I64]),
+            update_pc: find_exported_func(module, "weval.update.pc", &[Type::I64], &[]),
             func_call: find_exported_func(
                 module,
                 "weval.func.call",

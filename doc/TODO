@@ -1,7 +1,17 @@
-SSA revamp:
+- Verify that we can find specialized region.
+- Specialized function from specialized region:
+  - Initialize func_ctx arg to entry block with const abstract val
+  - Initialize pc_ctx with an intrinsic that initially returns it
+    (constant)
+  - Assert that each block processed is in the "specialized region"
+  - Convert branches to end-block to returns of N values
 
-- define context in terms of domtree
-  - invariant: a value used at a block in a given context can only be
-    defined in that context or a parent context
-  - static pass to find blocks that set PC; in context, note block
-    where set, and pop when going to block not dom'd by it
+- Generate generic version by cloning blocks
+  - Remove/inline intrinsics
+
+- Replace specialized region with ld-ptr; cmp; if; call indir, else
+  call generic
+
+- Replace call intrinsic in body with this specialized logic
+
+- Replace ret intrinsic in body with a return instruction

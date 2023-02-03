@@ -55,12 +55,13 @@ const void* weval_assume_const_memory(const void* p);
  * loop. Returns the function context. */
 __attribute__((noinline))
 uint64_t weval_start(uint64_t func_ctx, uint64_t pc_ctx, void* const* specialized);
-/* Within a specialized region, update the PC ctx. Value returned
- * should be used for all accesses throughout the specialized
- * region. If updated, next basic block edge goes to block of new
- * context. */
+/* Within a specialized region, get the PC ctx. Pass in the runtime value. */
 __attribute__((noinline))
-uint64_t weval_pc_ctx(uint64_t pc_ctx);
+uint64_t weval_pc(uint64_t pc_ctx);
+/* Within a specialized region, update the PC ctx. Next basic block
+ * edge goes to block of new context. */
+__attribute__((noinline))
+void weval_update_pc(uint64_t pc_ctx);
 /* Within a specialized region, update the func ctx with a call. */
 __attribute__((noinline))
 void weval_func_call(uint64_t func_ctx, uint64_t pc_ctx, void* const* specialized);
@@ -141,8 +142,12 @@ const Func* start(const Func* func_ctx, uint64_t pc_ctx, void* const* specialize
     return reinterpret_cast<const Func*>(weval_start(reinterpret_cast<uint64_t>(func_ctx), pc_ctx, specialized));
 }
 
-static uint64_t pc_ctx(uint64_t pc) {
-    return weval_pc_ctx(pc);
+static uint64_t pc(uint64_t pc) {
+    return weval_pc(pc);
+}
+    
+static void update_pc(uint64_t pc) {
+    weval_update_pc(pc);
 }
 
 static void end() {

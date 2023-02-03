@@ -318,6 +318,7 @@ fn partially_evaluate_func<'a>(
             image,
             &evaluator.specialized_region,
             directive.func_ctx,
+            directive.pc_ctx,
         );
         log::trace!("after init_args, state is {:?}", evaluator.state);
         let entry = evaluator.specialized_region.start_block;
@@ -867,7 +868,7 @@ impl<'a> Evaluator<'a> {
 
         debug_assert_eq!(abs.len(), values.len());
 
-        let intrinsic_result = self.abstract_eval_intrinsic(orig_block, op, abs, values, state);
+        let intrinsic_result = self.abstract_eval_intrinsic(orig_block, op, abs, values, state)?;
         if intrinsic_result.is_handled() {
             return Ok(intrinsic_result);
         }
@@ -898,11 +899,14 @@ impl<'a> Evaluator<'a> {
         abs: &[AbstractValue],
         values: &[Value],
         state: &mut PointState,
-    ) -> EvalResult {
+    ) -> anyhow::Result<EvalResult> {
         match op {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.assume_const_memory {
-                    EvalResult::Alias(abs[0].with_tags(ValueTags::const_memory()), values[0])
+                    Ok(EvalResult::Alias(
+                        abs[0].with_tags(ValueTags::const_memory()),
+                        values[0],
+                    ))
                 } else if Some(function_index) == self.intrinsics.make_symbolic_ptr {
                     let label_index = values[0].index() as u32;
                     log::trace!(
@@ -910,9 +914,16 @@ impl<'a> Evaluator<'a> {
                         values[0],
                         label_index
                     );
-                    EvalResult::Alias(AbstractValue::SymbolicPtr(label_index, 0), values[0])
-                } else if Some(function_index) == self.intrinsics.pc_ctx {
-                    let pc = abs[0].is_const_u32();
+                    Ok(EvalResult::Alias(
+                        AbstractValue::SymbolicPtr(label_index, 0),
+                        values[0],
+                    ))
+                } else if Some(function_index) == self.intrinsics.update_pc {
+                    let pc = abs[0].is_const_u64().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Arg to weval_update_pc() is not a compile-time constant u64"
+                        )
+                    })?;
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
                     let sibling = match self.state.contexts.leaf_element(instantaneous_context) {
                         ContextElem::Root => instantaneous_context,
@@ -923,15 +934,33 @@ impl<'a> Evaluator<'a> {
                     };
                     state.pending_context = Some(sibling);
                     log::trace!("update context (pc {:?}): now {}", pc, sibling);
-                    EvalResult::Elide
+                    Ok(EvalResult::Elide)
+                } else if Some(function_index) == self.intrinsics.pc {
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let pc = match self.state.contexts.leaf_element(instantaneous_context) {
+                        ContextElem::Root => unreachable!(),
+                        ContextElem::Loop(pc) => pc,
+                    };
+                    Ok(EvalResult::Alias(
+                        AbstractValue::Concrete(WasmVal::I64(pc), ValueTags::default()),
+                        values[0],
+                    ))
+                } else if Some(function_index) == self.intrinsics.start {
+                    Ok(EvalResult::Alias(abs[0], values[0]))
+                } else if Some(function_index) == self.intrinsics.end {
+                    Ok(EvalResult::Elide)
+                } else if Some(function_index) == self.intrinsics.func_call {
+                    todo!()
+                } else if Some(function_index) == self.intrinsics.func_ret {
+                    todo!()
                 } else if Some(function_index) == self.intrinsics.flush_to_mem {
                     // Just elide it for now. TODO: handle properly.
-                    EvalResult::Elide
+                    Ok(EvalResult::Elide)
                 } else {
-                    EvalResult::Unhandled
+                    Ok(EvalResult::Unhandled)
                 }
             }
-            _ => EvalResult::Unhandled,
+            _ => Ok(EvalResult::Unhandled),
         }
     }
 

@@ -67,6 +67,7 @@ bool Interpret(const Func* func_, State* state) {
     const Func* func = weval::start(func_, pc, &func->specialized);
     const Inst* insts = weval::assume_const_memory(func->insts);
     while (true) {
+        pc = weval::pc(pc);
         steps++;
         const Inst* inst = &insts[pc];
         pc++;
@@ -153,7 +154,7 @@ bool Interpret(const Func* func_, State* state) {
                 goto out;
         }
 
-        pc = weval::pc_ctx(pc);
+        weval::update_pc(pc);
     }
 out:
     weval::end();

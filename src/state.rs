@@ -44,7 +44,7 @@ use waffle::{Block, FunctionBody, Global, Type, Value};
 
 waffle::declare_entity!(Context, "context");
 
-pub type PC = Option<u32>;
+pub type PC = u64;
 
 /// One element in the context stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -304,8 +304,10 @@ impl FunctionState {
         im: &Image,
         region: &SpecializedRegion,
         func_ctx: u64,
+        pc_ctx: u64,
     ) -> (Context, ProgPointState) {
         let ctx = self.contexts.create(None, ContextElem::Root);
+        let ctx = self.contexts.create(Some(ctx), ContextElem::Loop(pc_ctx));
         for (i, &(ty, orig_value)) in orig_body.blocks[region.start_block]
             .params
             .iter()
