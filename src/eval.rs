@@ -12,8 +12,8 @@ use std::collections::{
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
-    entity::PerEntity, Block, BlockTarget, Func, FuncDecl, FunctionBody, Module, Operator, Table,
-    Terminator, Type, Value, ValueDef,
+    entity::PerEntity, Block, BlockTarget, Func, FuncDecl, FunctionBody, Module, Operator,
+    Signature, Table, Terminator, Type, Value, ValueDef,
 };
 
 struct Evaluator<'a> {
@@ -38,6 +38,16 @@ struct Evaluator<'a> {
     block_map: HashMap<(Context, Block), Block>,
     /// Reverse map from specialized block to its original ctx/block.
     block_rev_map: PerEntity<Block, (Context, Block)>,
+    /// The "end return block": a special block that a branch out of
+    /// the specialized region to the end-block goes to. Block param
+    /// signature is equivalent to `specialized_region.end_block`'s
+    /// signature. Shared by all contexts.
+    end_ret_block: Block,
+    /// The "start return block": a special block that a branch out of
+    /// the specialized region to the start-block goes to. Block param
+    /// signature is equivalent to `specialized_region.start_block`'s
+    /// signature. Shared by all contexts.
+    start_ret_block: Block,
     /// Dependencies for updates: some use in a given block with a
     /// given context occurs of a value defined in another block at
     /// another context.
@@ -249,6 +259,86 @@ fn find_specialized_region(
     })
 }
 
+fn compute_specialized_sig(
+    body: &FunctionBody,
+    region: &SpecializedRegion,
+) -> waffle::SignatureData {
+    let params = body.blocks[region.start_block]
+        .params
+        .iter()
+        .map(|&(ty, _)| ty)
+        .collect::<Vec<_>>();
+
+    let returns = std::iter::once(Type::I32)
+        .chain(
+            body.blocks[region.end_block]
+                .params
+                .iter()
+                .map(|&(ty, _)| ty),
+        )
+        .chain(
+            body.blocks[region.start_block]
+                .params
+                .iter()
+                .map(|&(ty, _)| ty),
+        )
+        .collect::<Vec<_>>();
+
+    waffle::SignatureData { params, returns }
+}
+
+fn create_value(func: &mut FunctionBody, ty: Type, block: Block, bits: u64) -> Value {
+    let op = match ty {
+        Type::I32 => Operator::I32Const { value: bits as u32 },
+        Type::I64 => Operator::I64Const { value: bits },
+        Type::F32 => Operator::F32Const { value: bits as u32 },
+        Type::F64 => Operator::F64Const { value: bits },
+        _ => panic!("Unsupported type for create_value: {:?}", ty),
+    };
+    let value = func.add_value(ValueDef::Operator(op, vec![], vec![ty]));
+    func.blocks[block].insts.push(value);
+    value
+}
+
+fn build_func_skeleton(
+    module: &Module,
+    generic: &FunctionBody,
+    specialized_sig: Signature,
+    specialized_region: &SpecializedRegion,
+) -> (FunctionBody, Block, Block) {
+    let mut body = FunctionBody::new(module, specialized_sig);
+
+    // Create the return blocks for the "branch to start" and
+    // "branch to end" cases.
+    let end_ret_block = body.add_block();
+    let mut end_ret_return = vec![];
+    end_ret_return.push(create_value(&mut body, Type::I32, end_ret_block, 0));
+    for &(ty, _) in &generic.blocks[specialized_region.end_block].params {
+        end_ret_return.push(body.add_blockparam(end_ret_block, ty));
+    }
+    for &(ty, _) in &generic.blocks[specialized_region.start_block].params {
+        end_ret_return.push(create_value(&mut body, ty, end_ret_block, 0));
+    }
+    body.blocks[end_ret_block].terminator = Terminator::Return {
+        values: end_ret_return,
+    };
+
+    let start_ret_block = body.add_block();
+    let mut start_ret_return = vec![];
+    start_ret_return.push(create_value(&mut body, Type::I32, start_ret_block, 1));
+    for &(ty, _) in &generic.blocks[specialized_region.end_block].params {
+        start_ret_return.push(create_value(&mut body, ty, start_ret_block, 0));
+    }
+    for &(ty, _) in &generic.blocks[specialized_region.start_block].params {
+        start_ret_return.push(body.add_blockparam(start_ret_block, ty));
+    }
+    body.blocks[start_ret_block].terminator = Terminator::Return {
+        values: start_ret_return,
+    };
+
+    (body, end_ret_block, start_ret_block)
+}
+
 fn partially_evaluate_func<'a>(
     module: &mut Module,
     image: &Image,
@@ -275,18 +365,8 @@ fn partially_evaluate_func<'a>(
 
     // Create a signature ID from the entry block's blockparams (as
     // args) and end block's blockparams (as returns).
-    let specialized_sig = module.signatures.push(waffle::SignatureData {
-        params: body.blocks[specialized_region.start_block]
-            .params
-            .iter()
-            .map(|&(ty, _)| ty)
-            .collect::<Vec<_>>(),
-        returns: body.blocks[specialized_region.end_block]
-            .params
-            .iter()
-            .map(|&(ty, _)| ty)
-            .collect::<Vec<_>>(),
-    });
+    let specialized_sig = compute_specialized_sig(body, &specialized_region);
+    let specialized_sig = module.signatures.push(specialized_sig);
 
     // TODO: create the generic function with a copy of the original
     // interpreter body.
@@ -294,6 +374,9 @@ fn partially_evaluate_func<'a>(
     // For each individual directive, do the specialization.
     let mut funcs: Vec<(&'a Directive, FunctionBody)> = vec![];
     for directive in directives {
+        // Build the initial function skeleton.
+        let (func, end_ret_block, start_ret_block) =
+            build_func_skeleton(module, body, specialized_sig, &specialized_region);
         // Build the evaluator.
         let mut evaluator = Evaluator {
             // Input context:
@@ -304,9 +387,11 @@ fn partially_evaluate_func<'a>(
             specialized_region: &specialized_region,
             // Evaluation state:
             state: FunctionState::new(),
-            func: FunctionBody::new(module, specialized_sig),
+            func,
             block_map: HashMap::new(),
             block_rev_map: PerEntity::default(),
+            end_ret_block,
+            start_ret_block,
             block_deps: HashMap::new(),
             value_map: HashMap::new(),
             mem_blockparam_map: HashMap::new(),
@@ -728,7 +813,15 @@ impl<'a> Evaluator<'a> {
             target
         );
 
-        let (target_block, target_ctx) = self.target_block(state, orig_block, target.block);
+        let (target_block, target_ctx) = if target.block == self.specialized_region.end_block {
+            let ctx = self.state.contexts.create(None, ContextElem::Root);
+            (self.end_ret_block, ctx)
+        } else if target.block == self.specialized_region.start_block {
+            let ctx = self.state.contexts.create(None, ContextElem::Root);
+            (self.start_ret_block, ctx)
+        } else {
+            self.target_block(state, orig_block, target.block)
+        };
 
         for &arg in &target.args {
             let arg = self.generic.resolve_alias(arg);
