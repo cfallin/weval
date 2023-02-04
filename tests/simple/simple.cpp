@@ -186,7 +186,7 @@ struct Func {
 
 Func prog_func(prog, sizeof(prog)/sizeof(Inst));
 
-int main() {
+int main(int argc, char** argv) {
     State* state = (State*)calloc(sizeof(State), 1);
     prog_func.invoke(state);
     fflush(stdout);
