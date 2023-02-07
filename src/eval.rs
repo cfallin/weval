@@ -103,6 +103,7 @@ fn partially_evaluate_func(
     directive: &Directive,
 ) -> anyhow::Result<Option<Func>> {
     // Get function body.
+    module.expand_func(directive.func)?;
     let body = module
         .func(directive.func)
         .body()
