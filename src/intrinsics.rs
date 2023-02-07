@@ -63,7 +63,9 @@ pub fn find_exported_func(
 
 pub fn find_global_data_by_exported_func(module: &Module, name: &str) -> Option<u32> {
     let f = find_exported_func(module, name, &[], &[Type::I32])?;
-    let body = match module.func(f) {
+    let mut body = module.func(f).clone();
+    body.parse(module).unwrap();
+    let body = match body {
         FuncDecl::Body(_, body) => body,
         _ => return None,
     };

@@ -67,6 +67,17 @@ pub fn partially_evaluate(
     let intrinsics = Intrinsics::find(module);
     log::trace!("intrinsics: {:?}", intrinsics);
     let mut mem_updates = HashMap::new();
+
+    let mut funcs = HashSet::new();
+    for directive in directives {
+        funcs.insert(directive.func);
+    }
+    for func in funcs {
+        let f = module.expand_func(func)?;
+        f.optimize();
+        f.convert_to_max_ssa();
+    }
+
     for directive in directives {
         log::info!("Processing directive {:?}", directive);
         if let Some(idx) = partially_evaluate_func(module, im, &intrinsics, directive)? {
@@ -348,6 +359,12 @@ impl<'a> Evaluator<'a> {
 
         for &inst in &self.generic.blocks[orig_block].insts {
             let input_ctx = state.context;
+            log::debug!(
+                "inst {} in context {} -> {:?}",
+                inst,
+                input_ctx,
+                self.generic.values[inst]
+            );
             if let Some((result_value, result_abs)) = match &self.generic.values[inst] {
                 ValueDef::Alias(_) => {
                     // Don't generate any new code; uses will be
@@ -369,7 +386,9 @@ impl<'a> Evaluator<'a> {
                     arg_abs_values.clear();
                     arg_values.clear();
                     for &arg in args {
+                        log::trace!(" * arg {}", arg);
                         let arg = self.generic.resolve_alias(arg);
+                        log::trace!(" -> resolves to arg {}", arg);
                         let (val, abs) = self.use_value(state.context, orig_block, arg);
                         arg_abs_values.push(abs);
                         arg_values.push(val);
