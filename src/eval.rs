@@ -159,6 +159,7 @@ fn partially_evaluate_func(
 
     log::debug!("Adding func:\n{}", evaluator.func.display("| "));
     let func = module.add_func(sig, evaluator.func);
+    module.func_mut(func).optimize();
     Ok(Some(func))
 }
 

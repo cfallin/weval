@@ -171,11 +171,12 @@ struct Func {
 
     Func(const Inst* insts_, uint32_t ninsts_)
         : insts(insts_), ninsts(ninsts_), specialized(nullptr) {
+        printf("ctor: ptr %p\n", &specialized);
         weval::weval(&specialized, Interpret, weval::Specialize(insts), weval::Specialize(ninsts), weval::Runtime<State*>());
     }
 
     bool invoke(State* state) {
-        printf("Inspecting func ptr at: %p\n", &specialized);
+        printf("Inspecting func ptr at: %p -> %p (size %lu)\n", &specialized, specialized, sizeof(specialized));
         if (specialized) {
             printf("Calling specialized function: %p\n", specialized);
             return specialized(insts, ninsts, state);

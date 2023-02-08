@@ -13,7 +13,7 @@ $(NAME).wasm: $(NAME).o weval-rt.o
 	$(CXX) $(CXXFLAGS) -o $@ $^
 
 $(NAME)-wizened.wasm: $(NAME).wasm
-	$(WIZER) --wasm-bulk-memory true $^ -o $@
+	$(WIZER) -r _start=wizer.resume --wasm-bulk-memory true --allow-wasi $^ -o $@
 
 $(NAME).o: $(NAME).cpp ../../include/weval.h
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
