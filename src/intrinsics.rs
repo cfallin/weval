@@ -41,8 +41,8 @@ impl Intrinsics {
 }
 
 fn export_sig_matches(module: &Module, f: Func, in_tys: &[Type], out_tys: &[Type]) -> bool {
-    let sig = module.func(f).sig();
-    let sig = module.signature(sig);
+    let sig = module.funcs[f].sig();
+    let sig = &module.signatures[sig];
     &sig.params[..] == in_tys && &sig.returns[..] == out_tys
 }
 
@@ -53,7 +53,8 @@ pub fn find_exported_func(
     out_tys: &[Type],
 ) -> Option<Func> {
     module
-        .exports()
+        .exports
+        .iter()
         .find(|ex| &ex.name == name)
         .and_then(|ex| match &ex.kind {
             &ExportKind::Func(f) if export_sig_matches(module, f, in_tys, out_tys) => Some(f),
@@ -63,7 +64,7 @@ pub fn find_exported_func(
 
 pub fn find_global_data_by_exported_func(module: &Module, name: &str) -> Option<u32> {
     let f = find_exported_func(module, name, &[], &[Type::I32])?;
-    let mut body = module.func(f).clone();
+    let mut body = module.funcs[f].clone();
     body.parse(module).unwrap();
     let body = match body {
         FuncDecl::Body(_, body) => body,

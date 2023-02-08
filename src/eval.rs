@@ -1,13 +1,5 @@
 //! Partial evaluation.
 
-/* TODO:
-- inlining
-- "memory renaming": connecting symbolic ops through the operand-stack
-  memory region
-- more general memory-region handling: symbolic but unique
-  (non-escaped) pointers, stack, operand-stack region, ...
-*/
-
 use crate::directive::Directive;
 use crate::image::Image;
 use crate::intrinsics::Intrinsics;
@@ -19,8 +11,8 @@ use std::collections::{
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
-    entity::PerEntity, Block, BlockTarget, Func, FunctionBody, Module, Operator, Table, Terminator,
-    Type, Value, ValueDef,
+    entity::PerEntity, Block, BlockTarget, Func, FuncDecl, FunctionBody, Module, Operator, Table,
+    Terminator, Type, Value, ValueDef,
 };
 
 struct Evaluator<'a> {
@@ -82,7 +74,7 @@ pub fn partially_evaluate(
         log::info!("Processing directive {:?}", directive);
         if let Some(idx) = partially_evaluate_func(module, im, &intrinsics, directive)? {
             // Append to table.
-            let func_table = module.table_mut(Table::from(0));
+            let func_table = &mut module.tables[Table::from(0)];
             let table_idx = {
                 let func_table_elts = func_table.func_elements.as_mut().unwrap();
                 let table_idx = func_table_elts.len();
@@ -115,11 +107,10 @@ fn partially_evaluate_func(
 ) -> anyhow::Result<Option<Func>> {
     // Get function body.
     module.expand_func(directive.func)?;
-    let body = module
-        .func(directive.func)
+    let body = module.funcs[directive.func]
         .body()
         .ok_or_else(|| anyhow::anyhow!("Attempt to specialize an import"))?;
-    let sig = module.func(directive.func).sig();
+    let sig = module.funcs[directive.func].sig();
 
     log::trace!("Specializing: {}", directive.func);
     log::trace!("body:\n{}", body.display("| "));
@@ -158,8 +149,8 @@ fn partially_evaluate_func(
     evaluator.evaluate()?;
 
     log::debug!("Adding func:\n{}", evaluator.func.display("| "));
-    let func = module.add_func(sig, evaluator.func);
-    module.func_mut(func).optimize();
+    let func = module.funcs.push(FuncDecl::Body(sig, evaluator.func));
+    module.funcs[func].optimize();
     Ok(Some(func))
 }
 
