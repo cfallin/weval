@@ -110,6 +110,7 @@ fn partially_evaluate_func(
     let body = module.funcs[directive.func]
         .body()
         .ok_or_else(|| anyhow::anyhow!("Attempt to specialize an import"))?;
+    let orig_name = module.funcs[directive.func].name();
     let sig = module.funcs[directive.func].sig();
 
     log::trace!("Specializing: {}", directive.func);
@@ -149,7 +150,8 @@ fn partially_evaluate_func(
     evaluator.evaluate()?;
 
     log::debug!("Adding func:\n{}", evaluator.func.display("| "));
-    let func = module.funcs.push(FuncDecl::Body(sig, evaluator.func));
+    let name = format!("{} (specialized)", orig_name);
+    let func = module.funcs.push(FuncDecl::Body(sig, name, evaluator.func));
     module.funcs[func].optimize();
     Ok(Some(func))
 }
@@ -459,6 +461,13 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    fn context_desc(&self, ctx: Context) -> String {
+        match self.state.contexts.leaf_element(ctx) {
+            ContextElem::Root => "root".to_owned(),
+            ContextElem::Loop(pc) => format!("PC {:?}", pc),
+        }
+    }
+
     fn create_block(
         &mut self,
         orig_block: Block,
@@ -467,6 +476,12 @@ impl<'a> Evaluator<'a> {
     ) -> Block {
         state.update_across_edge();
         let block = self.func.add_block();
+        self.func.blocks[block].desc = format!(
+            "Orig {} ctx {} ({})",
+            orig_block,
+            context,
+            self.context_desc(context)
+        );
         log::trace!(
             "create_block: orig_block {} context {} -> {}",
             orig_block,

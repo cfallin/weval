@@ -1,6 +1,6 @@
 //! Discovery of intrinsics.
 
-use waffle::{ExportKind, Func, FuncDecl, Module, Operator, Terminator, Type, ValueDef};
+use waffle::{ExportKind, Func, Module, Operator, Terminator, Type, ValueDef};
 
 #[derive(Clone, Debug)]
 pub struct Intrinsics {
@@ -66,10 +66,8 @@ pub fn find_global_data_by_exported_func(module: &Module, name: &str) -> Option<
     let f = find_exported_func(module, name, &[], &[Type::I32])?;
     let mut body = module.funcs[f].clone();
     body.parse(module).unwrap();
-    let body = match body {
-        FuncDecl::Body(_, body) => body,
-        _ => return None,
-    };
+    let body = body.body()?;
+
     // Find the `return`; its value should be an I32Const.
     match &body.blocks[body.entry].terminator {
         Terminator::Return { values } => {
