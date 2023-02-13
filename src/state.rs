@@ -43,7 +43,7 @@ use waffle::{Block, FunctionBody, Global, Type, Value};
 
 waffle::declare_entity!(Context, "context");
 
-pub type PC = Option<u32>;
+pub type PC = u32;
 
 /// One element in the context stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

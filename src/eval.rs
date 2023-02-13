@@ -742,7 +742,9 @@ impl<'a> Evaluator<'a> {
                     );
                     EvalResult::Alias(AbstractValue::SymbolicPtr(label_index, 0), values[0])
                 } else if Some(function_index) == self.intrinsics.push_context {
-                    let pc = abs[0].is_const_u32();
+                    let pc = abs[0]
+                        .is_const_u32()
+                        .expect("PC should not be a runtime value");
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
                     let child = self
                         .state
@@ -761,7 +763,9 @@ impl<'a> Evaluator<'a> {
                     log::trace!("pop context: now {}", parent);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.update_context {
-                    let pc = abs[0].is_const_u32();
+                    let pc = abs[0]
+                        .is_const_u32()
+                        .expect("PC should not be a runtime value");
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
                     let sibling = match self.state.contexts.leaf_element(instantaneous_context) {
                         ContextElem::Root => instantaneous_context,
