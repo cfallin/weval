@@ -11,8 +11,8 @@ use std::collections::{
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
-    entity::PerEntity, Block, BlockTarget, Func, FuncDecl, FunctionBody, Module, Operator, Table,
-    Terminator, Type, Value, ValueDef,
+    entity::PerEntity, Block, BlockTarget, Func, FuncDecl, FunctionBody, Module, Operator,
+    SourceLoc, Table, Terminator, Type, Value, ValueDef,
 };
 
 struct Evaluator<'a> {
@@ -387,14 +387,17 @@ impl<'a> Evaluator<'a> {
                         arg_abs_values.push(abs);
                         arg_values.push(val);
                     }
+                    let loc = self.generic.source_locs[inst];
 
                     // Eval the transfer-function for this operator.
                     let result = self.abstract_eval(
                         orig_block,
                         inst,
                         *op,
+                        loc,
                         &arg_abs_values[..],
                         &arg_values[..],
+                        &args[..],
                         state,
                     )?;
                     // Transcribe either the original operation, or a
@@ -682,8 +685,10 @@ impl<'a> Evaluator<'a> {
         orig_block: Block,
         orig_inst: Value,
         op: Operator,
+        loc: SourceLoc,
         abs: &[AbstractValue],
         values: &[Value],
+        orig_values: &[Value],
         state: &mut PointState,
     ) -> anyhow::Result<EvalResult> {
         log::debug!(
@@ -697,7 +702,8 @@ impl<'a> Evaluator<'a> {
 
         debug_assert_eq!(abs.len(), values.len());
 
-        let intrinsic_result = self.abstract_eval_intrinsic(orig_block, op, abs, values, state);
+        let intrinsic_result =
+            self.abstract_eval_intrinsic(orig_block, op, loc, abs, values, orig_values, state);
         if intrinsic_result.is_handled() {
             return Ok(intrinsic_result);
         }
@@ -725,8 +731,10 @@ impl<'a> Evaluator<'a> {
         &mut self,
         _orig_block: Block,
         op: Operator,
+        loc: SourceLoc,
         abs: &[AbstractValue],
         values: &[Value],
+        orig_values: &[Value],
         state: &mut PointState,
     ) -> EvalResult {
         match op {
@@ -763,6 +771,12 @@ impl<'a> Evaluator<'a> {
                     log::trace!("pop context: now {}", parent);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.update_context {
+                    log::trace!(
+                        "update context at {}: PC from {} computed at {}",
+                        loc,
+                        orig_values[0],
+                        self.generic.source_locs[orig_values[0]]
+                    );
                     let pc = abs[0]
                         .is_const_u32()
                         .expect("PC should not be a runtime value");
