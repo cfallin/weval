@@ -127,7 +127,10 @@ impl AbstractValue {
             (AbstractValue::Concrete(a, t1), AbstractValue::Concrete(b, t2)) if a == b => {
                 AbstractValue::Concrete(a, t1.meet(t2))
             }
-            (av1, av2) => AbstractValue::Runtime(None, av1.tags().meet(av2.tags())),
+            (av1, av2) => {
+                log::trace!("values {:?} and {:?} meet to Runtime", av1, av2);
+                AbstractValue::Runtime(None, av1.tags().meet(av2.tags()))
+            }
         }
     }
 

@@ -114,7 +114,7 @@ fn partially_evaluate_func(
     let sig = module.funcs[directive.func].sig();
 
     log::trace!("Specializing: {}", directive.func);
-    log::trace!("body:\n{}", body.display("| "));
+    log::trace!("body:\n{}", body.display("| ", Some(module)));
 
     // Compute CFG info.
     let cfg = CFGInfo::new(body);
@@ -149,7 +149,7 @@ fn partially_evaluate_func(
     evaluator.queue_set.insert((evaluator.generic.entry, ctx));
     evaluator.evaluate()?;
 
-    log::debug!("Adding func:\n{}", evaluator.func.display("| "));
+    log::debug!("Adding func:\n{}", evaluator.func.display("| ", Some(module)));
     let name = format!("{} (specialized)", orig_name);
     let func = module.funcs.push(FuncDecl::Body(sig, name, evaluator.func));
     module.funcs[func].optimize();
@@ -247,7 +247,7 @@ impl<'a> Evaluator<'a> {
                 e.context(anyhow::anyhow!(
                     "Evaluating block body {} in func:\n{}",
                     orig_block,
-                    self.generic.display("| ")
+                    self.generic.display("| ", None)
                 ))
             })?;
 
