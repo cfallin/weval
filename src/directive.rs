@@ -74,7 +74,7 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
                 _ => anyhow::bail!("Invalid type"),
             }
         } else {
-            AbstractValue::Runtime(tags)
+            AbstractValue::Runtime(None, tags)
         };
         const_params.push(value);
         arg_ptr += 16;

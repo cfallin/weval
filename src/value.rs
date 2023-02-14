@@ -67,8 +67,9 @@ pub enum AbstractValue {
     /// values can be used as pointers to read
     /// const-at-specialization-time memory.
     Concrete(WasmVal, ValueTags),
-    /// A value only computed at runtime.
-    Runtime(ValueTags),
+    /// A value only computed at runtime. The instruction that
+    /// computed it is specified, if known.
+    Runtime(Option<waffle::Value>, ValueTags),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -106,7 +107,7 @@ impl AbstractValue {
             &AbstractValue::Top => ValueTags::default(),
             &AbstractValue::SymbolicPtr(_, _) => ValueTags::default(),
             &AbstractValue::Concrete(_, t) => t,
-            &AbstractValue::Runtime(t) => t,
+            &AbstractValue::Runtime(_, t) => t,
         }
     }
 
@@ -115,7 +116,7 @@ impl AbstractValue {
             &AbstractValue::Top => AbstractValue::Top,
             &AbstractValue::SymbolicPtr(l, off) => AbstractValue::SymbolicPtr(l, off),
             &AbstractValue::Concrete(k, t) => AbstractValue::Concrete(k, t | new_tags),
-            &AbstractValue::Runtime(t) => AbstractValue::Runtime(t | new_tags),
+            &AbstractValue::Runtime(v, t) => AbstractValue::Runtime(v, t | new_tags),
         }
     }
 
@@ -126,7 +127,7 @@ impl AbstractValue {
             (AbstractValue::Concrete(a, t1), AbstractValue::Concrete(b, t2)) if a == b => {
                 AbstractValue::Concrete(a, t1.meet(t2))
             }
-            (av1, av2) => AbstractValue::Runtime(av1.tags().meet(av2.tags())),
+            (av1, av2) => AbstractValue::Runtime(None, av1.tags().meet(av2.tags())),
         }
     }
 

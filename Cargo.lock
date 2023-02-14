@@ -213,8 +213,7 @@ dependencies = [
 [[package]]
 name = "gimli"
 version = "0.27.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "221996f774192f0f718773def8201c4ae31f02616a54ccfc2d358bb0e5cefdec"
+source = "git+https://github.com/philipc/gimli?branch=line-tombstone#ed5368992f2ca3f6d522fe255513be4f7ecffc21"
 dependencies = [
  "fallible-iterator",
  "stable_deref_trait",

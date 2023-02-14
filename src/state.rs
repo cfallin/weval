@@ -230,7 +230,7 @@ impl ProgPointState {
         let globals = im
             .globals
             .keys()
-            .map(|global| (*global, AbstractValue::Runtime(ValueTags::default())))
+            .map(|global| (*global, AbstractValue::Runtime(None, ValueTags::default())))
             .collect();
         ProgPointState {
             mem_overlay: BTreeMap::new(),
@@ -254,7 +254,7 @@ impl ProgPointState {
             &mut self.globals,
             &other.globals,
             AbstractValue::meet,
-            Some(AbstractValue::Runtime(ValueTags::default())),
+            Some(AbstractValue::Runtime(None, ValueTags::default())),
         );
         changed
     }

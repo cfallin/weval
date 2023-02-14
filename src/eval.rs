@@ -372,7 +372,7 @@ impl<'a> Evaluator<'a> {
                     let (val, _) = self.use_value(state.context, orig_block, *val);
                     Some((
                         ValueDef::PickOutput(val, *idx, *ty),
-                        AbstractValue::Runtime(ValueTags::default()),
+                        AbstractValue::Runtime(None, ValueTags::default()),
                     ))
                 }
                 ValueDef::Operator(op, args, tys) => {
@@ -420,7 +420,7 @@ impl<'a> Evaluator<'a> {
                                         std::mem::take(&mut arg_values),
                                         tys.clone(),
                                     ),
-                                    AbstractValue::Runtime(t),
+                                    AbstractValue::Runtime(None, t),
                                 ))
                             }
                         }
@@ -702,8 +702,16 @@ impl<'a> Evaluator<'a> {
 
         debug_assert_eq!(abs.len(), values.len());
 
-        let intrinsic_result =
-            self.abstract_eval_intrinsic(orig_block, op, loc, abs, values, orig_values, state);
+        let intrinsic_result = self.abstract_eval_intrinsic(
+            orig_block,
+            orig_inst,
+            op,
+            loc,
+            abs,
+            values,
+            orig_values,
+            state,
+        );
         if intrinsic_result.is_handled() {
             return Ok(intrinsic_result);
         }
@@ -715,13 +723,14 @@ impl<'a> Evaluator<'a> {
         }
 
         let ret = match abs.len() {
-            0 => self.abstract_eval_nullary(op, state),
-            1 => self.abstract_eval_unary(op, abs[0], values[0], state),
-            2 => self.abstract_eval_binary(op, abs[0], abs[1], values[0], values[1], state),
+            0 => self.abstract_eval_nullary(orig_inst, op, state),
+            1 => self.abstract_eval_unary(orig_inst, op, abs[0], values[0], state),
+            2 => self
+                .abstract_eval_binary(orig_inst, op, abs[0], abs[1], values[0], values[1], state),
             3 => self.abstract_eval_ternary(
-                op, abs[0], abs[1], abs[2], values[0], values[1], values[2], state,
+                orig_inst, op, abs[0], abs[1], abs[2], values[0], values[1], values[2], state,
             ),
-            _ => AbstractValue::Runtime(ValueTags::default()),
+            _ => AbstractValue::Runtime(Some(orig_inst), ValueTags::default()),
         };
 
         Ok(EvalResult::Normal(ret))
@@ -730,8 +739,9 @@ impl<'a> Evaluator<'a> {
     fn abstract_eval_intrinsic(
         &mut self,
         _orig_block: Block,
+        _orig_inst: Value,
         op: Operator,
-        loc: SourceLoc,
+        _loc: SourceLoc,
         abs: &[AbstractValue],
         values: &[Value],
         orig_values: &[Value],
@@ -771,12 +781,7 @@ impl<'a> Evaluator<'a> {
                     log::trace!("pop context: now {}", parent);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.update_context {
-                    log::trace!(
-                        "update context at {}: PC from {} computed at {}",
-                        loc,
-                        orig_values[0],
-                        self.generic.source_locs[orig_values[0]]
-                    );
+                    log::trace!("update context at {}: PC is {:?}", orig_values[0], abs[0]);
                     let pc = abs[0]
                         .is_const_u32()
                         .expect("PC should not be a runtime value");
@@ -907,26 +912,35 @@ impl<'a> Evaluator<'a> {
         Ok(EvalResult::Unhandled)
     }
 
-    fn abstract_eval_nullary(&mut self, op: Operator, state: &mut PointState) -> AbstractValue {
+    fn abstract_eval_nullary(
+        &mut self,
+        orig_inst: Value,
+        op: Operator,
+        state: &mut PointState,
+    ) -> AbstractValue {
         match op {
             Operator::GlobalGet { global_index } => state
                 .flow
                 .globals
                 .get(&global_index)
                 .cloned()
-                .unwrap_or(AbstractValue::Runtime(ValueTags::default())),
+                .unwrap_or(AbstractValue::Runtime(
+                    Some(orig_inst),
+                    ValueTags::default(),
+                )),
             Operator::I32Const { .. }
             | Operator::I64Const { .. }
             | Operator::F32Const { .. }
             | Operator::F64Const { .. } => {
                 AbstractValue::Concrete(WasmVal::try_from(op).unwrap(), ValueTags::default())
             }
-            _ => AbstractValue::Runtime(ValueTags::default()),
+            _ => AbstractValue::Runtime(Some(orig_inst), ValueTags::default()),
         }
     }
 
     fn abstract_eval_unary(
         &mut self,
+        orig_inst: Value,
         op: Operator,
         x: AbstractValue,
         _x_val: Value,
@@ -935,7 +949,7 @@ impl<'a> Evaluator<'a> {
         match (op, x) {
             (Operator::GlobalSet { global_index }, av) => {
                 state.flow.globals.insert(global_index, av);
-                AbstractValue::Runtime(ValueTags::default())
+                AbstractValue::Runtime(Some(orig_inst), ValueTags::default())
             }
             (Operator::I32Eqz, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
                 AbstractValue::Concrete(WasmVal::I32(if k == 0 { 1 } else { 0 }), t)
@@ -1013,7 +1027,10 @@ impl<'a> Evaluator<'a> {
                 self.image
                     .read_size(memory.memory, k + memory.offset as u32, size)
                     .map(|data| AbstractValue::Concrete(WasmVal::I32(conv(data)), t))
-                    .unwrap_or(AbstractValue::Runtime(ValueTags::default()))
+                    .unwrap_or(AbstractValue::Runtime(
+                        Some(orig_inst),
+                        ValueTags::default(),
+                    ))
             }
 
             (Operator::I64Load { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
@@ -1049,16 +1066,20 @@ impl<'a> Evaluator<'a> {
                 self.image
                     .read_size(memory.memory, k + memory.offset as u32, size)
                     .map(|data| AbstractValue::Concrete(WasmVal::I64(conv(data)), t))
-                    .unwrap_or(AbstractValue::Runtime(ValueTags::default()))
+                    .unwrap_or(AbstractValue::Runtime(
+                        Some(orig_inst),
+                        ValueTags::default(),
+                    ))
             }
 
             // TODO: FP and SIMD
-            _ => AbstractValue::Runtime(ValueTags::default()),
+            _ => AbstractValue::Runtime(Some(orig_inst), ValueTags::default()),
         }
     }
 
     fn abstract_eval_binary(
         &mut self,
+        orig_inst: Value,
         op: Operator,
         x: AbstractValue,
         y: AbstractValue,
@@ -1295,15 +1316,16 @@ impl<'a> Evaluator<'a> {
                     }
 
                     // TODO: FP and SIMD ops.
-                    _ => AbstractValue::Runtime(ValueTags::default()),
+                    _ => AbstractValue::Runtime(Some(orig_inst), ValueTags::default()),
                 }
             }
-            _ => AbstractValue::Runtime(ValueTags::default()),
+            _ => AbstractValue::Runtime(Some(orig_inst), ValueTags::default()),
         }
     }
 
     fn abstract_eval_ternary(
         &mut self,
+        orig_inst: Value,
         op: Operator,
         x: AbstractValue,
         y: AbstractValue,
@@ -1322,7 +1344,7 @@ impl<'a> Evaluator<'a> {
                     y
                 }
             }
-            _ => AbstractValue::Runtime(ValueTags::default()),
+            _ => AbstractValue::Runtime(Some(orig_inst), ValueTags::default()),
         }
     }
 
