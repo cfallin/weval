@@ -16,6 +16,8 @@ use waffle::{
 };
 
 struct Evaluator<'a> {
+    /// Module.
+    module: &'a Module<'a>,
     /// Original function body.
     generic: &'a FunctionBody,
     /// Intrinsic function indices.
@@ -113,8 +115,8 @@ fn partially_evaluate_func(
     let orig_name = module.funcs[directive.func].name();
     let sig = module.funcs[directive.func].sig();
 
-    log::trace!("Specializing: {}", directive.func);
-    log::trace!("body:\n{}", body.display("| ", Some(module)));
+    log::debug!("Specializing: {}", directive.func);
+    log::debug!("body:\n{}", body.display("| ", Some(module)));
 
     // Compute CFG info.
     let cfg = CFGInfo::new(body);
@@ -122,13 +124,15 @@ fn partially_evaluate_func(
     log::trace!("CFGInfo: {:?}", cfg);
 
     // Build the evaluator.
+    let func = FunctionBody::new(module, sig);
     let mut evaluator = Evaluator {
+        module,
         generic: body,
         intrinsics,
         image,
         cfg,
         state: FunctionState::new(),
-        func: FunctionBody::new(module, sig),
+        func,
         block_map: HashMap::new(),
         block_rev_map: PerEntity::default(),
         block_deps: HashMap::new(),
@@ -149,7 +153,10 @@ fn partially_evaluate_func(
     evaluator.queue_set.insert((evaluator.generic.entry, ctx));
     evaluator.evaluate()?;
 
-    log::debug!("Adding func:\n{}", evaluator.func.display("| ", Some(module)));
+    log::debug!(
+        "Adding func:\n{}",
+        evaluator.func.display("| ", Some(module))
+    );
     let name = format!("{} (specialized)", orig_name);
     let func = module.funcs.push(FuncDecl::Body(sig, name, evaluator.func));
     module.funcs[func].optimize();
@@ -348,12 +355,12 @@ impl<'a> Evaluator<'a> {
         log::debug!("evaluate_block_body: {}: state {:?}", orig_block, state);
         for &(_, param) in &self.generic.blocks[orig_block].params {
             let (_, abs) = self.use_value(state.context, orig_block, param);
-            log::debug!(" -> param {}: {:?}", param, abs);
+            log::trace!(" -> param {}: {:?}", param, abs);
         }
 
         for &inst in &self.generic.blocks[orig_block].insts {
             let input_ctx = state.context;
-            log::debug!(
+            log::trace!(
                 "inst {} in context {} -> {:?}",
                 inst,
                 input_ctx,
@@ -520,6 +527,14 @@ impl<'a> Evaluator<'a> {
         let target_context = state.pending_context.unwrap_or(state.context);
         log::trace!(" -> new context {}", target_context);
 
+        log::debug!(
+            "target_block: from orig {} ctx {} to {} ctx {}",
+            orig_block,
+            state.context,
+            target,
+            target_context
+        );
+
         match self.block_map.entry((target_context, target)) {
             HashEntry::Vacant(_) => {
                 let block = self.create_block(target, target_context, state.flow.clone());
@@ -567,7 +582,7 @@ impl<'a> Evaluator<'a> {
             let (val, abs) = self.use_value(state.context, orig_block, arg);
             args.push(val);
             abs_args.push(abs);
-            log::debug!(
+            log::trace!(
                 "blockparam: block {} context {}: arg {} has val {} abs {:?}",
                 orig_block,
                 state.context,
@@ -587,7 +602,7 @@ impl<'a> Evaluator<'a> {
             .zip(abs_args.iter())
         {
             let &val = self.value_map.get(&(target_ctx, blockparam)).unwrap();
-            log::debug!(
+            log::trace!(
                 "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?}",
                 target.block, target_ctx, blockparam, val, abs);
             changed |= self.def_value(orig_block, target_ctx, blockparam, val, *abs);
@@ -691,7 +706,7 @@ impl<'a> Evaluator<'a> {
         orig_values: &[Value],
         state: &mut PointState,
     ) -> anyhow::Result<EvalResult> {
-        log::debug!(
+        log::trace!(
             "abstract eval of {} {}: op {:?} abs {:?} state {:?}",
             orig_block,
             orig_inst,
@@ -738,10 +753,10 @@ impl<'a> Evaluator<'a> {
 
     fn abstract_eval_intrinsic(
         &mut self,
-        _orig_block: Block,
+        orig_block: Block,
         _orig_inst: Value,
         op: Operator,
-        _loc: SourceLoc,
+        loc: SourceLoc,
         abs: &[AbstractValue],
         values: &[Value],
         orig_values: &[Value],
@@ -782,9 +797,40 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.update_context {
                     log::trace!("update context at {}: PC is {:?}", orig_values[0], abs[0]);
+                    if self.state.contexts.leaf_element(state.context) == ContextElem::Root {
+                        let loc = self.module.debug.source_locs[loc];
+                        let file = &self.module.debug.source_files[loc.file];
+                        panic!(
+                            "update_context in root context; loc {}:{}:{}",
+                            file, loc.line, loc.col
+                        );
+                    }
                     let pc = abs[0]
                         .is_const_u32()
-                        .expect("PC should not be a runtime value");
+                        .ok_or_else(|| {
+                            let loc = self.module.debug.source_locs[loc];
+                            let filename = &self.module.debug.source_files[loc.file];
+                            let def_loc = match abs[0] {
+                                AbstractValue::Runtime(value, _) => {
+                                    value.map(|value| self.generic.source_locs[value])
+                                }
+                                _ => unreachable!(),
+                            };
+                            let def_loc = def_loc.map(|loc| self.module.debug.source_locs[loc]);
+                            let def_filename = def_loc
+                                .map(|loc| &self.module.debug.source_files[loc.file][..])
+                                .unwrap_or("(unknown)");
+                            format!(
+                                "PC is a runtime value at {}:{}:{} (value defined at {}:{}:{})",
+                                filename,
+                                loc.line,
+                                loc.col,
+                                def_filename,
+                                def_loc.map(|loc| loc.line).unwrap_or(0),
+                                def_loc.map(|loc| loc.col).unwrap_or(0)
+                            )
+                        })
+                        .unwrap();
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
                     let sibling = match self.state.contexts.leaf_element(instantaneous_context) {
                         ContextElem::Root => instantaneous_context,
@@ -798,6 +844,19 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.flush_to_mem {
                     // Just elide it for now. TODO: handle properly.
+                    EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.abort_specialization {
+                    let line_num = abs[0].is_const_u32().unwrap_or(0);
+                    let fatal = abs[1].is_const_u32().unwrap_or(0);
+                    log::debug!("abort-specialization point: line {}", line_num);
+                    if fatal != 0 {
+                        panic!("Specialization reached a point it shouldn't have!");
+                    }
+                    EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.trace_line {
+                    let line_num = abs[0].is_const_u32().unwrap_or(0);
+                    log::debug!("trace: line number {}: current context {} at block {}, pending context {:?}",
+                                line_num, state.context, orig_block, state.pending_context);
                     EvalResult::Elide
                 } else {
                     EvalResult::Unhandled

@@ -27,8 +27,9 @@ fn main() -> anyhow::Result<()> {
 
     // Load module.
     let bytes = std::fs::read(&opts.input_module)?;
-    let mut module =
-        waffle::Module::from_wasm_bytes(&bytes[..], &waffle::FrontendOptions::default())?;
+    let mut frontend_opts = waffle::FrontendOptions::default();
+    frontend_opts.debug = true;
+    let mut module = waffle::Module::from_wasm_bytes(&bytes[..], &frontend_opts)?;
 
     // Build module image.
     let mut im = image::build_image(&module)?;

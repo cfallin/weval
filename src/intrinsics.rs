@@ -10,6 +10,8 @@ pub struct Intrinsics {
     pub push_context: Option<Func>,
     pub pop_context: Option<Func>,
     pub update_context: Option<Func>,
+    pub abort_specialization: Option<Func>,
+    pub trace_line: Option<Func>,
 }
 
 impl Intrinsics {
@@ -36,6 +38,13 @@ impl Intrinsics {
             push_context: find_exported_func(module, "weval.push.context", &[Type::I32], &[]),
             pop_context: find_exported_func(module, "weval.pop.context", &[], &[]),
             update_context: find_exported_func(module, "weval.update.context", &[Type::I32], &[]),
+            abort_specialization: find_exported_func(
+                module,
+                "weval.abort.specialization",
+                &[Type::I32, Type::I32],
+                &[],
+            ),
+            trace_line: find_exported_func(module, "weval.trace.line", &[Type::I32], &[]),
         }
     }
 }
