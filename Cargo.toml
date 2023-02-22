@@ -6,7 +6,7 @@ license = "Apache-2.0 WITH LLVM-Exception"
 edition = "2021"
 
 [dependencies]
-waffle = "0.0.4"
+waffle = "0.0.5"
 anyhow = "1.0"
 structopt = "0.3"
 wasm-encoder = "0.20"
