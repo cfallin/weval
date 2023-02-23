@@ -47,11 +47,16 @@ impl Intrinsics {
                 &[],
             ),
             trace_line: find_exported_func(module, "weval.trace.line", &[Type::I32], &[]),
-            assert_const32: find_exported_func(module, "weval.assert.const32", &[Type::I32], &[]),
+            assert_const32: find_exported_func(
+                module,
+                "weval.assert.const32",
+                &[Type::I32, Type::I32],
+                &[],
+            ),
             assert_const_memory: find_exported_func(
                 module,
                 "weval.assert.const.memory",
-                &[Type::I32],
+                &[Type::I32, Type::I32],
                 &[],
             ),
         }
