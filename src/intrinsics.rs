@@ -12,6 +12,8 @@ pub struct Intrinsics {
     pub update_context: Option<Func>,
     pub abort_specialization: Option<Func>,
     pub trace_line: Option<Func>,
+    pub assert_const32: Option<Func>,
+    pub assert_const_memory: Option<Func>,
 }
 
 impl Intrinsics {
@@ -45,6 +47,13 @@ impl Intrinsics {
                 &[],
             ),
             trace_line: find_exported_func(module, "weval.trace.line", &[Type::I32], &[]),
+            assert_const32: find_exported_func(module, "weval.assert.const32", &[Type::I32], &[]),
+            assert_const_memory: find_exported_func(
+                module,
+                "weval.assert.const.memory",
+                &[Type::I32],
+                &[],
+            ),
         }
     }
 }

@@ -96,8 +96,8 @@ impl ValueTags {
         (self.0 & tags.0) == tags.0
     }
     pub fn meet(&self, other: ValueTags) -> ValueTags {
-        // const_memory is sticky: mege with union.
-        ValueTags(self.0 | other.0)
+        // const_memory is conservative: merge with intersection.
+        ValueTags(self.0 & other.0)
     }
 }
 

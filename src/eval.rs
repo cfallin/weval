@@ -858,6 +858,16 @@ impl<'a> Evaluator<'a> {
                     log::debug!("trace: line number {}: current context {} at block {}, pending context {:?}",
                                 line_num, state.context, orig_block, state.pending_context);
                     EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.assert_const32 {
+                    if abs[0].is_const_u32().is_none() {
+                        panic!("weval_assert_const32() failed: line {:?}", abs[1]);
+                    }
+                    EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.assert_const_memory {
+                    if !abs[0].tags().contains(ValueTags::const_memory()) {
+                        panic!("weval_assert_const_memory() failed: line {:?}", abs[1]);
+                    }
+                    EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
                 }
@@ -1085,7 +1095,12 @@ impl<'a> Evaluator<'a> {
 
                 self.image
                     .read_size(memory.memory, k + memory.offset as u32, size)
-                    .map(|data| AbstractValue::Concrete(WasmVal::I32(conv(data)), t))
+                    // N.B.: memory const-ness is *not* transitive!
+                    // The user needs to opt in at each level of
+                    // indirection.
+                    .map(|data| {
+                        AbstractValue::Concrete(WasmVal::I32(conv(data)), ValueTags::default())
+                    })
                     .unwrap_or(AbstractValue::Runtime(
                         Some(orig_inst),
                         ValueTags::default(),
@@ -1124,7 +1139,9 @@ impl<'a> Evaluator<'a> {
 
                 self.image
                     .read_size(memory.memory, k + memory.offset as u32, size)
-                    .map(|data| AbstractValue::Concrete(WasmVal::I64(conv(data)), t))
+                    .map(|data| {
+                        AbstractValue::Concrete(WasmVal::I64(conv(data)), ValueTags::default())
+                    })
                     .unwrap_or(AbstractValue::Runtime(
                         Some(orig_inst),
                         ValueTags::default(),
@@ -1149,6 +1166,13 @@ impl<'a> Evaluator<'a> {
         match (x, y) {
             (AbstractValue::Concrete(v1, tag1), AbstractValue::Concrete(v2, tag2)) => {
                 let tags = tag1.meet(tag2);
+                let derived_ptr_tags = if tag1.contains(ValueTags::const_memory())
+                    || tag2.contains(ValueTags::const_memory())
+                {
+                    tags | ValueTags::const_memory()
+                } else {
+                    tags
+                };
                 match (op, v1, v2) {
                     // 32-bit comparisons.
                     (Operator::I32Eq, WasmVal::I32(k1), WasmVal::I32(k2)) => {
@@ -1240,10 +1264,10 @@ impl<'a> Evaluator<'a> {
 
                     // 32-bit integer arithmetic.
                     (Operator::I32Add, WasmVal::I32(k1), WasmVal::I32(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_add(k2)), tags)
+                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_add(k2)), derived_ptr_tags)
                     }
                     (Operator::I32Sub, WasmVal::I32(k1), WasmVal::I32(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_sub(k2)), tags)
+                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_sub(k2)), derived_ptr_tags)
                     }
                     (Operator::I32Mul, WasmVal::I32(k1), WasmVal::I32(k2)) => {
                         AbstractValue::Concrete(WasmVal::I32(k1.wrapping_mul(k2)), tags)
@@ -1304,10 +1328,10 @@ impl<'a> Evaluator<'a> {
 
                     // 64-bit integer arithmetic.
                     (Operator::I64Add, WasmVal::I64(k1), WasmVal::I64(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_add(k2)), tags)
+                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_add(k2)), derived_ptr_tags)
                     }
                     (Operator::I64Sub, WasmVal::I64(k1), WasmVal::I64(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_sub(k2)), tags)
+                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_sub(k2)), derived_ptr_tags)
                     }
                     (Operator::I64Mul, WasmVal::I64(k1), WasmVal::I64(k2)) => {
                         AbstractValue::Concrete(WasmVal::I64(k1.wrapping_mul(k2)), tags)
