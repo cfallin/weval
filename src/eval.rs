@@ -5,6 +5,7 @@ use crate::image::Image;
 use crate::intrinsics::Intrinsics;
 use crate::state::*;
 use crate::value::{AbstractValue, ValueTags, WasmVal};
+use crate::Options;
 use std::collections::{
     btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, HashMap, HashSet, VecDeque,
 };
@@ -57,6 +58,7 @@ pub fn partially_evaluate(
     module: &mut Module,
     im: &mut Image,
     directives: &[Directive],
+    opts: &Options,
 ) -> anyhow::Result<()> {
     let intrinsics = Intrinsics::find(module);
     log::trace!("intrinsics: {:?}", intrinsics);
@@ -70,6 +72,13 @@ pub fn partially_evaluate(
         let f = module.expand_func(func)?;
         f.optimize();
         f.convert_to_max_ssa();
+        if opts.add_tracing {
+            waffle::passes::trace::run(f.body_mut().unwrap());
+        }
+    }
+
+    if opts.run_pre {
+        return Ok(());
     }
 
     for directive in directives {
@@ -436,6 +445,18 @@ impl<'a> Evaluator<'a> {
                             av,
                         )),
                     }
+                }
+                ValueDef::Trace(id, args) => {
+                    let mut arg_values = vec![];
+                    for &arg in args {
+                        let arg = self.generic.resolve_alias(arg);
+                        let (val, _abs) = self.use_value(state.context, orig_block, arg);
+                        arg_values.push(val);
+                    }
+                    Some((
+                        ValueDef::Trace(*id, std::mem::take(&mut arg_values)),
+                        AbstractValue::Runtime(None, ValueTags::default()),
+                    ))
                 }
                 _ => unreachable!(
                     "Invalid ValueDef in `insts` array for {} at {}",
