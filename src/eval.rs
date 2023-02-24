@@ -70,7 +70,6 @@ pub fn partially_evaluate(
     }
     for func in funcs {
         let f = module.expand_func(func)?;
-        f.optimize();
         f.convert_to_max_ssa();
         if opts.add_tracing {
             waffle::passes::trace::run(f.body_mut().unwrap());
@@ -168,7 +167,6 @@ fn partially_evaluate_func(
     );
     let name = format!("{} (specialized)", orig_name);
     let func = module.funcs.push(FuncDecl::Body(sig, name, evaluator.func));
-    module.funcs[func].optimize();
     Ok(Some(func))
 }
 
