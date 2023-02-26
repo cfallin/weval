@@ -174,7 +174,7 @@ fn partially_evaluate_func(
         evaluator.func.display("| ", Some(module))
     );
     let name = format!("{} (specialized)", orig_name);
-    evaluator.func.optimize(fuel);
+    //evaluator.func.optimize(fuel);
     let func = module.funcs.push(FuncDecl::Body(sig, name, evaluator.func));
     Ok(Some(func))
 }
