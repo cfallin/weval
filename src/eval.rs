@@ -63,6 +63,10 @@ pub fn partially_evaluate(
     let intrinsics = Intrinsics::find(module);
     log::trace!("intrinsics: {:?}", intrinsics);
     let mut mem_updates = HashMap::new();
+    let mut fuel = waffle::passes::Fuel {
+        remaining: if opts.fuel > 0 { opts.fuel } else { u64::MAX },
+    };
+    let orig_fuel = fuel.remaining;
 
     let mut funcs = HashSet::new();
     for directive in directives {
@@ -82,7 +86,7 @@ pub fn partially_evaluate(
 
     for directive in directives {
         log::info!("Processing directive {:?}", directive);
-        if let Some(idx) = partially_evaluate_func(module, im, &intrinsics, directive)? {
+        if let Some(idx) = partially_evaluate_func(module, im, &intrinsics, directive, &mut fuel)? {
             // Append to table.
             let func_table = &mut module.tables[Table::from(0)];
             let table_idx = {
@@ -106,6 +110,9 @@ pub fn partially_evaluate(
     for (addr, value) in mem_updates {
         im.write_u32(heap, addr, value)?;
     }
+
+    log::info!("used {} fuel", orig_fuel - fuel.remaining);
+
     Ok(())
 }
 
@@ -114,6 +121,7 @@ fn partially_evaluate_func(
     image: &Image,
     intrinsics: &Intrinsics,
     directive: &Directive,
+    fuel: &mut waffle::passes::Fuel,
 ) -> anyhow::Result<Option<Func>> {
     // Get function body.
     module.expand_func(directive.func)?;
@@ -166,6 +174,7 @@ fn partially_evaluate_func(
         evaluator.func.display("| ", Some(module))
     );
     let name = format!("{} (specialized)", orig_name);
+    evaluator.func.optimize(fuel);
     let func = module.funcs.push(FuncDecl::Body(sig, name, evaluator.func));
     Ok(Some(func))
 }

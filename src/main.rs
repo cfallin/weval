@@ -31,6 +31,10 @@ pub struct Options {
     /// Run IR in interpreter after weval'ing.
     #[structopt(long = "run-post")]
     run_post: bool,
+
+    /// Optimization fuel, for bisecting issues, or 0 for infinite.
+    #[structopt(long = "opt-fuel", default_value = "0")]
+    fuel: u64,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -84,7 +88,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_interp(module: &waffle::Module<'_>) {
-    let mut ctx = waffle::InterpContext::new(module);
+    let mut ctx = waffle::InterpContext::new(module).unwrap();
     if let Some(start) = module.start_func {
         ctx.call(module, start, &[]).ok().unwrap();
     }
