@@ -8,11 +8,12 @@ use crate::value::{AbstractValue, ValueTags, WasmVal};
 use crate::Options;
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
+use rayon::prelude::*;
 use std::collections::{btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, VecDeque};
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
-    entity::PerEntity, Block, BlockTarget, Func, FuncDecl, FunctionBody, Module, Operator,
+    entity::PerEntity, Block, BlockTarget, FuncDecl, FunctionBody, Module, Operator, Signature,
     SourceLoc, Table, Terminator, Type, Value, ValueDef,
 };
 
@@ -63,11 +64,6 @@ pub fn partially_evaluate(
     let intrinsics = Intrinsics::find(module);
     log::trace!("intrinsics: {:?}", intrinsics);
     let mut mem_updates = HashMap::default();
-    let mut fuel = waffle::Fuel {
-        remaining: if opts.fuel > 0 { opts.fuel } else { u64::MAX },
-        consumed: 0,
-    };
-    let orig_fuel = fuel.remaining;
 
     let mut funcs = HashSet::default();
     for directive in directives {
@@ -86,21 +82,29 @@ pub fn partially_evaluate(
         return Ok(());
     }
 
-    for directive in directives {
-        log::info!("Processing directive {:?}", directive);
-        if let Some(idx) = partially_evaluate_func(module, im, &intrinsics, directive, &mut fuel)? {
+    let bodies = directives
+        .par_iter()
+        .map(|directive| {
+            partially_evaluate_func(module, im, &intrinsics, directive)
+                .map(|tuple| (directive, tuple))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    for (directive, tuple) in bodies {
+        if let Some((body, sig, name)) = tuple {
+            // Add function to module.
+            let func = module.funcs.push(FuncDecl::Body(sig, name, body));
             // Append to table.
             let func_table = &mut module.tables[Table::from(0)];
             let table_idx = {
                 let func_table_elts = func_table.func_elements.as_mut().unwrap();
                 let table_idx = func_table_elts.len();
-                func_table_elts.push(idx);
+                func_table_elts.push(func);
                 table_idx
             } as u32;
             if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
                 func_table.max = Some(table_idx + 1);
             }
-            log::info!("New func index {} -> table index {}", idx, table_idx);
+            log::info!("New func index {} -> table index {}", func, table_idx);
             log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
             // Update memory image.
             mem_updates.insert(directive.func_index_out_addr, table_idx);
@@ -113,20 +117,16 @@ pub fn partially_evaluate(
         im.write_u32(heap, addr, value)?;
     }
 
-    log::info!("used {} fuel", orig_fuel - fuel.remaining);
-
     Ok(())
 }
 
 fn partially_evaluate_func(
-    module: &mut Module,
+    module: &Module,
     image: &Image,
     intrinsics: &Intrinsics,
     directive: &Directive,
-    fuel: &mut waffle::passes::Fuel,
-) -> anyhow::Result<Option<Func>> {
+) -> anyhow::Result<Option<(FunctionBody, Signature, String)>> {
     // Get function body.
-    module.expand_func(directive.func)?;
     let body = module.funcs[directive.func]
         .body()
         .ok_or_else(|| anyhow::anyhow!("Attempt to specialize an import"))?;
@@ -176,9 +176,8 @@ fn partially_evaluate_func(
         evaluator.func.display("| ", Some(module))
     );
     let name = format!("{} (specialized)", orig_name);
-    evaluator.func.optimize(fuel);
-    let func = module.funcs.push(FuncDecl::Body(sig, name, evaluator.func));
-    Ok(Some(func))
+    evaluator.func.optimize(&mut waffle::Fuel::infinite());
+    Ok(Some((evaluator.func, sig, name)))
 }
 
 fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {

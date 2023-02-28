@@ -631,6 +631,7 @@ dependencies = [
  "env_logger",
  "fxhash",
  "log",
+ "rayon",
  "structopt",
  "waffle",
  "wasm-encoder",
