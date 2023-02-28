@@ -63,8 +63,9 @@ pub fn partially_evaluate(
     let intrinsics = Intrinsics::find(module);
     log::trace!("intrinsics: {:?}", intrinsics);
     let mut mem_updates = HashMap::new();
-    let mut fuel = waffle::passes::Fuel {
+    let mut fuel = waffle::Fuel {
         remaining: if opts.fuel > 0 { opts.fuel } else { u64::MAX },
+        consumed: 0,
     };
     let orig_fuel = fuel.remaining;
 
