@@ -6,9 +6,9 @@ use crate::intrinsics::Intrinsics;
 use crate::state::*;
 use crate::value::{AbstractValue, ValueTags, WasmVal};
 use crate::Options;
-use std::collections::{
-    btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, HashMap, HashSet, VecDeque,
-};
+use fxhash::FxHashMap as HashMap;
+use fxhash::FxHashSet as HashSet;
+use std::collections::{btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, VecDeque};
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
@@ -62,19 +62,20 @@ pub fn partially_evaluate(
 ) -> anyhow::Result<()> {
     let intrinsics = Intrinsics::find(module);
     log::trace!("intrinsics: {:?}", intrinsics);
-    let mut mem_updates = HashMap::new();
+    let mut mem_updates = HashMap::default();
     let mut fuel = waffle::Fuel {
         remaining: if opts.fuel > 0 { opts.fuel } else { u64::MAX },
         consumed: 0,
     };
     let orig_fuel = fuel.remaining;
 
-    let mut funcs = HashSet::new();
+    let mut funcs = HashSet::default();
     for directive in directives {
         funcs.insert(directive.func);
     }
     for func in funcs {
         let f = module.expand_func(func)?;
+        f.optimize(&mut waffle::Fuel::infinite());
         f.convert_to_max_ssa();
         if opts.add_tracing {
             waffle::passes::trace::run(f.body_mut().unwrap());
@@ -150,13 +151,13 @@ fn partially_evaluate_func(
         cfg,
         state: FunctionState::new(),
         func,
-        block_map: HashMap::new(),
+        block_map: HashMap::default(),
         block_rev_map: PerEntity::default(),
-        block_deps: HashMap::new(),
-        value_map: HashMap::new(),
-        mem_blockparam_map: HashMap::new(),
+        block_deps: HashMap::default(),
+        value_map: HashMap::default(),
+        mem_blockparam_map: HashMap::default(),
         queue: VecDeque::new(),
-        queue_set: HashSet::new(),
+        queue_set: HashSet::default(),
     };
     let (ctx, entry_state) = evaluator
         .state
