@@ -65,16 +65,19 @@ pub fn partially_evaluate(
     log::trace!("intrinsics: {:?}", intrinsics);
     let mut mem_updates = HashMap::default();
 
-    let mut funcs = HashSet::default();
+    let mut funcs = HashMap::default();
     for directive in directives {
-        funcs.insert(directive.func);
-    }
-    for func in funcs {
-        let f = module.expand_func(func)?;
-        f.optimize(&mut waffle::Fuel::infinite());
-        f.convert_to_max_ssa();
-        if opts.add_tracing {
-            waffle::passes::trace::run(f.body_mut().unwrap());
+        if !funcs.contains_key(&directive.func) {
+            let mut f = module.clone_and_expand_body(directive.func)?;
+            f.optimize();
+            f.convert_to_max_ssa();
+            if opts.add_tracing {
+                waffle::passes::trace::run(&mut f);
+            }
+            if opts.run_pre {
+                module.replace_body(directive.func, f.clone());
+            }
+            funcs.insert(directive.func, f);
         }
     }
 
@@ -85,7 +88,8 @@ pub fn partially_evaluate(
     let bodies = directives
         .par_iter()
         .map(|directive| {
-            partially_evaluate_func(module, im, &intrinsics, directive)
+            let generic = funcs.get(&directive.func).unwrap();
+            partially_evaluate_func(module, generic, im, &intrinsics, directive)
                 .map(|tuple| (directive, tuple))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -122,22 +126,19 @@ pub fn partially_evaluate(
 
 fn partially_evaluate_func(
     module: &Module,
+    generic: &FunctionBody,
     image: &Image,
     intrinsics: &Intrinsics,
     directive: &Directive,
 ) -> anyhow::Result<Option<(FunctionBody, Signature, String)>> {
-    // Get function body.
-    let body = module.funcs[directive.func]
-        .body()
-        .ok_or_else(|| anyhow::anyhow!("Attempt to specialize an import"))?;
     let orig_name = module.funcs[directive.func].name();
     let sig = module.funcs[directive.func].sig();
 
     log::debug!("Specializing: {}", directive.func);
-    log::debug!("body:\n{}", body.display("| ", Some(module)));
+    log::debug!("body:\n{}", generic.display("| ", Some(module)));
 
     // Compute CFG info.
-    let cfg = CFGInfo::new(body);
+    let cfg = CFGInfo::new(generic);
 
     log::trace!("CFGInfo: {:?}", cfg);
 
@@ -145,7 +146,7 @@ fn partially_evaluate_func(
     let func = FunctionBody::new(module, sig);
     let mut evaluator = Evaluator {
         module,
-        generic: body,
+        generic,
         intrinsics,
         image,
         cfg,
@@ -161,7 +162,7 @@ fn partially_evaluate_func(
     };
     let (ctx, entry_state) = evaluator
         .state
-        .init_args(body, image, &directive.const_params[..]);
+        .init_args(generic, image, &directive.const_params[..]);
     log::trace!("after init_args, state is {:?}", evaluator.state);
     let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
     evaluator.func.entry = specialized_entry;
@@ -176,7 +177,7 @@ fn partially_evaluate_func(
         evaluator.func.display("| ", Some(module))
     );
     let name = format!("{} (specialized)", orig_name);
-    evaluator.func.optimize(&mut waffle::Fuel::infinite());
+    evaluator.func.optimize();
     Ok(Some((evaluator.func, sig, name)))
 }
 
