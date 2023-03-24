@@ -103,7 +103,12 @@ pub struct SymbolicAddr(pub u32, pub i64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemValue {
-    Value { data: Value, ty: Type, addr: Value },
+    Value {
+        data: Value,
+        ty: Type,
+        addr: Value,
+        dirty: bool,
+    },
     TypedMerge(Type),
     Conflict,
 }
@@ -269,25 +274,45 @@ impl ProgPointState {
         }
     }
 
-    pub fn update_at_block_entry<F: FnMut(SymbolicAddr, Type) -> (Value, Value)>(
+    pub fn update_at_block_entry<
+        C,
+        GB: FnMut(&mut C, SymbolicAddr, Type) -> (Value, Value),
+        RB: FnMut(&mut C, SymbolicAddr),
+    >(
         &mut self,
-        get_blockparam: &mut F,
+        ctx: &mut C,
+        get_blockparam: &mut GB,
+        remove_blockparam: &mut RB,
     ) -> anyhow::Result<()> {
+        let mut to_remove = vec![];
         for (&addr, value) in &mut self.mem_overlay {
             match *value {
                 MemValue::Value { .. } => {}
                 MemValue::TypedMerge(ty) => {
-                    let (addr, param) = get_blockparam(addr, ty);
+                    let (addr, param) = get_blockparam(ctx, addr, ty);
                     *value = MemValue::Value {
                         data: param,
                         ty,
                         addr,
+                        // We could recover some notion of clean
+                        // values (same as in memory, just loads we've
+                        // already done) if we had a postpass to know
+                        // for certain all incoming edges had this
+                        // property, but right now this is a
+                        // placeholder inserted before we know all
+                        // preds' state so we conservatively assume
+                        // dirty (which is always safe).
+                        dirty: true,
                     };
                 }
                 MemValue::Conflict => {
-                    anyhow::bail!("Conflicting types for merge at addr {:?}", addr);
+                    remove_blockparam(ctx, addr);
+                    to_remove.push(addr.clone());
                 }
             }
+        }
+        for to_remove in to_remove {
+            self.mem_overlay.remove(&to_remove);
         }
         Ok(())
     }

@@ -175,7 +175,7 @@ fn partially_evaluate_func(
 
     log::debug!(
         "Adding func:\n{}",
-        evaluator.func.display("| ", Some(module))
+        evaluator.func.display_verbose("| ", Some(module))
     );
     let name = format!("{} (specialized)", orig_name);
     evaluator.func.optimize();
@@ -195,7 +195,7 @@ fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {
 fn store_operator(ty: Type) -> Option<Operator> {
     let memory = waffle::MemoryArg {
         memory: waffle::Memory::new(0),
-        align: 1,
+        align: 0,
         offset: 0,
     };
     match ty {
@@ -262,25 +262,29 @@ impl<'a> Evaluator<'a> {
         };
         log::trace!(" -> state = {:?}", state);
 
-        state.flow.update_at_block_entry(&mut |sym_addr, ty| {
-            *self
-                .mem_blockparam_map
-                .entry((ctx, orig_block, sym_addr))
-                .or_insert_with(|| {
-                    let param = self.func.add_placeholder(ty);
-                    let addr = self.func.add_placeholder(Type::I32);
-                    log::trace!(
-                        "new blockparams for data {} addr {:?} for symbolic-addr {:?} on block {} (ctx {} orig {})",
-                        param,
-                        addr,
-                        sym_addr,
-                        new_block,
-                        ctx,
-                        orig_block,
-                    );
-                    (addr, param)
-                })
-        })?;
+        state.flow.update_at_block_entry(
+            &mut self.mem_blockparam_map,
+            &mut |mem_blockparam_map, sym_addr, ty| {
+                *mem_blockparam_map
+                    .entry((ctx, orig_block, sym_addr))
+                    .or_insert_with(|| {
+                        let param = self.func.add_placeholder(ty);
+                        let addr = self.func.add_placeholder(Type::I32);
+                        log::trace!(
+                            "new blockparams for data {} addr {:?} for symbolic-addr {:?} on block {} (ctx {} orig {})",
+                            param,
+                            addr,
+                            sym_addr,
+                            new_block,
+                            ctx,
+                            orig_block,
+                        );
+                        (addr, param)
+                    },)
+            },
+            &mut |mem_blockparam_map, sym_addr| {
+                mem_blockparam_map.remove(&(ctx, orig_block, sym_addr));
+            })?;
 
         // Do the actual constant-prop, carrying the state across the
         // block and updating flow-sensitive state, and updating SSA
@@ -442,6 +446,7 @@ impl<'a> Evaluator<'a> {
                         &arg_abs_values[..],
                         &arg_values[..],
                         &args[..],
+                        &tys[..],
                         state,
                     )?;
                     // Transcribe either the original operation, or a
@@ -754,6 +759,7 @@ impl<'a> Evaluator<'a> {
         abs: &[AbstractValue],
         values: &[Value],
         orig_values: &[Value],
+        tys: &[Type],
         state: &mut PointState,
     ) -> anyhow::Result<EvalResult> {
         log::trace!(
@@ -783,7 +789,7 @@ impl<'a> Evaluator<'a> {
         }
 
         let mem_overlay_result =
-            self.abstract_eval_mem_overlay(orig_inst, op, abs, values, state)?;
+            self.abstract_eval_mem_overlay(orig_inst, new_block, op, abs, values, tys, state)?;
         if mem_overlay_result.is_handled() {
             return Ok(mem_overlay_result);
         }
@@ -960,7 +966,12 @@ impl<'a> Evaluator<'a> {
     fn flush_to_mem(&mut self, state: &mut PointState, new_block: Block) {
         for (_, value) in std::mem::take(&mut state.flow.mem_overlay) {
             match value {
-                MemValue::Value { data, ty, addr } => {
+                MemValue::Value {
+                    data,
+                    ty,
+                    addr,
+                    dirty,
+                } if dirty => {
                     let store = self.func.add_value(ValueDef::Operator(
                         store_operator(ty).unwrap(),
                         vec![addr, data],
@@ -973,12 +984,68 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    fn flush_on_edge(&mut self, from: Block, to: Block, succ_idx: usize) {
+        let (from_ctx, from_orig_block) = self.block_rev_map[from];
+        let from_state = self.state.state[from_ctx]
+            .block_exit
+            .get(&from_orig_block)
+            .unwrap();
+        let (to_ctx, to_orig_block) = self.block_rev_map[to];
+        let to_state = self.state.state[to_ctx]
+            .block_exit
+            .get(&to_orig_block)
+            .unwrap();
+
+        let mut edge_block = None;
+        for (sym_addr, value) in &from_state.mem_overlay {
+            let succ_value = to_state.mem_overlay.get(sym_addr);
+            match (value, succ_value) {
+                (MemValue::Value { .. }, Some(MemValue::Value { .. })) => {
+                    // Nothing necessary: value will be passed as blockparam.
+                }
+                (MemValue::Value { .. }, Some(MemValue::TypedMerge(_))) => {
+                    // Nothing necessary: value will be passed as blockparam.
+                }
+                (
+                    MemValue::Value {
+                        data,
+                        ty,
+                        addr,
+                        dirty,
+                    },
+                    other,
+                ) if *dirty => {
+                    // We need to flush the value back to memory, if
+                    // "dirty" (different from what is already in
+                    // memory).
+                    let store = self.func.add_value(ValueDef::Operator(
+                        store_operator(*ty).unwrap(),
+                        vec![*addr, *data],
+                        vec![],
+                    ));
+                    log::trace!("from block {} to block {}: symbolic addr {:?} had addr {} data {}, but not in succ: {:?}",
+                                from, to, sym_addr, addr, data, other);
+                    let block = *edge_block.get_or_insert_with(|| {
+                        let edge_block = self.func.split_edge(from, to, succ_idx);
+                        self.func.blocks[edge_block].desc = format!("Edge from {} to {}", from, to);
+                        edge_block
+                    });
+                    log::trace!(" -> appending store {} to edge block {}", store, block);
+                    self.func.append_to_block(block, store);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn abstract_eval_mem_overlay(
         &mut self,
         inst: Value,
+        new_block: Block,
         op: Operator,
         abs: &[AbstractValue],
         vals: &[Value],
+        tys: &[Type],
         state: &mut PointState,
     ) -> anyhow::Result<EvalResult> {
         match (op, abs) {
@@ -994,7 +1061,12 @@ impl<'a> Evaluator<'a> {
                 };
                 log::trace!("load from symbolic loc {:?}", abs[0]);
                 match state.flow.mem_overlay.get(&SymbolicAddr(label, off)) {
-                    Some(MemValue::Value { data, ty, addr: _ }) if *ty == expected_ty => {
+                    Some(MemValue::Value {
+                        data,
+                        ty,
+                        addr: _,
+                        dirty: _,
+                    }) if *ty == expected_ty => {
                         let abs = self.state.state[state.context]
                             .ssa
                             .values
@@ -1004,8 +1076,29 @@ impl<'a> Evaluator<'a> {
                         log::trace!(" -> have value {} with abs {:?}", data, abs);
                         return Ok(EvalResult::Alias(abs, *data));
                     }
-                    Some(_) | None => {
-                        return Ok(EvalResult::Unhandled);
+                    None => {
+                        // Create the original load, so we have access
+                        // to its value; then insert it into the mem
+                        // overlay.
+                        let l = self.func.add_value(ValueDef::Operator(
+                            op.clone(),
+                            vals.to_vec(),
+                            tys.to_vec(),
+                        ));
+                        self.func.append_to_block(new_block, l);
+                        state.flow.mem_overlay.insert(
+                            SymbolicAddr(label, off),
+                            MemValue::Value {
+                                data: l,
+                                ty: tys[0],
+                                addr: vals[0],
+                                dirty: false,
+                            },
+                        );
+                        return Ok(EvalResult::Alias(AbstractValue::default(), l));
+                    }
+                    Some(v) => {
+                        anyhow::bail!("Bad MemValue: {:?}", v);
                     }
                 }
             }
@@ -1027,6 +1120,7 @@ impl<'a> Evaluator<'a> {
                         data: vals[1],
                         ty: data_ty,
                         addr: vals[0],
+                        dirty: true,
                     },
                 );
 
@@ -1612,22 +1706,28 @@ impl<'a> Evaluator<'a> {
             }
         }
 
-        //
-        // Also check for escaping symbolic pointers: any values that
-        // are SymboilcPtr in a block arg but Runtime at blockparam of
-        // succ.
+        Ok(())
+    }
+
+    fn add_blockparam_mem_spills(&mut self) -> anyhow::Result<()> {
+        for block in self.func.blocks.iter() {
+            for succ_idx in 0..self.func.blocks[block].succs.len() {
+                let succ = self.func.blocks[block].succs[succ_idx];
+                self.flush_on_edge(block, succ, succ_idx);
+            }
+        }
+
         Ok(())
     }
 
     fn finalize(&mut self) -> anyhow::Result<()> {
-        for block in self.func.blocks.iter() {
-            debug_assert!(self.func.blocks[block].succs.is_empty());
-            let term = self.func.blocks[block].terminator.clone();
-            term.visit_successors(|succ| self.func.add_edge(block, succ));
-        }
+        self.func.recompute_edges();
 
         // Add blockparam args for symbolic addrs to each branch.
         self.add_blockparam_mem_args()?;
+        // Add spills of symbolic addrs on edges as needed to get
+        // consistent (non-conflicting) state on inputs.
+        self.add_blockparam_mem_spills()?;
 
         self.func.validate().unwrap();
 
