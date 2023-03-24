@@ -76,11 +76,23 @@ pub enum AbstractValue {
 pub struct ValueTags(u32);
 
 /// Constructors for value tags.
+///
+/// N.B.: the constant values returned below are *bitfields*, i.e.,
+/// powers of two.
 impl ValueTags {
     /// All values reached in memory through this value as a pointer
     /// are constant at specialization time.
     pub const fn const_memory() -> Self {
         ValueTags(1)
+    }
+
+    /// This value is tainted as derived from a symbolic pointer
+    /// involved in memory renaming. The program can manipulate and
+    /// observe the pointer value, but this pointer must never reach
+    /// any load or store (except via a call, before which we flush
+    /// all memory renaming state).
+    pub fn symbolic_ptr_taint() -> Self {
+        ValueTags(2)
     }
 }
 
@@ -96,8 +108,13 @@ impl ValueTags {
         (self.0 & tags.0) == tags.0
     }
     pub fn meet(&self, other: ValueTags) -> ValueTags {
-        // const_memory is conservative: merge with intersection.
-        ValueTags(self.0 & other.0)
+        // - const_memory merges as intersection.
+        // - symbolic_ptr_taint merges as union.
+        ValueTags(((self.0 & 1) & (other.0 & 1)) | ((self.0 & 2) | (other.0 & 2)))
+    }
+    /// Get the tags that are "sticky": propagate across all ops.
+    pub fn sticky(&self) -> ValueTags {
+        ValueTags(self.0 & 2)
     }
 }
 
@@ -132,6 +149,10 @@ impl AbstractValue {
                 AbstractValue::Runtime(None, av1.tags().meet(av2.tags()))
             }
         }
+    }
+
+    pub fn prop_sticky_tags(self, other: AbstractValue) -> AbstractValue {
+        self.with_tags(other.tags().sticky())
     }
 
     pub fn is_const_u32(&self) -> Option<u32> {

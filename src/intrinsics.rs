@@ -34,7 +34,7 @@ impl Intrinsics {
             flush_to_mem: find_exported_func(
                 module,
                 "weval.flush.to.mem",
-                &[Type::I32, Type::I32],
+                &[],
                 &[],
             ),
             push_context: find_exported_func(module, "weval.push.context", &[Type::I32], &[]),

@@ -42,8 +42,8 @@ void* weval_make_symbolic_ptr(void* value) {
 }
 
 __attribute__((export_name("weval.flush.to.mem")))
-void weval_flush_to_mem(void* value, uint32_t len) {
-    __accum += (int)value + (int)len;
+void weval_flush_to_mem() {
+    __accum += 4;
 }
 
 __attribute__((export_name("weval.push.context")))

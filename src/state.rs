@@ -103,7 +103,7 @@ pub struct SymbolicAddr(pub u32, pub i64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemValue {
-    Value { data: Value, ty: Type },
+    Value { data: Value, ty: Type, addr: Value },
     TypedMerge(Type),
     Conflict,
 }
@@ -128,9 +128,9 @@ impl MemValue {
         }
     }
 
-    pub fn to_value(&self) -> Option<Value> {
+    pub fn to_addr_and_value(&self) -> Option<(Value, Value)> {
         match self {
-            MemValue::Value { data, .. } => Some(*data),
+            MemValue::Value { addr, data, .. } => Some((*addr, *data)),
             _ => None,
         }
     }
@@ -269,7 +269,7 @@ impl ProgPointState {
         }
     }
 
-    pub fn update_at_block_entry<F: FnMut(SymbolicAddr, Type) -> Value>(
+    pub fn update_at_block_entry<F: FnMut(SymbolicAddr, Type) -> (Value, Value)>(
         &mut self,
         get_blockparam: &mut F,
     ) -> anyhow::Result<()> {
@@ -277,8 +277,12 @@ impl ProgPointState {
             match *value {
                 MemValue::Value { .. } => {}
                 MemValue::TypedMerge(ty) => {
-                    let param = get_blockparam(addr, ty);
-                    *value = MemValue::Value { data: param, ty };
+                    let (addr, param) = get_blockparam(addr, ty);
+                    *value = MemValue::Value {
+                        data: param,
+                        ty,
+                        addr,
+                    };
                 }
                 MemValue::Conflict => {
                     anyhow::bail!("Conflicting types for merge at addr {:?}", addr);

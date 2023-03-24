@@ -16,6 +16,7 @@ enum Opcode {
     Print,
     Goto,
     GotoIf,
+    UseOpViaMem,
     Exit,
 };
 
@@ -34,6 +35,10 @@ struct State {
     uint32_t opstack[OPSTACK_SIZE];
     uint32_t locals[LOCAL_SIZE];
 };
+
+__attribute__((noinline)) void use_op_via_mem(uint32_t* operand) {
+    *operand += 1;
+}
 
 bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
     insts = weval::assume_const_memory(insts);
@@ -137,14 +142,18 @@ bool Interpret(const Inst* insts, uint32_t ninsts, State* state) {
                     continue;
                 }
                 break;
+            case UseOpViaMem:
+                if (sp == 0) {
+                    return false;
+                }
+                use_op_via_mem(&opstack[sp]);
+                break;
             case Exit:
                 goto out;
         }
     }
 out:
     weval::pop_context();
-    weval::flush_to_mem(opstack, OPSTACK_SIZE);
-    weval::flush_to_mem(locals, LOCAL_SIZE);
 
     printf("Exiting after %d steps at PC %d.\n", steps, pc);
     return true;
@@ -159,6 +168,7 @@ Inst prog[] = {
     Inst(Exit),
     Inst(PushConst, 1),
     Inst(Add),
+    Inst(UseOpViaMem),
     Inst(Goto, 1),
 };
 

@@ -72,7 +72,7 @@ __attribute__((noinline)) void weval_push_context(uint32_t pc);
 __attribute__((noinline)) void weval_pop_context();
 __attribute__((noinline)) void weval_update_context(uint32_t pc);
 __attribute__((noinline)) void* weval_make_symbolic_ptr(void* p);
-__attribute__((noinline)) void weval_flush_to_mem(void* p, uint32_t len);
+__attribute__((noinline)) void weval_flush_to_mem();
 __attribute__((noinline)) void weval_trace_line(uint32_t line_number);
 __attribute__((noinline)) void weval_abort_specialization(uint32_t line_number,
                                                           uint32_t fatal);
@@ -104,8 +104,8 @@ static T* make_symbolic_ptr(T* t) {
   return (T*)weval_make_symbolic_ptr((void*)t);
 }
 template <typename T>
-void flush_to_mem(T* p, size_t len) {
-  weval_flush_to_mem((void*)p, (uint32_t)len);
+void flush_to_mem() {
+    weval_flush_to_mem();
 }
 
 }  // namespace weval
