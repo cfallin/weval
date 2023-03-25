@@ -971,6 +971,7 @@ impl<'a> Evaluator<'a> {
                     ty,
                     addr,
                     dirty,
+                    abs: _,
                 } if dirty => {
                     let store = self.func.add_value(ValueDef::Operator(
                         store_operator(ty).unwrap(),
@@ -1003,7 +1004,7 @@ impl<'a> Evaluator<'a> {
                 (MemValue::Value { .. }, Some(MemValue::Value { .. })) => {
                     // Nothing necessary: value will be passed as blockparam.
                 }
-                (MemValue::Value { .. }, Some(MemValue::TypedMerge(_))) => {
+                (MemValue::Value { .. }, Some(MemValue::TypedMerge(..))) => {
                     // Nothing necessary: value will be passed as blockparam.
                 }
                 (
@@ -1012,6 +1013,7 @@ impl<'a> Evaluator<'a> {
                         ty,
                         addr,
                         dirty,
+                        abs: _,
                     },
                     other,
                 ) if *dirty => {
@@ -1066,15 +1068,10 @@ impl<'a> Evaluator<'a> {
                         ty,
                         addr: _,
                         dirty: _,
+                        abs,
                     }) if *ty == expected_ty => {
-                        let abs = self.state.state[state.context]
-                            .ssa
-                            .values
-                            .get(data)
-                            .cloned()
-                            .unwrap_or(AbstractValue::default());
                         log::trace!(" -> have value {} with abs {:?}", data, abs);
-                        return Ok(EvalResult::Alias(abs, *data));
+                        return Ok(EvalResult::Alias(*abs, *data));
                     }
                     None => {
                         // Create the original load, so we have access
@@ -1093,9 +1090,10 @@ impl<'a> Evaluator<'a> {
                                 ty: tys[0],
                                 addr: vals[0],
                                 dirty: false,
+                                abs: abs[0],
                             },
                         );
-                        return Ok(EvalResult::Alias(AbstractValue::default(), l));
+                        return Ok(EvalResult::Alias(abs[0], l));
                     }
                     Some(v) => {
                         anyhow::bail!("Bad MemValue: {:?}", v);
@@ -1121,6 +1119,7 @@ impl<'a> Evaluator<'a> {
                         ty: data_ty,
                         addr: vals[0],
                         dirty: true,
+                        abs: abs[1],
                     },
                 );
 

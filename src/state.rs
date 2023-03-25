@@ -108,8 +108,9 @@ pub enum MemValue {
         ty: Type,
         addr: Value,
         dirty: bool,
+        abs: AbstractValue,
     },
-    TypedMerge(Type),
+    TypedMerge(Type, AbstractValue),
     Conflict,
 }
 
@@ -117,15 +118,26 @@ impl MemValue {
     fn meet(a: MemValue, b: MemValue) -> MemValue {
         match (a, b) {
             (a, b) if a == b => a,
-            (MemValue::Value { ty: ty1, .. }, MemValue::Value { ty: ty2, .. }) if ty1 == ty2 => {
-                MemValue::TypedMerge(ty1)
-            }
-            (MemValue::TypedMerge(ty), MemValue::Value { ty: ty1, .. })
-            | (MemValue::Value { ty: ty1, .. }, MemValue::TypedMerge(ty))
-                if ty == ty1 =>
-            {
-                MemValue::TypedMerge(ty)
-            }
+            (
+                MemValue::Value {
+                    ty: ty1, abs: abs1, ..
+                },
+                MemValue::Value {
+                    ty: ty2, abs: abs2, ..
+                },
+            ) if ty1 == ty2 => MemValue::TypedMerge(ty1, AbstractValue::meet(abs1, abs2)),
+            (
+                MemValue::TypedMerge(ty, abs),
+                MemValue::Value {
+                    ty: ty1, abs: abs1, ..
+                },
+            )
+            | (
+                MemValue::Value {
+                    ty: ty1, abs: abs1, ..
+                },
+                MemValue::TypedMerge(ty, abs),
+            ) if ty == ty1 => MemValue::TypedMerge(ty, AbstractValue::meet(abs, abs1)),
             _ => {
                 log::trace!("Values {:?} and {:?} meeting to Conflict", a, b);
                 MemValue::Conflict
@@ -143,7 +155,7 @@ impl MemValue {
     pub fn to_type(&self) -> Option<Type> {
         match self {
             MemValue::Value { ty, .. } => Some(*ty),
-            MemValue::TypedMerge(ty) => Some(*ty),
+            MemValue::TypedMerge(ty, _) => Some(*ty),
             _ => None,
         }
     }
@@ -266,10 +278,10 @@ impl ProgPointState {
 
     pub fn update_across_edge(&mut self) {
         for value in self.mem_overlay.values_mut() {
-            if let MemValue::Value { ty, .. } = *value {
+            if let MemValue::Value { ty, abs, .. } = *value {
                 // Ensure all mem-overlay values become blockparams,
                 // even if only one pred.
-                *value = MemValue::TypedMerge(ty);
+                *value = MemValue::TypedMerge(ty, abs);
             }
         }
     }
@@ -288,12 +300,13 @@ impl ProgPointState {
         for (&addr, value) in &mut self.mem_overlay {
             match *value {
                 MemValue::Value { .. } => {}
-                MemValue::TypedMerge(ty) => {
+                MemValue::TypedMerge(ty, abs) => {
                     let (addr, param) = get_blockparam(ctx, addr, ty);
                     *value = MemValue::Value {
                         data: param,
                         ty,
                         addr,
+                        abs,
                         // We could recover some notion of clean
                         // values (same as in memory, just loads we've
                         // already done) if we had a postpass to know
