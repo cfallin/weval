@@ -94,26 +94,24 @@ pub fn partially_evaluate(
                 .map(|tuple| (directive, tuple))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    for (directive, tuple) in bodies {
-        if let Some((body, sig, name)) = tuple {
-            // Add function to module.
-            let func = module.funcs.push(FuncDecl::Body(sig, name, body));
-            // Append to table.
-            let func_table = &mut module.tables[Table::from(0)];
-            let table_idx = {
-                let func_table_elts = func_table.func_elements.as_mut().unwrap();
-                let table_idx = func_table_elts.len();
-                func_table_elts.push(func);
-                table_idx
-            } as u32;
-            if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
-                func_table.max = Some(table_idx + 1);
-            }
-            log::info!("New func index {} -> table index {}", func, table_idx);
-            log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
-            // Update memory image.
-            mem_updates.insert(directive.func_index_out_addr, table_idx);
+    for (directive, (body, sig, name)) in bodies {
+        // Add function to module.
+        let func = module.funcs.push(FuncDecl::Body(sig, name, body));
+        // Append to table.
+        let func_table = &mut module.tables[Table::from(0)];
+        let table_idx = {
+            let func_table_elts = func_table.func_elements.as_mut().unwrap();
+            let table_idx = func_table_elts.len();
+            func_table_elts.push(func);
+            table_idx
+        } as u32;
+        if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
+            func_table.max = Some(table_idx + 1);
         }
+        log::info!("New func index {} -> table index {}", func, table_idx);
+        log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
+        // Update memory image.
+        mem_updates.insert(directive.func_index_out_addr, table_idx);
     }
 
     // Update memory.
@@ -131,7 +129,7 @@ fn partially_evaluate_func(
     image: &Image,
     intrinsics: &Intrinsics,
     directive: &Directive,
-) -> anyhow::Result<Option<(FunctionBody, Signature, String)>> {
+) -> anyhow::Result<(FunctionBody, Signature, String)> {
     let orig_name = module.funcs[directive.func].name();
     let sig = module.funcs[directive.func].sig();
 
@@ -179,7 +177,7 @@ fn partially_evaluate_func(
     );
     let name = format!("{} (specialized)", orig_name);
     evaluator.func.optimize();
-    Ok(Some((evaluator.func, sig, name)))
+    Ok((evaluator.func, sig, name))
 }
 
 fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {
