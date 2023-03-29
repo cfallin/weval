@@ -52,7 +52,7 @@ impl std::convert::TryFrom<waffle::Operator> for WasmVal {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AbstractValue {
     /// "top" default value; undefined.
     #[default]
@@ -67,6 +67,13 @@ pub enum AbstractValue {
     /// values can be used as pointers to read
     /// const-at-specialization-time memory.
     Concrete(WasmVal, ValueTags),
+    /// A value known to be within a range at specialization time, to
+    /// be used as a switch selector.
+    ///
+    /// Evaluated as a vector of Concrete values.
+    SwitchValue(Vec<WasmVal>),
+    /// A concrete value to be used as the default value for a switch.
+    SwitchDefault(WasmVal),
     /// A value only computed at runtime. The instruction that
     /// computed it is specified, if known.
     Runtime(Option<waffle::Value>, ValueTags),
@@ -125,6 +132,9 @@ impl AbstractValue {
             &AbstractValue::SymbolicPtr(_, _) => ValueTags::default(),
             &AbstractValue::Concrete(_, t) => t,
             &AbstractValue::Runtime(_, t) => t,
+            &AbstractValue::SwitchValue(..) | &AbstractValue::SwitchDefault(..) => {
+                ValueTags::default()
+            }
         }
     }
 
@@ -134,15 +144,16 @@ impl AbstractValue {
             &AbstractValue::SymbolicPtr(l, off) => AbstractValue::SymbolicPtr(l, off),
             &AbstractValue::Concrete(k, t) => AbstractValue::Concrete(k, t | new_tags),
             &AbstractValue::Runtime(v, t) => AbstractValue::Runtime(v, t | new_tags),
+            &AbstractValue::SwitchValue(..) | &AbstractValue::SwitchDefault(..) => self.clone(),
         }
     }
 
-    pub fn meet(a: AbstractValue, b: AbstractValue) -> AbstractValue {
+    pub fn meet(a: &AbstractValue, b: &AbstractValue) -> AbstractValue {
         match (a, b) {
-            (AbstractValue::Top, x) | (x, AbstractValue::Top) => x,
-            (x, y) if x == y => x,
+            (AbstractValue::Top, x) | (x, AbstractValue::Top) => x.clone(),
+            (x, y) if x == y => x.clone(),
             (AbstractValue::Concrete(a, t1), AbstractValue::Concrete(b, t2)) if a == b => {
-                AbstractValue::Concrete(a, t1.meet(t2))
+                AbstractValue::Concrete(*a, t1.meet(*t2))
             }
             (av1, av2) => {
                 log::trace!("values {:?} and {:?} meet to Runtime", av1, av2);
@@ -151,7 +162,7 @@ impl AbstractValue {
         }
     }
 
-    pub fn prop_sticky_tags(self, other: AbstractValue) -> AbstractValue {
+    pub fn prop_sticky_tags(self, other: &AbstractValue) -> AbstractValue {
         self.with_tags(other.tags().sticky())
     }
 

@@ -14,6 +14,8 @@ pub struct Intrinsics {
     pub trace_line: Option<Func>,
     pub assert_const32: Option<Func>,
     pub assert_const_memory: Option<Func>,
+    pub switch_value: Option<Func>,
+    pub switch_default: Option<Func>,
 }
 
 impl Intrinsics {
@@ -31,12 +33,7 @@ impl Intrinsics {
                 &[Type::I32],
                 &[Type::I32],
             ),
-            flush_to_mem: find_exported_func(
-                module,
-                "weval.flush.to.mem",
-                &[],
-                &[],
-            ),
+            flush_to_mem: find_exported_func(module, "weval.flush.to.mem", &[], &[]),
             push_context: find_exported_func(module, "weval.push.context", &[Type::I32], &[]),
             pop_context: find_exported_func(module, "weval.pop.context", &[], &[]),
             update_context: find_exported_func(module, "weval.update.context", &[Type::I32], &[]),
@@ -58,6 +55,18 @@ impl Intrinsics {
                 "weval.assert.const.memory",
                 &[Type::I32, Type::I32],
                 &[],
+            ),
+            switch_value: find_exported_func(
+                module,
+                "weval.switch.value",
+                &[Type::I32, Type::I32],
+                &[Type::I32],
+            ),
+            switch_default: find_exported_func(
+                module,
+                "weval.switch.default",
+                &[Type::I32],
+                &[Type::I32],
             ),
         }
     }

@@ -321,11 +321,11 @@ impl<'a> Evaluator<'a> {
             orig_block,
             context
         );
-        if let Some(&abs) = self.state.state[context].ssa.values.get(&orig_val) {
+        if let Some(abs) = self.state.state[context].ssa.values.get(&orig_val) {
             log::trace!(" -> found abstract  value {:?} at context {}", abs, context);
             let &val = self.value_map.get(&(context, orig_val)).unwrap();
             log::trace!(" -> runtime value {}", val);
-            return (val, abs);
+            return (val, abs.clone());
         }
         panic!(
             "Could not find value for {} in context {}",
@@ -357,7 +357,7 @@ impl<'a> Evaluator<'a> {
             }
             BTreeEntry::Occupied(mut o) => {
                 let val_abs = o.get_mut();
-                let updated = AbstractValue::meet(*val_abs, abs);
+                let updated = AbstractValue::meet(val_abs, &abs);
                 let changed = updated != *val_abs;
                 log::trace!(
                     " -> meet: cur {:?} input {:?} result {:?} (changed: {})",
@@ -632,16 +632,16 @@ impl<'a> Evaluator<'a> {
         for &arg in &target.args {
             let arg = self.generic.resolve_alias(arg);
             let (val, abs) = self.use_value(state.context, orig_block, arg);
-            args.push(val);
-            abs_args.push(abs);
             log::trace!(
                 "blockparam: block {} context {}: arg {} has val {} abs {:?}",
                 orig_block,
                 state.context,
                 arg,
                 val,
-                abs
+                abs,
             );
+            args.push(val);
+            abs_args.push(abs);
         }
 
         // Parallel-move semantics: read all uses above, then write
@@ -657,7 +657,7 @@ impl<'a> Evaluator<'a> {
             log::trace!(
                 "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?}",
                 target.block, target_ctx, blockparam, val, abs);
-            changed |= self.def_value(orig_block, target_ctx, blockparam, val, *abs);
+            changed |= self.def_value(orig_block, target_ctx, blockparam, val, abs.clone());
         }
 
         // If blockparam inputs changed, re-enqueue target for evaluation.
@@ -801,16 +801,17 @@ impl<'a> Evaluator<'a> {
                 1 => self.abstract_eval_unary(
                     orig_inst,
                     op,
-                    abs[0],
+                    &abs[0],
                     values[0],
                     orig_values[0],
                     state,
                 )?,
                 2 => self.abstract_eval_binary(
-                    orig_inst, op, abs[0], abs[1], values[0], values[1], state,
+                    orig_inst, op, &abs[0], &abs[1], values[0], values[1], state,
                 ),
                 3 => self.abstract_eval_ternary(
-                    orig_inst, op, abs[0], abs[1], abs[2], values[0], values[1], values[2], state,
+                    orig_inst, op, &abs[0], &abs[1], &abs[2], values[0], values[1], values[2],
+                    state,
                 ),
                 _ => {
                     let tags = abs
@@ -1069,7 +1070,7 @@ impl<'a> Evaluator<'a> {
                         abs,
                     }) if *ty == expected_ty => {
                         log::trace!(" -> have value {} with abs {:?}", data, abs);
-                        return Ok(EvalResult::Alias(*abs, *data));
+                        return Ok(EvalResult::Alias(abs.clone(), *data));
                     }
                     None => {
                         // Create the original load, so we have access
@@ -1088,10 +1089,10 @@ impl<'a> Evaluator<'a> {
                                 ty: tys[0],
                                 addr: vals[0],
                                 dirty: false,
-                                abs: abs[0],
+                                abs: abs[0].clone(),
                             },
                         );
-                        return Ok(EvalResult::Alias(abs[0], l));
+                        return Ok(EvalResult::Alias(abs[0].clone(), l));
                     }
                     Some(v) => {
                         anyhow::bail!("Bad MemValue: {:?}", v);
@@ -1117,7 +1118,7 @@ impl<'a> Evaluator<'a> {
                         ty: data_ty,
                         addr: vals[0],
                         dirty: true,
-                        abs: abs[1],
+                        abs: abs[1].clone(),
                     },
                 );
 
@@ -1156,7 +1157,7 @@ impl<'a> Evaluator<'a> {
         // We exclude calls, because we flush all memory-renamed
         // values back to memory before every call.
         if !op.is_call() && op.accesses_memory() {
-            for &a in abs {
+            for a in abs {
                 if a.tags().contains(ValueTags::symbolic_ptr_taint()) {
                     log::trace!(
                         "abs {:?} flowing into op {} (args {:?}) causes label escape",
@@ -1206,66 +1207,66 @@ impl<'a> Evaluator<'a> {
         &mut self,
         orig_inst: Value,
         op: Operator,
-        x: AbstractValue,
+        x: &AbstractValue,
         _x_val: Value,
         orig_x_val: Value,
         state: &mut PointState,
     ) -> anyhow::Result<AbstractValue> {
         let result = match (op, x) {
             (Operator::GlobalSet { global_index }, av) => {
-                state.flow.globals.insert(global_index, av);
+                state.flow.globals.insert(global_index, av.clone());
                 Ok(AbstractValue::Runtime(
                     Some(orig_inst),
                     ValueTags::default(),
                 ))
             }
             (Operator::I32Eqz, AbstractValue::Concrete(WasmVal::I32(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I32(if k == 0 { 1 } else { 0 }), t),
+                AbstractValue::Concrete(WasmVal::I32(if *k == 0 { 1 } else { 0 }), *t),
             ),
             (Operator::I64Eqz, AbstractValue::Concrete(WasmVal::I64(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(if k == 0 { 1 } else { 0 }), t),
+                AbstractValue::Concrete(WasmVal::I64(if *k == 0 { 1 } else { 0 }), *t),
             ),
             (Operator::I32Extend8S, AbstractValue::Concrete(WasmVal::I32(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I32(k as i8 as i32 as u32), t),
+                AbstractValue::Concrete(WasmVal::I32(*k as i8 as i32 as u32), *t),
             ),
             (Operator::I32Extend16S, AbstractValue::Concrete(WasmVal::I32(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I32(k as i16 as i32 as u32), t),
+                AbstractValue::Concrete(WasmVal::I32(*k as i16 as i32 as u32), *t),
             ),
             (Operator::I64Extend8S, AbstractValue::Concrete(WasmVal::I64(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k as i8 as i64 as u64), t),
+                AbstractValue::Concrete(WasmVal::I64(*k as i8 as i64 as u64), *t),
             ),
             (Operator::I64Extend16S, AbstractValue::Concrete(WasmVal::I64(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k as i16 as i64 as u64), t),
+                AbstractValue::Concrete(WasmVal::I64(*k as i16 as i64 as u64), *t),
             ),
             (Operator::I64Extend32S, AbstractValue::Concrete(WasmVal::I64(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k as i32 as i64 as u64), t),
+                AbstractValue::Concrete(WasmVal::I64(*k as i32 as i64 as u64), *t),
             ),
             (Operator::I32Clz, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
-                Ok(AbstractValue::Concrete(WasmVal::I32(k.leading_zeros()), t))
+                Ok(AbstractValue::Concrete(WasmVal::I32(k.leading_zeros()), *t))
             }
             (Operator::I64Clz, AbstractValue::Concrete(WasmVal::I64(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k.leading_zeros() as u64), t),
+                AbstractValue::Concrete(WasmVal::I64(k.leading_zeros() as u64), *t),
             ),
-            (Operator::I32Ctz, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
-                Ok(AbstractValue::Concrete(WasmVal::I32(k.trailing_zeros()), t))
-            }
+            (Operator::I32Ctz, AbstractValue::Concrete(WasmVal::I32(k), t)) => Ok(
+                AbstractValue::Concrete(WasmVal::I32(k.trailing_zeros()), *t),
+            ),
             (Operator::I64Ctz, AbstractValue::Concrete(WasmVal::I64(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k.trailing_zeros() as u64), t),
+                AbstractValue::Concrete(WasmVal::I64(k.trailing_zeros() as u64), *t),
             ),
             (Operator::I32Popcnt, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
-                Ok(AbstractValue::Concrete(WasmVal::I32(k.count_ones()), t))
+                Ok(AbstractValue::Concrete(WasmVal::I32(k.count_ones()), *t))
             }
             (Operator::I64Popcnt, AbstractValue::Concrete(WasmVal::I64(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k.count_ones() as u64), t),
+                AbstractValue::Concrete(WasmVal::I64(k.count_ones() as u64), *t),
             ),
             (Operator::I32WrapI64, AbstractValue::Concrete(WasmVal::I64(k), t)) => {
-                Ok(AbstractValue::Concrete(WasmVal::I32(k as u32), t))
+                Ok(AbstractValue::Concrete(WasmVal::I32(*k as u32), *t))
             }
             (Operator::I64ExtendI32S, AbstractValue::Concrete(WasmVal::I32(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k as i32 as i64 as u64), t),
+                AbstractValue::Concrete(WasmVal::I64(*k as i32 as i64 as u64), *t),
             ),
             (Operator::I64ExtendI32U, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
-                Ok(AbstractValue::Concrete(WasmVal::I64(k as u64), t))
+                Ok(AbstractValue::Concrete(WasmVal::I64(*k as u64), *t))
             }
 
             (Operator::I32Load { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
@@ -1367,15 +1368,15 @@ impl<'a> Evaluator<'a> {
         &mut self,
         orig_inst: Value,
         op: Operator,
-        x: AbstractValue,
-        y: AbstractValue,
+        x: &AbstractValue,
+        y: &AbstractValue,
         _x_val: Value,
         _y_val: Value,
         _state: &mut PointState,
     ) -> AbstractValue {
         let result = match (x, y) {
             (AbstractValue::Concrete(v1, tag1), AbstractValue::Concrete(v2, tag2)) => {
-                let tags = tag1.meet(tag2);
+                let tags = tag1.meet(*tag2);
                 let derived_ptr_tags = if tag1.contains(ValueTags::const_memory())
                     || tag2.contains(ValueTags::const_memory())
                 {
@@ -1393,7 +1394,7 @@ impl<'a> Evaluator<'a> {
                     }
                     (Operator::I32LtS, WasmVal::I32(k1), WasmVal::I32(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I32(if (k1 as i32) < (k2 as i32) { 1 } else { 0 }),
+                            WasmVal::I32(if (*k1 as i32) < (*k2 as i32) { 1 } else { 0 }),
                             tags,
                         )
                     }
@@ -1402,7 +1403,7 @@ impl<'a> Evaluator<'a> {
                     }
                     (Operator::I32GtS, WasmVal::I32(k1), WasmVal::I32(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I32(if (k1 as i32) > (k2 as i32) { 1 } else { 0 }),
+                            WasmVal::I32(if (*k1 as i32) > (*k2 as i32) { 1 } else { 0 }),
                             tags,
                         )
                     }
@@ -1411,7 +1412,7 @@ impl<'a> Evaluator<'a> {
                     }
                     (Operator::I32LeS, WasmVal::I32(k1), WasmVal::I32(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I32(if (k1 as i32) <= (k2 as i32) { 1 } else { 0 }),
+                            WasmVal::I32(if (*k1 as i32) <= (*k2 as i32) { 1 } else { 0 }),
                             tags,
                         )
                     }
@@ -1420,7 +1421,7 @@ impl<'a> Evaluator<'a> {
                     }
                     (Operator::I32GeS, WasmVal::I32(k1), WasmVal::I32(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I32(if (k1 as i32) >= (k2 as i32) { 1 } else { 0 }),
+                            WasmVal::I32(if (*k1 as i32) >= (*k2 as i32) { 1 } else { 0 }),
                             tags,
                         )
                     }
@@ -1437,7 +1438,7 @@ impl<'a> Evaluator<'a> {
                     }
                     (Operator::I64LtS, WasmVal::I64(k1), WasmVal::I64(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I64(if (k1 as i64) < (k2 as i64) { 1 } else { 0 }),
+                            WasmVal::I64(if (*k1 as i64) < (*k2 as i64) { 1 } else { 0 }),
                             tags,
                         )
                     }
@@ -1446,7 +1447,7 @@ impl<'a> Evaluator<'a> {
                     }
                     (Operator::I64GtS, WasmVal::I64(k1), WasmVal::I64(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I64(if (k1 as i64) > (k2 as i64) { 1 } else { 0 }),
+                            WasmVal::I64(if (*k1 as i64) > (*k2 as i64) { 1 } else { 0 }),
                             tags,
                         )
                     }
@@ -1455,7 +1456,7 @@ impl<'a> Evaluator<'a> {
                     }
                     (Operator::I64LeS, WasmVal::I64(k1), WasmVal::I64(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I64(if (k1 as i64) <= (k2 as i64) { 1 } else { 0 }),
+                            WasmVal::I64(if (*k1 as i64) <= (*k2 as i64) { 1 } else { 0 }),
                             tags,
                         )
                     }
@@ -1464,7 +1465,7 @@ impl<'a> Evaluator<'a> {
                     }
                     (Operator::I64GeS, WasmVal::I64(k1), WasmVal::I64(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I64(if (k1 as i64) >= (k2 as i64) { 1 } else { 0 }),
+                            WasmVal::I64(if (*k1 as i64) >= (*k2 as i64) { 1 } else { 0 }),
                             tags,
                         )
                     }
@@ -1474,33 +1475,39 @@ impl<'a> Evaluator<'a> {
 
                     // 32-bit integer arithmetic.
                     (Operator::I32Add, WasmVal::I32(k1), WasmVal::I32(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_add(k2)), derived_ptr_tags)
+                        AbstractValue::Concrete(
+                            WasmVal::I32(k1.wrapping_add(*k2)),
+                            derived_ptr_tags,
+                        )
                     }
                     (Operator::I32Sub, WasmVal::I32(k1), WasmVal::I32(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_sub(k2)), derived_ptr_tags)
+                        AbstractValue::Concrete(
+                            WasmVal::I32(k1.wrapping_sub(*k2)),
+                            derived_ptr_tags,
+                        )
                     }
                     (Operator::I32Mul, WasmVal::I32(k1), WasmVal::I32(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_mul(k2)), tags)
+                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_mul(*k2)), tags)
                     }
-                    (Operator::I32DivU, WasmVal::I32(k1), WasmVal::I32(k2)) if k2 != 0 => {
-                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_div(k2)), tags)
+                    (Operator::I32DivU, WasmVal::I32(k1), WasmVal::I32(k2)) if *k2 != 0 => {
+                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_div(*k2)), tags)
                     }
                     (Operator::I32DivS, WasmVal::I32(k1), WasmVal::I32(k2))
-                        if k2 != 0 && (k1 != 0x8000_0000 || k2 != 0xffff_ffff) =>
+                        if *k2 != 0 && (*k1 != 0x8000_0000 || *k2 != 0xffff_ffff) =>
                     {
                         AbstractValue::Concrete(
-                            WasmVal::I32((k1 as i32).wrapping_div(k2 as i32) as u32),
+                            WasmVal::I32((*k1 as i32).wrapping_div(*k2 as i32) as u32),
                             tags,
                         )
                     }
-                    (Operator::I32RemU, WasmVal::I32(k1), WasmVal::I32(k2)) if k2 != 0 => {
-                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_rem(k2)), tags)
+                    (Operator::I32RemU, WasmVal::I32(k1), WasmVal::I32(k2)) if *k2 != 0 => {
+                        AbstractValue::Concrete(WasmVal::I32(k1.wrapping_rem(*k2)), tags)
                     }
                     (Operator::I32RemS, WasmVal::I32(k1), WasmVal::I32(k2))
-                        if k2 != 0 && (k1 != 0x8000_0000 || k2 != 0xffff_ffff) =>
+                        if *k2 != 0 && (*k1 != 0x8000_0000 || *k2 != 0xffff_ffff) =>
                     {
                         AbstractValue::Concrete(
-                            WasmVal::I32((k1 as i32).wrapping_rem(k2 as i32) as u32),
+                            WasmVal::I32((*k1 as i32).wrapping_rem(*k2 as i32) as u32),
                             tags,
                         )
                     }
@@ -1521,7 +1528,7 @@ impl<'a> Evaluator<'a> {
                     }
                     (Operator::I32ShrS, WasmVal::I32(k1), WasmVal::I32(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I32((k1 as i32).wrapping_shr(k2 & 0x1f) as u32),
+                            WasmVal::I32((*k1 as i32).wrapping_shr(*k2 & 0x1f) as u32),
                             tags,
                         )
                     }
@@ -1538,72 +1545,78 @@ impl<'a> Evaluator<'a> {
 
                     // 64-bit integer arithmetic.
                     (Operator::I64Add, WasmVal::I64(k1), WasmVal::I64(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_add(k2)), derived_ptr_tags)
+                        AbstractValue::Concrete(
+                            WasmVal::I64(k1.wrapping_add(*k2)),
+                            derived_ptr_tags,
+                        )
                     }
                     (Operator::I64Sub, WasmVal::I64(k1), WasmVal::I64(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_sub(k2)), derived_ptr_tags)
+                        AbstractValue::Concrete(
+                            WasmVal::I64(k1.wrapping_sub(*k2)),
+                            derived_ptr_tags,
+                        )
                     }
                     (Operator::I64Mul, WasmVal::I64(k1), WasmVal::I64(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_mul(k2)), tags)
+                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_mul(*k2)), tags)
                     }
-                    (Operator::I64DivU, WasmVal::I64(k1), WasmVal::I64(k2)) if k2 != 0 => {
-                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_div(k2)), tags)
+                    (Operator::I64DivU, WasmVal::I64(k1), WasmVal::I64(k2)) if *k2 != 0 => {
+                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_div(*k2)), tags)
                     }
                     (Operator::I64DivS, WasmVal::I64(k1), WasmVal::I64(k2))
-                        if k2 != 0
-                            && (k1 != 0x8000_0000_0000_0000 || k2 != 0xffff_ffff_ffff_ffff) =>
+                        if *k2 != 0
+                            && (*k1 != 0x8000_0000_0000_0000 || *k2 != 0xffff_ffff_ffff_ffff) =>
                     {
                         AbstractValue::Concrete(
-                            WasmVal::I64((k1 as i64).wrapping_div(k2 as i64) as u64),
+                            WasmVal::I64((*k1 as i64).wrapping_div(*k2 as i64) as u64),
                             tags,
                         )
                     }
-                    (Operator::I64RemU, WasmVal::I64(k1), WasmVal::I64(k2)) if k2 != 0 => {
-                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_rem(k2)), tags)
+                    (Operator::I64RemU, WasmVal::I64(k1), WasmVal::I64(k2)) if *k2 != 0 => {
+                        AbstractValue::Concrete(WasmVal::I64(k1.wrapping_rem(*k2)), tags)
                     }
                     (Operator::I64RemS, WasmVal::I64(k1), WasmVal::I64(k2))
-                        if k2 != 0
-                            && (k1 != 0x8000_0000_0000_0000 || k2 != 0xffff_ffff_ffff_ffff) =>
+                        if *k2 != 0
+                            && (*k1 != 0x8000_0000_0000_0000 || *k2 != 0xffff_ffff_ffff_ffff) =>
                     {
                         AbstractValue::Concrete(
-                            WasmVal::I64((k1 as i64).wrapping_rem(k2 as i64) as u64),
+                            WasmVal::I64((*k1 as i64).wrapping_rem(*k2 as i64) as u64),
                             tags,
                         )
                     }
                     (Operator::I64And, WasmVal::I64(k1), WasmVal::I64(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I64(k1 & k2), tags)
+                        AbstractValue::Concrete(WasmVal::I64(*k1 & *k2), tags)
                     }
                     (Operator::I64Or, WasmVal::I64(k1), WasmVal::I64(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I64(k1 | k2), tags)
+                        AbstractValue::Concrete(WasmVal::I64(*k1 | *k2), tags)
                     }
                     (Operator::I64Xor, WasmVal::I64(k1), WasmVal::I64(k2)) => {
-                        AbstractValue::Concrete(WasmVal::I64(k1 ^ k2), tags)
+                        AbstractValue::Concrete(WasmVal::I64(*k1 ^ *k2), tags)
                     }
                     (Operator::I64Shl, WasmVal::I64(k1), WasmVal::I64(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I64(k1.wrapping_shl((k2 & 0x3f) as u32)),
+                            WasmVal::I64(k1.wrapping_shl((*k2 & 0x3f) as u32)),
                             tags,
                         )
                     }
                     (Operator::I64ShrU, WasmVal::I64(k1), WasmVal::I64(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I64(k1.wrapping_shr((k2 & 0x3f) as u32)),
+                            WasmVal::I64(k1.wrapping_shr((*k2 & 0x3f) as u32)),
                             tags,
                         )
                     }
                     (Operator::I64ShrS, WasmVal::I64(k1), WasmVal::I64(k2)) => {
                         AbstractValue::Concrete(
-                            WasmVal::I64((k1 as i64).wrapping_shr((k2 & 0x3f) as u32) as u64),
+                            WasmVal::I64((*k1 as i64).wrapping_shr((*k2 & 0x3f) as u32) as u64),
                             tags,
                         )
                     }
                     (Operator::I64Rotl, WasmVal::I64(k1), WasmVal::I64(k2)) => {
-                        let amt = (k2 & 0x3f) as u32;
+                        let amt = (*k2 & 0x3f) as u32;
                         let result = k1.wrapping_shl(amt) | k1.wrapping_shr(64 - amt);
                         AbstractValue::Concrete(WasmVal::I64(result), tags)
                     }
                     (Operator::I64Rotr, WasmVal::I64(k1), WasmVal::I64(k2)) => {
-                        let amt = (k2 & 0x3f) as u32;
+                        let amt = (*k2 & 0x3f) as u32;
                         let result = k1.wrapping_shr(amt) | k1.wrapping_shl(64 - amt);
                         AbstractValue::Concrete(WasmVal::I64(result), tags)
                     }
@@ -1622,9 +1635,9 @@ impl<'a> Evaluator<'a> {
         &mut self,
         orig_inst: Value,
         op: Operator,
-        x: AbstractValue,
-        y: AbstractValue,
-        z: AbstractValue,
+        x: &AbstractValue,
+        y: &AbstractValue,
+        z: &AbstractValue,
         _x_val: Value,
         _y_val: Value,
         _z_val: Value,
@@ -1634,9 +1647,9 @@ impl<'a> Evaluator<'a> {
             (Operator::Select, AbstractValue::Concrete(v, _t))
             | (Operator::TypedSelect { .. }, AbstractValue::Concrete(v, _t)) => {
                 if v.is_truthy() {
-                    x
+                    x.clone()
                 } else {
-                    y
+                    y.clone()
                 }
             }
             _ => AbstractValue::Runtime(Some(orig_inst), ValueTags::default()),
@@ -1655,7 +1668,7 @@ impl<'a> Evaluator<'a> {
         for (&(ctx, orig_block), &block) in &self.block_map {
             let succ_state = self.state.state[ctx].block_entry.get(&orig_block).unwrap();
 
-            for (&addr, &val) in &succ_state.mem_overlay {
+            for (&addr, val) in &succ_state.mem_overlay {
                 let ty = val.to_type().ok_or_else(|| {
                     anyhow::anyhow!(
                         "Inconsistent type on symbolic addr {:?} at block {}",
@@ -1691,7 +1704,7 @@ impl<'a> Evaluator<'a> {
                 let pred_succ_idx = self.func.blocks[block].pos_in_pred_succ[pred_idx];
 
                 for &addr in succ_state.mem_overlay.keys() {
-                    let pred_val = *pred_state.mem_overlay.get(&addr).unwrap();
+                    let pred_val = pred_state.mem_overlay.get(&addr).unwrap();
                     let (pred_addr, pred_val) = pred_val.to_addr_and_value().unwrap();
                     self.func.blocks[pred]
                         .terminator

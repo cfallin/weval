@@ -101,7 +101,7 @@ pub struct ProgPointState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SymbolicAddr(pub u32, pub i64);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemValue {
     Value {
         data: Value,
@@ -115,9 +115,9 @@ pub enum MemValue {
 }
 
 impl MemValue {
-    fn meet(a: MemValue, b: MemValue) -> MemValue {
+    fn meet(a: &MemValue, b: &MemValue) -> MemValue {
         match (a, b) {
-            (a, b) if a == b => a,
+            (a, b) if a == b => a.clone(),
             (
                 MemValue::Value {
                     ty: ty1, abs: abs1, ..
@@ -125,7 +125,7 @@ impl MemValue {
                 MemValue::Value {
                     ty: ty2, abs: abs2, ..
                 },
-            ) if ty1 == ty2 => MemValue::TypedMerge(ty1, AbstractValue::meet(abs1, abs2)),
+            ) if ty1 == ty2 => MemValue::TypedMerge(*ty1, AbstractValue::meet(abs1, abs2)),
             (
                 MemValue::TypedMerge(ty, abs),
                 MemValue::Value {
@@ -137,7 +137,7 @@ impl MemValue {
                     ty: ty1, abs: abs1, ..
                 },
                 MemValue::TypedMerge(ty, abs),
-            ) if ty == ty1 => MemValue::TypedMerge(ty, AbstractValue::meet(abs, abs1)),
+            ) if ty == ty1 => MemValue::TypedMerge(*ty, AbstractValue::meet(abs, abs1)),
             _ => {
                 log::trace!("Values {:?} and {:?} meeting to Conflict", a, b);
                 MemValue::Conflict
@@ -189,8 +189,8 @@ pub struct PointState {
 
 fn map_meet_with<
     K: PartialEq + Eq + PartialOrd + Ord + Copy,
-    V: Copy + PartialEq + Eq,
-    Meet: Fn(V, V) -> V,
+    V: Clone + PartialEq + Eq,
+    Meet: Fn(&V, &V) -> V,
 >(
     this: &mut BTreeMap<K, V>,
     other: &BTreeMap<K, V>,
@@ -201,13 +201,13 @@ fn map_meet_with<
     let mut to_remove = vec![];
     for (k, val) in this.iter_mut() {
         if let Some(other_val) = other.get(k) {
-            let met = meet(*val, *other_val);
+            let met = meet(val, other_val);
             changed |= met != *val;
             *val = met;
         } else {
-            let old = *val;
-            if let Some(bot) = bot {
-                *val = bot;
+            let old = val.clone();
+            if let Some(bot) = bot.as_ref() {
+                *val = bot.clone();
                 changed |= old != *val;
             } else {
                 to_remove.push(k.clone());
@@ -220,8 +220,8 @@ fn map_meet_with<
     }
     for other_k in other.keys() {
         if !this.contains_key(other_k) {
-            if let Some(bot) = bot {
-                this.insert(*other_k, bot);
+            if let Some(bot) = bot.as_ref() {
+                this.insert(*other_k, bot.clone());
             } else {
                 this.remove(other_k);
             }
@@ -278,10 +278,10 @@ impl ProgPointState {
 
     pub fn update_across_edge(&mut self) {
         for value in self.mem_overlay.values_mut() {
-            if let MemValue::Value { ty, abs, .. } = *value {
+            if let MemValue::Value { ty, abs, .. } = value {
                 // Ensure all mem-overlay values become blockparams,
                 // even if only one pred.
-                *value = MemValue::TypedMerge(ty, abs);
+                *value = MemValue::TypedMerge(*ty, abs.clone());
             }
         }
     }
@@ -298,15 +298,15 @@ impl ProgPointState {
     ) -> anyhow::Result<()> {
         let mut to_remove = vec![];
         for (&addr, value) in &mut self.mem_overlay {
-            match *value {
+            match value {
                 MemValue::Value { .. } => {}
                 MemValue::TypedMerge(ty, abs) => {
-                    let (addr, param) = get_blockparam(ctx, addr, ty);
+                    let (addr, param) = get_blockparam(ctx, addr, *ty);
                     *value = MemValue::Value {
                         data: param,
-                        ty,
+                        ty: *ty,
                         addr,
-                        abs,
+                        abs: abs.clone(),
                         // We could recover some notion of clean
                         // values (same as in memory, just loads we've
                         // already done) if we had a postpass to know
@@ -353,7 +353,7 @@ impl FunctionState {
             .iter()
             .zip(args.iter())
         {
-            self.state[ctx].ssa.values.insert(*orig_value, *abs);
+            self.state[ctx].ssa.values.insert(*orig_value, abs.clone());
         }
         (ctx, ProgPointState::entry(im))
     }
