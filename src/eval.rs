@@ -954,6 +954,22 @@ impl<'a> Evaluator<'a> {
                         panic!("weval_assert_const_memory() failed: line {:?}", abs[1]);
                     }
                     EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.switch_value {
+                    if let Some(limit) = abs[1].is_const_u32() {
+                        let vals = (0..limit).map(WasmVal::I32).collect::<Vec<_>>();
+                        EvalResult::Alias(AbstractValue::SwitchValue(vals, None), values[0])
+                    } else {
+                        panic!("Limit to weval_switch_value() is not a constant");
+                    }
+                } else if Some(function_index) == self.intrinsics.switch_default {
+                    if let Some(default) = abs[0].is_const_u32() {
+                        EvalResult::Alias(
+                            AbstractValue::SwitchDefault(WasmVal::I32(default)),
+                            values[0],
+                        )
+                    } else {
+                        panic!("Default index arg to weval_switch_default() is not a constant");
+                    }
                 } else {
                     EvalResult::Unhandled
                 }

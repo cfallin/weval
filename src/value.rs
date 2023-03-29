@@ -68,10 +68,11 @@ pub enum AbstractValue {
     /// const-at-specialization-time memory.
     Concrete(WasmVal, ValueTags),
     /// A value known to be within a range at specialization time, to
-    /// be used as a switch selector.
+    /// be used as a switch selector, including an optional default
+    /// val.
     ///
     /// Evaluated as a vector of Concrete values.
-    SwitchValue(Vec<WasmVal>),
+    SwitchValue(Vec<WasmVal>, Option<WasmVal>),
     /// A concrete value to be used as the default value for a switch.
     SwitchDefault(WasmVal),
     /// A value only computed at runtime. The instruction that
@@ -154,6 +155,10 @@ impl AbstractValue {
             (x, y) if x == y => x.clone(),
             (AbstractValue::Concrete(a, t1), AbstractValue::Concrete(b, t2)) if a == b => {
                 AbstractValue::Concrete(*a, t1.meet(*t2))
+            }
+            (AbstractValue::SwitchValue(vals, None), AbstractValue::SwitchDefault(default))
+            | (AbstractValue::SwitchDefault(default), AbstractValue::SwitchValue(vals, None)) => {
+                AbstractValue::SwitchValue(vals.clone(), Some(default.clone()))
             }
             (av1, av2) => {
                 log::trace!("values {:?} and {:?} meet to Runtime", av1, av2);
