@@ -183,8 +183,26 @@ pub struct PerContextState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PointState {
     pub context: Context,
-    pub pending_context: Option<Context>,
+    pub pending_context: PendingContext,
     pub flow: ProgPointState,
+}
+
+/// Context to switch to on next out-edge(s).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PendingContext {
+    None,
+    Single(Context),
+    Switch(Value, Vec<Context>, Context),
+}
+
+impl PendingContext {
+    pub fn single(&self) -> Option<Context> {
+        match self {
+            Self::None => None,
+            Self::Single(c) => Some(*c),
+            Self::Switch(..) => panic!(),
+        }
+    }
 }
 
 fn map_meet_with<

@@ -251,7 +251,7 @@ impl<'a> Evaluator<'a> {
         // Create program-point state.
         let mut state = PointState {
             context: ctx,
-            pending_context: None,
+            pending_context: PendingContext::None,
             flow: self.state.state[ctx]
                 .block_entry
                 .get(&orig_block)
@@ -568,6 +568,7 @@ impl<'a> Evaluator<'a> {
         state: &PointState,
         orig_block: Block,
         target: Block,
+        pending_context: &PendingContext,
     ) -> (Block, Context) {
         log::trace!(
             "targeting block {} from {}, in context {}",
@@ -576,7 +577,7 @@ impl<'a> Evaluator<'a> {
             state.context
         );
 
-        let target_context = state.pending_context.unwrap_or(state.context);
+        let target_context = pending_context.single().unwrap_or(state.context);
         log::trace!(" -> new context {}", target_context);
 
         log::debug!(
@@ -617,6 +618,7 @@ impl<'a> Evaluator<'a> {
         orig_block: Block,
         state: &PointState,
         target: &BlockTarget,
+        pending_context: &PendingContext,
     ) -> BlockTarget {
         let mut args = vec![];
         let mut abs_args = vec![];
@@ -627,7 +629,8 @@ impl<'a> Evaluator<'a> {
             target
         );
 
-        let (target_block, target_ctx) = self.target_block(state, orig_block, target.block);
+        let (target_block, target_ctx) =
+            self.target_block(state, orig_block, target.block, pending_context);
 
         for &arg in &target.args {
             let arg = self.generic.resolve_alias(arg);
@@ -689,20 +692,71 @@ impl<'a> Evaluator<'a> {
                 let (cond, abs_cond) = self.use_value(state.context, orig_block, cond);
                 match abs_cond.is_const_truthy() {
                     Some(true) => Terminator::Br {
-                        target: self.evaluate_block_target(orig_block, state, if_true),
+                        target: self.evaluate_block_target(
+                            orig_block,
+                            state,
+                            if_true,
+                            &state.pending_context,
+                        ),
                     },
                     Some(false) => Terminator::Br {
-                        target: self.evaluate_block_target(orig_block, state, if_false),
+                        target: self.evaluate_block_target(
+                            orig_block,
+                            state,
+                            if_false,
+                            &state.pending_context,
+                        ),
                     },
                     None => Terminator::CondBr {
                         cond,
-                        if_true: self.evaluate_block_target(orig_block, state, if_true),
-                        if_false: self.evaluate_block_target(orig_block, state, if_false),
+                        if_true: self.evaluate_block_target(
+                            orig_block,
+                            state,
+                            if_true,
+                            &state.pending_context,
+                        ),
+                        if_false: self.evaluate_block_target(
+                            orig_block,
+                            state,
+                            if_false,
+                            &state.pending_context,
+                        ),
                     },
                 }
             }
-            &Terminator::Br { ref target } => Terminator::Br {
-                target: self.evaluate_block_target(orig_block, state, target),
+            &Terminator::Br { ref target } => match &state.pending_context {
+                PendingContext::Switch(index, contexts, default_context) => {
+                    let targets = contexts
+                        .iter()
+                        .map(|&context| {
+                            self.evaluate_block_target(
+                                orig_block,
+                                state,
+                                target,
+                                &PendingContext::Single(context),
+                            )
+                        })
+                        .collect::<Vec<BlockTarget>>();
+                    let default = self.evaluate_block_target(
+                        orig_block,
+                        state,
+                        target,
+                        &PendingContext::Single(*default_context),
+                    );
+                    Terminator::Select {
+                        value: *index,
+                        targets,
+                        default,
+                    }
+                }
+                PendingContext::Single(..) | PendingContext::None => Terminator::Br {
+                    target: self.evaluate_block_target(
+                        orig_block,
+                        state,
+                        target,
+                        &state.pending_context,
+                    ),
+                },
             },
             &Terminator::Select {
                 value,
@@ -718,14 +772,31 @@ impl<'a> Evaluator<'a> {
                         default
                     };
                     Terminator::Br {
-                        target: self.evaluate_block_target(orig_block, state, target),
+                        target: self.evaluate_block_target(
+                            orig_block,
+                            state,
+                            target,
+                            &state.pending_context,
+                        ),
                     }
                 } else {
                     let targets = targets
                         .iter()
-                        .map(|target| self.evaluate_block_target(orig_block, state, target))
+                        .map(|target| {
+                            self.evaluate_block_target(
+                                orig_block,
+                                state,
+                                target,
+                                &state.pending_context,
+                            )
+                        })
                         .collect::<Vec<_>>();
-                    let default = self.evaluate_block_target(orig_block, state, default);
+                    let default = self.evaluate_block_target(
+                        orig_block,
+                        state,
+                        default,
+                        &state.pending_context,
+                    );
                     Terminator::Select {
                         value,
                         targets,
@@ -850,21 +921,23 @@ impl<'a> Evaluator<'a> {
                     let pc = abs[0]
                         .is_const_u32()
                         .expect("PC should not be a runtime value");
-                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let instantaneous_context =
+                        state.pending_context.single().unwrap_or(state.context);
                     let child = self
                         .state
                         .contexts
                         .create(Some(instantaneous_context), ContextElem::Loop(pc));
-                    state.pending_context = Some(child);
+                    state.pending_context = PendingContext::Single(child);
                     log::trace!("push context (pc {:?}): now {}", pc, child);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.pop_context {
-                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let instantaneous_context =
+                        state.pending_context.single().unwrap_or(state.context);
                     let parent = match self.state.contexts.leaf_element(instantaneous_context) {
                         ContextElem::Root => instantaneous_context,
                         _ => self.state.contexts.parent(instantaneous_context),
                     };
-                    state.pending_context = Some(parent);
+                    state.pending_context = PendingContext::Single(parent);
                     log::trace!("pop context: now {}", parent);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.update_context {
@@ -877,45 +950,33 @@ impl<'a> Evaluator<'a> {
                             file, loc.line, loc.col
                         );
                     }
-                    // TODO: handle SwitchValue case; make
-                    // `pending_context` allow for (Value,
-                    // Vec<Context>, Context) as well.
-                    let pc = abs[0]
-                        .is_const_u32()
-                        .ok_or_else(|| {
-                            let loc = self.module.debug.source_locs[loc];
-                            let filename = &self.module.debug.source_files[loc.file];
-                            let def_loc = match abs[0] {
-                                AbstractValue::Runtime(value, _) => {
-                                    value.map(|value| self.generic.source_locs[value])
-                                }
-                                _ => unreachable!(),
-                            };
-                            let def_loc = def_loc.map(|loc| self.module.debug.source_locs[loc]);
-                            let def_filename = def_loc
-                                .map(|loc| &self.module.debug.source_files[loc.file][..])
-                                .unwrap_or("(unknown)");
-                            format!(
-                                "PC is a runtime value at {}:{}:{} (value defined at {}:{}:{})",
-                                filename,
-                                loc.line,
-                                loc.col,
-                                def_filename,
-                                def_loc.map(|loc| loc.line).unwrap_or(0),
-                                def_loc.map(|loc| loc.col).unwrap_or(0)
-                            )
-                        })
-                        .unwrap();
-                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
-                    let sibling = match self.state.contexts.leaf_element(instantaneous_context) {
-                        ContextElem::Root => instantaneous_context,
-                        _ => self.state.contexts.create(
-                            Some(self.state.contexts.parent(instantaneous_context)),
-                            ContextElem::Loop(pc),
-                        ),
+                    let instantaneous_context =
+                        state.pending_context.single().unwrap_or(state.context);
+                    let mut make_context =
+                        |pc: u32| match self.state.contexts.leaf_element(instantaneous_context) {
+                            ContextElem::Root => instantaneous_context,
+                            _ => self.state.contexts.create(
+                                Some(self.state.contexts.parent(instantaneous_context)),
+                                ContextElem::Loop(pc),
+                            ),
+                        };
+
+                    let pending_context = if let Some(pc) = abs[0].is_const_u32() {
+                        PendingContext::Single(make_context(pc))
+                    } else if let AbstractValue::SwitchValue(pcs, index, default_pc) = &abs[0] {
+                        let default_pc = default_pc.unwrap();
+                        PendingContext::Switch(
+                            *index,
+                            pcs.iter()
+                                .map(|pc| make_context(pc.integer_value().unwrap() as u32))
+                                .collect(),
+                            make_context(default_pc.integer_value().unwrap() as u32),
+                        )
+                    } else {
+                        panic!("PC is a runtime value");
                     };
-                    state.pending_context = Some(sibling);
-                    log::trace!("update context (pc {:?}): now {}", pc, sibling);
+                    log::trace!("update context: now {:?}", pending_context);
+                    state.pending_context = pending_context;
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.flush_to_mem {
                     self.flush_to_mem(state, new_block);
