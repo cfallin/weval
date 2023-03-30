@@ -798,21 +798,9 @@ impl<'a> Evaluator<'a> {
         } else {
             match abs.len() {
                 0 => self.abstract_eval_nullary(orig_inst, op, state),
-                1 => self.abstract_eval_unary(
-                    orig_inst,
-                    op,
-                    &abs[0],
-                    values[0],
-                    orig_values[0],
-                    state,
-                )?,
-                2 => self.abstract_eval_binary(
-                    orig_inst, op, &abs[0], &abs[1], values[0], values[1], state,
-                ),
-                3 => self.abstract_eval_ternary(
-                    orig_inst, op, &abs[0], &abs[1], &abs[2], values[0], values[1], values[2],
-                    state,
-                ),
+                1 => self.abstract_eval_unary(orig_inst, op, &abs[0], orig_values[0], state)?,
+                2 => self.abstract_eval_binary(orig_inst, op, &abs[0], &abs[1])?,
+                3 => self.abstract_eval_ternary(orig_inst, op, &abs[0], &abs[1], &abs[2]),
                 _ => {
                     let tags = abs
                         .iter()
@@ -889,6 +877,9 @@ impl<'a> Evaluator<'a> {
                             file, loc.line, loc.col
                         );
                     }
+                    // TODO: handle SwitchValue case; make
+                    // `pending_context` allow for (Value,
+                    // Vec<Context>, Context) as well.
                     let pc = abs[0]
                         .is_const_u32()
                         .ok_or_else(|| {
@@ -957,7 +948,10 @@ impl<'a> Evaluator<'a> {
                 } else if Some(function_index) == self.intrinsics.switch_value {
                     if let Some(limit) = abs[1].is_const_u32() {
                         let vals = (0..limit).map(WasmVal::I32).collect::<Vec<_>>();
-                        EvalResult::Alias(AbstractValue::SwitchValue(vals, None), values[0])
+                        EvalResult::Alias(
+                            AbstractValue::SwitchValue(vals, values[0], None),
+                            values[0],
+                        )
                     } else {
                         panic!("Limit to weval_switch_value() is not a constant");
                     }
@@ -1224,10 +1218,43 @@ impl<'a> Evaluator<'a> {
         orig_inst: Value,
         op: Operator,
         x: &AbstractValue,
-        _x_val: Value,
         orig_x_val: Value,
         state: &mut PointState,
     ) -> anyhow::Result<AbstractValue> {
+        if let AbstractValue::SwitchValue(vals, index, def) = x {
+            let vals = vals
+                .iter()
+                .map(|&abs| {
+                    let mut private_state = state.clone();
+                    let result = self.abstract_eval_unary(
+                        orig_inst,
+                        op,
+                        &AbstractValue::Concrete(abs, ValueTags::default()),
+                        orig_x_val,
+                        &mut private_state,
+                    )?;
+                    if private_state == *state {
+                        if let AbstractValue::Concrete(result, _) = result {
+                            Ok(result)
+                        } else {
+                            anyhow::bail!(
+                                "Op {:?} at inst {} on SwitchValue yielded a runtime value",
+                                op,
+                                orig_inst
+                            );
+                        }
+                    } else {
+                        anyhow::bail!(
+                            "Side-effecting unary op {:?} at inst {} on SwitchValue",
+                            op,
+                            orig_inst
+                        );
+                    }
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            return Ok(AbstractValue::SwitchValue(vals, *index, *def));
+        }
+
         let result = match (op, x) {
             (Operator::GlobalSet { global_index }, av) => {
                 state.flow.globals.insert(global_index, av.clone());
@@ -1386,10 +1413,43 @@ impl<'a> Evaluator<'a> {
         op: Operator,
         x: &AbstractValue,
         y: &AbstractValue,
-        _x_val: Value,
-        _y_val: Value,
-        _state: &mut PointState,
-    ) -> AbstractValue {
+    ) -> anyhow::Result<AbstractValue> {
+        match (x, y) {
+            (AbstractValue::SwitchValue(vals, index, def), other)
+            | (other, AbstractValue::SwitchValue(vals, index, def)) => {
+                let flipped = !matches!(x, AbstractValue::SwitchValue(..));
+                let vals = vals
+                    .iter()
+                    .map(|&abs| {
+                        let (x, y) = if !flipped {
+                            (
+                                AbstractValue::Concrete(abs, ValueTags::default()),
+                                other.clone(),
+                            )
+                        } else {
+                            (
+                                other.clone(),
+                                AbstractValue::Concrete(abs, ValueTags::default()),
+                            )
+                        };
+
+                        let result = self.abstract_eval_binary(orig_inst, op, &x, &y)?;
+                        if let AbstractValue::Concrete(result, _) = result {
+                            Ok(result)
+                        } else {
+                            anyhow::bail!(
+                                "Op {:?} at inst {} on SwitchValue yielded a runtime value",
+                                op,
+                                orig_inst
+                            );
+                        }
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                return Ok(AbstractValue::SwitchValue(vals, *index, *def));
+            }
+            _ => {}
+        }
+
         let result = match (x, y) {
             (AbstractValue::Concrete(v1, tag1), AbstractValue::Concrete(v2, tag2)) => {
                 let tags = tag1.meet(*tag2);
@@ -1644,7 +1704,7 @@ impl<'a> Evaluator<'a> {
             _ => AbstractValue::Runtime(Some(orig_inst), ValueTags::default()),
         };
 
-        result.prop_sticky_tags(x).prop_sticky_tags(y)
+        Ok(result.prop_sticky_tags(x).prop_sticky_tags(y))
     }
 
     fn abstract_eval_ternary(
@@ -1654,10 +1714,6 @@ impl<'a> Evaluator<'a> {
         x: &AbstractValue,
         y: &AbstractValue,
         z: &AbstractValue,
-        _x_val: Value,
-        _y_val: Value,
-        _z_val: Value,
-        _state: &mut PointState,
     ) -> AbstractValue {
         let result = match (op, z) {
             (Operator::Select, AbstractValue::Concrete(v, _t))

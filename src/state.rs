@@ -180,7 +180,7 @@ pub struct PerContextState {
 }
 
 /// State carried during a pass through a block.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PointState {
     pub context: Context,
     pub pending_context: Option<Context>,

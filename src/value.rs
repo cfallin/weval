@@ -1,5 +1,7 @@
 //! Symbolic and concrete values.
 
+use waffle::Value;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WasmVal {
     I32(u32),
@@ -72,7 +74,7 @@ pub enum AbstractValue {
     /// val.
     ///
     /// Evaluated as a vector of Concrete values.
-    SwitchValue(Vec<WasmVal>, Option<WasmVal>),
+    SwitchValue(Vec<WasmVal>, Value, Option<WasmVal>),
     /// A concrete value to be used as the default value for a switch.
     SwitchDefault(WasmVal),
     /// A value only computed at runtime. The instruction that
@@ -156,10 +158,14 @@ impl AbstractValue {
             (AbstractValue::Concrete(a, t1), AbstractValue::Concrete(b, t2)) if a == b => {
                 AbstractValue::Concrete(*a, t1.meet(*t2))
             }
-            (AbstractValue::SwitchValue(vals, None), AbstractValue::SwitchDefault(default))
-            | (AbstractValue::SwitchDefault(default), AbstractValue::SwitchValue(vals, None)) => {
-                AbstractValue::SwitchValue(vals.clone(), Some(default.clone()))
-            }
+            (
+                AbstractValue::SwitchValue(vals, index, None),
+                AbstractValue::SwitchDefault(default),
+            )
+            | (
+                AbstractValue::SwitchDefault(default),
+                AbstractValue::SwitchValue(vals, index, None),
+            ) => AbstractValue::SwitchValue(vals.clone(), *index, Some(default.clone())),
             (av1, av2) => {
                 log::trace!("values {:?} and {:?} meet to Runtime", av1, av2);
                 AbstractValue::Runtime(None, av1.tags().meet(av2.tags()))
