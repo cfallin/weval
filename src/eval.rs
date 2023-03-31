@@ -832,7 +832,7 @@ impl<'a> Evaluator<'a> {
         tys: &[Type],
         state: &mut PointState,
     ) -> anyhow::Result<EvalResult> {
-        log::trace!(
+        log::debug!(
             "abstract eval of {} {}: op {:?} abs {:?} state {:?}",
             orig_block,
             orig_inst,
@@ -842,21 +842,6 @@ impl<'a> Evaluator<'a> {
         );
 
         debug_assert_eq!(abs.len(), values.len());
-
-        let info = if abs
-            .iter()
-            .any(|abs| matches!(abs, AbstractValue::SwitchValue(..)))
-        {
-            log::info!(
-                "abstract_eval of {:?} on values {:?} abs {:?}",
-                op,
-                orig_values,
-                abs
-            );
-            true
-        } else {
-            false
-        };
 
         let intrinsic_result = self.abstract_eval_intrinsic(
             orig_block,
@@ -870,32 +855,43 @@ impl<'a> Evaluator<'a> {
             state,
         );
         if intrinsic_result.is_handled() {
-            if info {
-                log::info!(" -> intrinsic: {:?}", intrinsic_result);
-            }
+            log::debug!(" -> intrinsic: {:?}", intrinsic_result);
             return Ok(intrinsic_result);
+        }
+
+        let switch_result = self.abstract_eval_switch(
+            orig_block,
+            new_block,
+            orig_inst,
+            op,
+            loc,
+            abs,
+            values,
+            orig_values,
+            tys,
+            state,
+        )?;
+        if switch_result.is_handled() {
+            log::debug!(" -> switch: {:?}", switch_result);
+            return Ok(switch_result);
         }
 
         let mem_overlay_result =
             self.abstract_eval_mem_overlay(orig_inst, new_block, op, abs, values, tys, state)?;
         if mem_overlay_result.is_handled() {
-            if info {
-                log::info!(" -> overlay: {:?}", intrinsic_result);
-            }
+            log::debug!(" -> overlay: {:?}", intrinsic_result);
             return Ok(mem_overlay_result);
         }
 
         let ret = if op.is_call() {
             self.flush_to_mem(state, new_block);
-            if info {
-                log::info!(" -> call");
-            }
+            log::debug!(" -> call");
             AbstractValue::Runtime(Some(orig_inst), ValueTags::default())
         } else {
             match abs.len() {
                 0 => self.abstract_eval_nullary(orig_inst, op, state),
                 1 => self.abstract_eval_unary(orig_inst, op, &abs[0], orig_values[0], state)?,
-                2 => self.abstract_eval_binary(orig_inst, op, &abs[0], &abs[1])?,
+                2 => self.abstract_eval_binary(orig_inst, op, &abs[0], &abs[1]),
                 3 => self.abstract_eval_ternary(orig_inst, op, &abs[0], &abs[1], &abs[2]),
                 _ => {
                     let tags = abs
@@ -908,17 +904,7 @@ impl<'a> Evaluator<'a> {
             }
         };
 
-        match ret {
-            AbstractValue::Concrete(k, t) => {
-                log::trace!("Concrete eval: {} = {:?} ({:?})", orig_inst, k, t);
-            }
-            _ => {}
-        }
-
-        if info {
-            log::info!(" -> result: {:?}", ret);
-        }
-
+        log::debug!(" -> result: {:?}", ret);
         Ok(EvalResult::Normal(ret))
     }
 
@@ -938,6 +924,13 @@ impl<'a> Evaluator<'a> {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.assume_const_memory {
                     EvalResult::Alias(abs[0].with_tags(ValueTags::const_memory()), values[0])
+                } else if Some(function_index) == self.intrinsics.assume_const_memory_transitive {
+                    EvalResult::Alias(
+                        abs[0].with_tags(
+                            ValueTags::const_memory() | ValueTags::const_memory_transitive(),
+                        ),
+                        values[0],
+                    )
                 } else if Some(function_index) == self.intrinsics.make_symbolic_ptr {
                     let label_index = values[0].index() as u32;
                     log::trace!(
@@ -1332,40 +1325,6 @@ impl<'a> Evaluator<'a> {
         orig_x_val: Value,
         state: &mut PointState,
     ) -> anyhow::Result<AbstractValue> {
-        if let AbstractValue::SwitchValue(vals, index, def) = x {
-            let vals = vals
-                .iter()
-                .map(|&abs| {
-                    let mut private_state = state.clone();
-                    let result = self.abstract_eval_unary(
-                        orig_inst,
-                        op,
-                        &AbstractValue::Concrete(abs, ValueTags::default()),
-                        orig_x_val,
-                        &mut private_state,
-                    )?;
-                    if private_state == *state {
-                        if let AbstractValue::Concrete(result, _) = result {
-                            Ok(result)
-                        } else {
-                            anyhow::bail!(
-                                "Op {:?} at inst {} on SwitchValue yielded a runtime value",
-                                op,
-                                orig_inst
-                            );
-                        }
-                    } else {
-                        anyhow::bail!(
-                            "Side-effecting unary op {:?} at inst {} on SwitchValue",
-                            op,
-                            orig_inst
-                        );
-                    }
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
-            return Ok(AbstractValue::SwitchValue(vals, *index, *def));
-        }
-
         let result = match (op, x) {
             (Operator::GlobalSet { global_index }, av) => {
                 state.flow.globals.insert(global_index, av.clone());
@@ -1461,9 +1420,15 @@ impl<'a> Evaluator<'a> {
                     .with_context(|| {
                         format!("Out-of-bounds constant load: value {} is {}", orig_x_val, k)
                     })?;
-                // N.B.: memory const-ness is *not* transitive!  The
-                // user needs to opt in at each level of indirection.
-                let val = AbstractValue::Concrete(WasmVal::I32(conv(val)), ValueTags::default());
+                // N.B.: memory const-ness is *not* transitive unless
+                // specified as such!  The user needs to opt in at
+                // each level of indirection.
+                let tags = if t.contains(ValueTags::const_memory_transitive()) {
+                    ValueTags::const_memory() | ValueTags::const_memory_transitive()
+                } else {
+                    ValueTags::default()
+                };
+                let val = AbstractValue::Concrete(WasmVal::I32(conv(val)), tags);
                 log::trace!(" -> produces {:?}", val);
                 Ok(val)
             }
@@ -1501,9 +1466,15 @@ impl<'a> Evaluator<'a> {
                 let val = self
                     .image
                     .read_size(memory.memory, k + memory.offset as u32, size)?;
-                // N.B.: memory const-ness is *not* transitive!  The
-                // user needs to opt in at each level of indirection.
-                let val = AbstractValue::Concrete(WasmVal::I64(conv(val)), ValueTags::default());
+                // N.B.: memory const-ness is *not* transitive unless
+                // specified as such!  The user needs to opt in at
+                // each level of indirection.
+                let tags = if t.contains(ValueTags::const_memory_transitive()) {
+                    ValueTags::const_memory() | ValueTags::const_memory_transitive()
+                } else {
+                    ValueTags::default()
+                };
+                let val = AbstractValue::Concrete(WasmVal::I64(conv(val)), tags);
                 log::trace!(" -> produces {:?}", val);
                 Ok(val)
             }
@@ -1524,43 +1495,7 @@ impl<'a> Evaluator<'a> {
         op: Operator,
         x: &AbstractValue,
         y: &AbstractValue,
-    ) -> anyhow::Result<AbstractValue> {
-        match (x, y) {
-            (AbstractValue::SwitchValue(vals, index, def), other)
-            | (other, AbstractValue::SwitchValue(vals, index, def)) => {
-                let flipped = !matches!(x, AbstractValue::SwitchValue(..));
-                let vals = vals
-                    .iter()
-                    .map(|&abs| {
-                        let (x, y) = if !flipped {
-                            (
-                                AbstractValue::Concrete(abs, ValueTags::default()),
-                                other.clone(),
-                            )
-                        } else {
-                            (
-                                other.clone(),
-                                AbstractValue::Concrete(abs, ValueTags::default()),
-                            )
-                        };
-
-                        let result = self.abstract_eval_binary(orig_inst, op, &x, &y)?;
-                        if let AbstractValue::Concrete(result, _) = result {
-                            Ok(result)
-                        } else {
-                            anyhow::bail!(
-                                "Op {:?} at inst {} on SwitchValue yielded a runtime value",
-                                op,
-                                orig_inst
-                            );
-                        }
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?;
-                return Ok(AbstractValue::SwitchValue(vals, *index, *def));
-            }
-            _ => {}
-        }
-
+    ) -> AbstractValue {
         let result = match (x, y) {
             (AbstractValue::Concrete(v1, tag1), AbstractValue::Concrete(v2, tag2)) => {
                 let tags = tag1.meet(*tag2);
@@ -1815,7 +1750,7 @@ impl<'a> Evaluator<'a> {
             _ => AbstractValue::Runtime(Some(orig_inst), ValueTags::default()),
         };
 
-        Ok(result.prop_sticky_tags(x).prop_sticky_tags(y))
+        result.prop_sticky_tags(x).prop_sticky_tags(y)
     }
 
     fn abstract_eval_ternary(
@@ -1842,6 +1777,123 @@ impl<'a> Evaluator<'a> {
             .prop_sticky_tags(x)
             .prop_sticky_tags(y)
             .prop_sticky_tags(z)
+    }
+
+    fn abstract_eval_switch(
+        &mut self,
+        orig_block: Block,
+        new_block: Block,
+        orig_inst: Value,
+        op: Operator,
+        loc: SourceLoc,
+        abs: &[AbstractValue],
+        values: &[Value],
+        orig_values: &[Value],
+        tys: &[Type],
+        state: &mut PointState,
+    ) -> anyhow::Result<EvalResult> {
+        // If exactly one of the AbstractValues is a SwitchValue,
+        // recursively invoke abstract_eval for each value. If all
+        // results are Concrete, and if no state was updated, then we
+        // can return that this was handled properly, and build a
+        // SwitchValue back from the individual "lanes".
+        if abs.iter().filter(|abs| abs.is_switch_value()).count() == 1 {
+            log::info!(" -> exactly one arg is a SwitchValue");
+            let index = abs.iter().position(|abs| abs.is_switch_value()).unwrap();
+            let pre = &abs[0..index];
+            let post = &abs[(index + 1)..];
+            let (index, switch_values, def_value) = match &abs[index] {
+                AbstractValue::SwitchValue(values, index, def_value) => {
+                    (*index, values, *def_value)
+                }
+                _ => unreachable!(),
+            };
+
+            let mut new_values = vec![];
+            let mut private_state = state.clone();
+            for &value in switch_values.iter().chain(def_value.iter()) {
+                let mut abs = vec![];
+                abs.extend(pre.iter().cloned());
+                abs.push(AbstractValue::Concrete(value, ValueTags::default()));
+                abs.extend(post.iter().cloned());
+                let result = self.abstract_eval(
+                    orig_block,
+                    new_block,
+                    orig_inst,
+                    op,
+                    loc,
+                    &abs[..],
+                    values,
+                    orig_values,
+                    tys,
+                    &mut private_state,
+                )?;
+                if private_state != *state {
+                    return Ok(EvalResult::Unhandled);
+                }
+                match result {
+                    EvalResult::Normal(AbstractValue::Concrete(val, _)) => new_values.push(val),
+                    _ => return Ok(EvalResult::Unhandled),
+                }
+            }
+
+            let def_value = if def_value.is_some() {
+                new_values.pop()
+            } else {
+                None
+            };
+
+            log::info!(
+                " -> new_values: {:?}, def_value {:?}",
+                new_values,
+                def_value
+            );
+            return Ok(EvalResult::Normal(AbstractValue::SwitchValue(
+                new_values, index, def_value,
+            )));
+        }
+
+        // Likewise, but for SwitchDefault.
+        if abs.iter().filter(|abs| abs.is_switch_default()).count() == 1 {
+            log::info!(" -> exactly one arg is a SwitchDefault");
+            let index = abs.iter().position(|abs| abs.is_switch_default()).unwrap();
+            let pre = &abs[0..index];
+            let post = &abs[(index + 1)..];
+            let def_value = match &abs[index] {
+                AbstractValue::SwitchDefault(def_value) => *def_value,
+                _ => unreachable!(),
+            };
+
+            let mut abs = vec![];
+            abs.extend(pre.iter().cloned());
+            abs.push(AbstractValue::Concrete(def_value, ValueTags::default()));
+            abs.extend(post.iter().cloned());
+            let mut private_state = state.clone();
+            let result = self.abstract_eval(
+                orig_block,
+                new_block,
+                orig_inst,
+                op,
+                loc,
+                &abs[..],
+                values,
+                orig_values,
+                tys,
+                &mut private_state,
+            )?;
+            if private_state != *state {
+                return Ok(EvalResult::Unhandled);
+            }
+            match result {
+                EvalResult::Normal(AbstractValue::Concrete(val, _)) => {
+                    log::info!(" -> value {:?}", val);
+                    return Ok(EvalResult::Normal(AbstractValue::SwitchDefault(val)));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(EvalResult::Unhandled)
     }
 
     fn add_blockparam_mem_args(&mut self) -> anyhow::Result<()> {

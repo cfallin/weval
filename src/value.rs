@@ -96,13 +96,18 @@ impl ValueTags {
         ValueTags(1)
     }
 
+    /// `const_memory` is passed transitively through loads.
+    pub const fn const_memory_transitive() -> Self {
+        ValueTags(2)
+    }
+
     /// This value is tainted as derived from a symbolic pointer
     /// involved in memory renaming. The program can manipulate and
     /// observe the pointer value, but this pointer must never reach
     /// any load or store (except via a call, before which we flush
     /// all memory renaming state).
     pub fn symbolic_ptr_taint() -> Self {
-        ValueTags(2)
+        ValueTags(4)
     }
 }
 
@@ -118,13 +123,13 @@ impl ValueTags {
         (self.0 & tags.0) == tags.0
     }
     pub fn meet(&self, other: ValueTags) -> ValueTags {
-        // - const_memory merges as intersection.
+        // - const_memory and const_memory_transitive merge as intersection.
         // - symbolic_ptr_taint merges as union.
-        ValueTags(((self.0 & 1) & (other.0 & 1)) | ((self.0 & 2) | (other.0 & 2)))
+        ValueTags(((self.0 & 3) & (other.0 & 3)) | ((self.0 & 4) | (other.0 & 4)))
     }
     /// Get the tags that are "sticky": propagate across all ops.
     pub fn sticky(&self) -> ValueTags {
-        ValueTags(self.0 & 2)
+        ValueTags(self.0 & 4)
     }
 }
 
@@ -198,5 +203,19 @@ impl AbstractValue {
 
     pub fn is_const_truthy(&self) -> Option<bool> {
         self.is_const_u32().map(|k| k != 0)
+    }
+
+    pub fn is_switch_value(&self) -> bool {
+        match self {
+            Self::SwitchValue(..) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_switch_default(&self) -> bool {
+        match self {
+            Self::SwitchDefault(..) => true,
+            _ => false,
+        }
     }
 }
