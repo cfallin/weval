@@ -167,6 +167,11 @@ impl AbstractValue {
                 AbstractValue::SwitchValue(vals, index, None),
             ) => AbstractValue::SwitchValue(vals.clone(), *index, Some(default.clone())),
             (av1, av2) => {
+                if matches!(av1, AbstractValue::SwitchValue(..))
+                    || matches!(av2, AbstractValue::SwitchValue(..))
+                {
+                    log::info!("meet to runtime: {:?}, {:?}", av1, av2);
+                }
                 log::trace!("values {:?} and {:?} meet to Runtime", av1, av2);
                 AbstractValue::Runtime(None, av1.tags().meet(av2.tags()))
             }

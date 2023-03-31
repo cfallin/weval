@@ -13,6 +13,7 @@ pub struct Intrinsics {
     pub abort_specialization: Option<Func>,
     pub trace_line: Option<Func>,
     pub assert_const32: Option<Func>,
+    pub assert_switchvalue: Option<Func>,
     pub assert_const_memory: Option<Func>,
     pub switch_value: Option<Func>,
     pub switch_default: Option<Func>,
@@ -48,6 +49,12 @@ impl Intrinsics {
                 module,
                 "weval.assert.const32",
                 &[Type::I32, Type::I32],
+                &[],
+            ),
+            assert_switchvalue: find_exported_func(
+                module,
+                "weval.assert.switchvalue",
+                &[Type::I32],
                 &[],
             ),
             assert_const_memory: find_exported_func(

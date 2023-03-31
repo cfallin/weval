@@ -205,6 +205,7 @@ fn store_operator(ty: Type) -> Option<Operator> {
     }
 }
 
+#[derive(Debug)]
 enum EvalResult {
     Unhandled,
     Elide,
@@ -390,10 +391,10 @@ impl<'a> Evaluator<'a> {
         let mut arg_abs_values = vec![];
         let mut arg_values = vec![];
 
-        log::debug!("evaluate_block_body: {}: state {:?}", orig_block, state);
+        log::trace!("evaluate_block_body: {}: state {:?}", orig_block, state);
         for &(_, param) in &self.generic.blocks[orig_block].params {
             let (_, abs) = self.use_value(state.context, orig_block, param);
-            log::debug!(" -> param {}: {:?}", param, abs);
+            log::trace!(" -> param {}: {:?}", param, abs);
         }
 
         for &inst in &self.generic.blocks[orig_block].insts {
@@ -580,7 +581,7 @@ impl<'a> Evaluator<'a> {
         let target_context = pending_context.single().unwrap_or(state.context);
         log::trace!(" -> new context {}", target_context);
 
-        log::debug!(
+        log::trace!(
             "target_block: from orig {} ctx {} to {} ctx {}",
             orig_block,
             state.context,
@@ -842,6 +843,21 @@ impl<'a> Evaluator<'a> {
 
         debug_assert_eq!(abs.len(), values.len());
 
+        let info = if abs
+            .iter()
+            .any(|abs| matches!(abs, AbstractValue::SwitchValue(..)))
+        {
+            log::info!(
+                "abstract_eval of {:?} on values {:?} abs {:?}",
+                op,
+                orig_values,
+                abs
+            );
+            true
+        } else {
+            false
+        };
+
         let intrinsic_result = self.abstract_eval_intrinsic(
             orig_block,
             new_block,
@@ -854,17 +870,26 @@ impl<'a> Evaluator<'a> {
             state,
         );
         if intrinsic_result.is_handled() {
+            if info {
+                log::info!(" -> intrinsic: {:?}", intrinsic_result);
+            }
             return Ok(intrinsic_result);
         }
 
         let mem_overlay_result =
             self.abstract_eval_mem_overlay(orig_inst, new_block, op, abs, values, tys, state)?;
         if mem_overlay_result.is_handled() {
+            if info {
+                log::info!(" -> overlay: {:?}", intrinsic_result);
+            }
             return Ok(mem_overlay_result);
         }
 
         let ret = if op.is_call() {
             self.flush_to_mem(state, new_block);
+            if info {
+                log::info!(" -> call");
+            }
             AbstractValue::Runtime(Some(orig_inst), ValueTags::default())
         } else {
             match abs.len() {
@@ -885,9 +910,13 @@ impl<'a> Evaluator<'a> {
 
         match ret {
             AbstractValue::Concrete(k, t) => {
-                log::debug!("Concrete eval: {} = {:?} ({:?})", orig_inst, k, t);
+                log::trace!("Concrete eval: {} = {:?} ({:?})", orig_inst, k, t);
             }
             _ => {}
+        }
+
+        if info {
+            log::info!(" -> result: {:?}", ret);
         }
 
         Ok(EvalResult::Normal(ret))
@@ -972,8 +1001,12 @@ impl<'a> Evaluator<'a> {
                                 .collect(),
                             make_context(default_pc.integer_value().unwrap() as u32),
                         )
+                    } else if let AbstractValue::SwitchDefault(default_pc) = &abs[0] {
+                        PendingContext::Single(make_context(
+                            default_pc.integer_value().unwrap() as u32
+                        ))
                     } else {
-                        panic!("PC is a runtime value");
+                        panic!("PC is a runtime value: {:?}", abs[0]);
                     };
                     log::trace!("update context: now {:?}", pending_context);
                     state.pending_context = pending_context;
@@ -984,24 +1017,35 @@ impl<'a> Evaluator<'a> {
                 } else if Some(function_index) == self.intrinsics.abort_specialization {
                     let line_num = abs[0].is_const_u32().unwrap_or(0);
                     let fatal = abs[1].is_const_u32().unwrap_or(0);
-                    log::debug!("abort-specialization point: line {}", line_num);
+                    log::trace!("abort-specialization point: line {}", line_num);
                     if fatal != 0 {
                         panic!("Specialization reached a point it shouldn't have!");
                     }
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.trace_line {
                     let line_num = abs[0].is_const_u32().unwrap_or(0);
-                    log::debug!("trace: line number {}: current context {} at block {}, pending context {:?}",
+                    log::trace!("trace: line number {}: current context {} at block {}, pending context {:?}",
                                 line_num, state.context, orig_block, state.pending_context);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_const32 {
-                    log::debug!("assert_const32: abs {:?} line {:?}", abs[0], abs[1]);
+                    log::trace!("assert_const32: abs {:?} line {:?}", abs[0], abs[1]);
                     if abs[0].is_const_u32().is_none() {
                         panic!("weval_assert_const32() failed: line {:?}", abs[1]);
                     }
                     EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.assert_switchvalue {
+                    log::trace!("assert_switchvalue: abs {:?}", abs[0]);
+                    if !matches!(&abs[0], AbstractValue::SwitchValue(..))
+                        && !matches!(&abs[0], AbstractValue::SwitchDefault(..))
+                    {
+                        panic!(
+                            "weval_assert_switchvalue() failed: orig value {}: {:?}",
+                            orig_values[0], abs[0]
+                        );
+                    }
+                    EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_const_memory {
-                    log::debug!("assert_const_memory: abs {:?} line {:?}", abs[0], abs[1]);
+                    log::trace!("assert_const_memory: abs {:?} line {:?}", abs[0], abs[1]);
                     if !abs[0].tags().contains(ValueTags::const_memory()) {
                         panic!("weval_assert_const_memory() failed: line {:?}", abs[1]);
                     }
@@ -1009,6 +1053,7 @@ impl<'a> Evaluator<'a> {
                 } else if Some(function_index) == self.intrinsics.switch_value {
                     if let Some(limit) = abs[1].is_const_u32() {
                         let vals = (0..limit).map(WasmVal::I32).collect::<Vec<_>>();
+                        log::info!("Producing switch value for {}: {:?}", orig_values[0], vals);
                         EvalResult::Alias(
                             AbstractValue::SwitchValue(vals, values[0], None),
                             values[0],
@@ -1018,6 +1063,11 @@ impl<'a> Evaluator<'a> {
                     }
                 } else if Some(function_index) == self.intrinsics.switch_default {
                     if let Some(default) = abs[0].is_const_u32() {
+                        log::info!(
+                            "Producing switch default for {}: {}",
+                            orig_values[0],
+                            default
+                        );
                         EvalResult::Alias(
                             AbstractValue::SwitchDefault(WasmVal::I32(default)),
                             values[0],
@@ -1382,7 +1432,7 @@ impl<'a> Evaluator<'a> {
             {
                 use anyhow::Context;
 
-                log::debug!(
+                log::trace!(
                     "load of addr {:?} offset {} (orig value {}) with const_memory tag",
                     x,
                     memory.offset,
@@ -1414,7 +1464,7 @@ impl<'a> Evaluator<'a> {
                 // N.B.: memory const-ness is *not* transitive!  The
                 // user needs to opt in at each level of indirection.
                 let val = AbstractValue::Concrete(WasmVal::I32(conv(val)), ValueTags::default());
-                log::debug!(" -> produces {:?}", val);
+                log::trace!(" -> produces {:?}", val);
                 Ok(val)
             }
 
@@ -1454,7 +1504,7 @@ impl<'a> Evaluator<'a> {
                 // N.B.: memory const-ness is *not* transitive!  The
                 // user needs to opt in at each level of indirection.
                 let val = AbstractValue::Concrete(WasmVal::I64(conv(val)), ValueTags::default());
-                log::debug!(" -> produces {:?}", val);
+                log::trace!(" -> produces {:?}", val);
                 Ok(val)
             }
 
