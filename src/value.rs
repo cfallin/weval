@@ -74,9 +74,9 @@ pub enum AbstractValue {
     /// val.
     ///
     /// Evaluated as a vector of Concrete values.
-    SwitchValue(Vec<WasmVal>, Value, Option<WasmVal>),
+    SwitchValue(Vec<WasmVal>, Value, Option<WasmVal>, ValueTags),
     /// A concrete value to be used as the default value for a switch.
-    SwitchDefault(WasmVal),
+    SwitchDefault(WasmVal, ValueTags),
     /// A value only computed at runtime. The instruction that
     /// computed it is specified, if known.
     Runtime(Option<waffle::Value>, ValueTags),
@@ -140,9 +140,8 @@ impl AbstractValue {
             &AbstractValue::SymbolicPtr(_, _) => ValueTags::default(),
             &AbstractValue::Concrete(_, t) => t,
             &AbstractValue::Runtime(_, t) => t,
-            &AbstractValue::SwitchValue(..) | &AbstractValue::SwitchDefault(..) => {
-                ValueTags::default()
-            }
+            &AbstractValue::SwitchValue(_, _, _, t) => t,
+            &AbstractValue::SwitchDefault(_, t) => t,
         }
     }
 
@@ -152,7 +151,12 @@ impl AbstractValue {
             &AbstractValue::SymbolicPtr(l, off) => AbstractValue::SymbolicPtr(l, off),
             &AbstractValue::Concrete(k, t) => AbstractValue::Concrete(k, t | new_tags),
             &AbstractValue::Runtime(v, t) => AbstractValue::Runtime(v, t | new_tags),
-            &AbstractValue::SwitchValue(..) | &AbstractValue::SwitchDefault(..) => self.clone(),
+            &AbstractValue::SwitchValue(ref vals, index, def, t) => {
+                AbstractValue::SwitchValue(vals.clone(), index, def, t | new_tags)
+            }
+            &AbstractValue::SwitchDefault(val, t) => {
+                AbstractValue::SwitchDefault(val, t | new_tags)
+            }
         }
     }
 
@@ -164,18 +168,34 @@ impl AbstractValue {
                 AbstractValue::Concrete(*a, t1.meet(*t2))
             }
             (
-                AbstractValue::SwitchValue(vals, index, None),
-                AbstractValue::SwitchDefault(default),
+                AbstractValue::SwitchValue(vals, index, None, t1),
+                AbstractValue::SwitchDefault(default, t2),
             )
             | (
-                AbstractValue::SwitchDefault(default),
-                AbstractValue::SwitchValue(vals, index, None),
-            ) => AbstractValue::SwitchValue(vals.clone(), *index, Some(default.clone())),
+                AbstractValue::SwitchDefault(default, t2),
+                AbstractValue::SwitchValue(vals, index, None, t1),
+            ) => AbstractValue::SwitchValue(
+                vals.clone(),
+                *index,
+                Some(default.clone()),
+                t1.meet(*t2),
+            ),
+            (AbstractValue::SwitchDefault(val1, t1), AbstractValue::Concrete(val2, t2))
+            | (AbstractValue::Concrete(val2, t2), AbstractValue::SwitchDefault(val1, t1))
+                if val1 == val2 =>
+            {
+                AbstractValue::SwitchDefault(*val1, t1.meet(*t2))
+            }
+            (AbstractValue::Runtime(cause1, t1), AbstractValue::Runtime(cause2, t2)) => {
+                AbstractValue::Runtime(cause1.or(*cause2), t1.meet(*t2))
+            }
             (av1, av2) => {
-                if matches!(av1, AbstractValue::SwitchValue(..))
-                    || matches!(av2, AbstractValue::SwitchValue(..))
+                if av1.is_switch_default()
+                    || av2.is_switch_default()
+                    || av1.is_switch_value()
+                    || av2.is_switch_value()
                 {
-                    log::info!("meet to runtime: {:?}, {:?}", av1, av2);
+                    //panic!("Meet({:?}, {:?}: going to runtime!", av1, av2);
                 }
                 log::trace!("values {:?} and {:?} meet to Runtime", av1, av2);
                 AbstractValue::Runtime(None, av1.tags().meet(av2.tags()))

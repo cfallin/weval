@@ -342,7 +342,7 @@ impl<'a> Evaluator<'a> {
         val: Value,
         abs: AbstractValue,
     ) -> bool {
-        log::trace!(
+        log::debug!(
             "defining val {} in block {} context {} with specialized val {} abs {:?}",
             orig_val,
             block,
@@ -360,7 +360,7 @@ impl<'a> Evaluator<'a> {
                 let val_abs = o.get_mut();
                 let updated = AbstractValue::meet(val_abs, &abs);
                 let changed = updated != *val_abs;
-                log::trace!(
+                log::debug!(
                     " -> meet: cur {:?} input {:?} result {:?} (changed: {})",
                     val_abs,
                     abs,
@@ -623,6 +623,7 @@ impl<'a> Evaluator<'a> {
     ) -> BlockTarget {
         let mut args = vec![];
         let mut abs_args = vec![];
+        let mut abs_generic_args = vec![];
         log::trace!(
             "evaluate target: block {} context {} to {:?}",
             orig_block,
@@ -635,6 +636,7 @@ impl<'a> Evaluator<'a> {
 
         for &arg in &target.args {
             let arg = self.generic.resolve_alias(arg);
+            abs_generic_args.push(arg);
             let (val, abs) = self.use_value(state.context, orig_block, arg);
             log::trace!(
                 "blockparam: block {} context {}: arg {} has val {} abs {:?}",
@@ -651,16 +653,17 @@ impl<'a> Evaluator<'a> {
         // Parallel-move semantics: read all uses above, then write
         // all defs below.
         let mut changed = false;
-        for (blockparam, abs) in self.generic.blocks[target.block]
+        for ((blockparam, abs), generic_arg) in self.generic.blocks[target.block]
             .params
             .iter()
             .map(|(_, val)| *val)
             .zip(abs_args.iter())
+            .zip(abs_generic_args.iter())
         {
             let &val = self.value_map.get(&(target_ctx, blockparam)).unwrap();
-            log::trace!(
-                "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?}",
-                target.block, target_ctx, blockparam, val, abs);
+            log::debug!(
+                "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?} from branch arg {}",
+                target.block, target_ctx, blockparam, val, abs, generic_arg);
             changed |= self.def_value(orig_block, target_ctx, blockparam, val, abs.clone());
         }
 
@@ -744,6 +747,7 @@ impl<'a> Evaluator<'a> {
                         target,
                         &PendingContext::Single(*default_context),
                     );
+                    log::debug!("switch on terminator due to Switch pending context: index {} targets {:?} default {:?}", index, targets, default);
                     Terminator::Select {
                         value: *index,
                         targets,
@@ -985,8 +989,14 @@ impl<'a> Evaluator<'a> {
 
                     let pending_context = if let Some(pc) = abs[0].is_const_u32() {
                         PendingContext::Single(make_context(pc))
-                    } else if let AbstractValue::SwitchValue(pcs, index, default_pc) = &abs[0] {
+                    } else if let AbstractValue::SwitchValue(pcs, index, default_pc, _) = &abs[0] {
                         let default_pc = default_pc.unwrap();
+                        log::debug!(
+                            "Pending context becomes switch: index {} pcs {:?} default {:?}",
+                            index,
+                            pcs,
+                            default_pc
+                        );
                         PendingContext::Switch(
                             *index,
                             pcs.iter()
@@ -994,7 +1004,7 @@ impl<'a> Evaluator<'a> {
                                 .collect(),
                             make_context(default_pc.integer_value().unwrap() as u32),
                         )
-                    } else if let AbstractValue::SwitchDefault(default_pc) = &abs[0] {
+                    } else if let AbstractValue::SwitchDefault(default_pc, _) = &abs[0] {
                         PendingContext::Single(make_context(
                             default_pc.integer_value().unwrap() as u32
                         ))
@@ -1017,13 +1027,19 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.trace_line {
                     let line_num = abs[0].is_const_u32().unwrap_or(0);
-                    log::trace!("trace: line number {}: current context {} at block {}, pending context {:?}",
+                    log::info!("trace: line number {}: current context {} at block {}, pending context {:?}",
                                 line_num, state.context, orig_block, state.pending_context);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_const32 {
                     log::trace!("assert_const32: abs {:?} line {:?}", abs[0], abs[1]);
-                    if abs[0].is_const_u32().is_none() {
-                        panic!("weval_assert_const32() failed: line {:?}", abs[1]);
+                    if abs[0].is_const_u32().is_none()
+                        && !abs[0].is_switch_value()
+                        && !abs[0].is_switch_default()
+                    {
+                        panic!(
+                            "weval_assert_const32() failed: {:?}: line {:?}",
+                            abs[0], abs[1]
+                        );
                     }
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_switchvalue {
@@ -1044,25 +1060,25 @@ impl<'a> Evaluator<'a> {
                     }
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.switch_value {
-                    if let Some(limit) = abs[1].is_const_u32() {
-                        let vals = (0..limit).map(WasmVal::I32).collect::<Vec<_>>();
+                    if let AbstractValue::Concrete(WasmVal::I32(limit), tags) = &abs[1] {
+                        let vals = (0..(*limit)).map(WasmVal::I32).collect::<Vec<_>>();
                         log::info!("Producing switch value for {}: {:?}", orig_values[0], vals);
                         EvalResult::Alias(
-                            AbstractValue::SwitchValue(vals, values[0], None),
+                            AbstractValue::SwitchValue(vals, values[0], None, *tags),
                             values[0],
                         )
                     } else {
                         panic!("Limit to weval_switch_value() is not a constant");
                     }
                 } else if Some(function_index) == self.intrinsics.switch_default {
-                    if let Some(default) = abs[0].is_const_u32() {
+                    if let AbstractValue::Concrete(WasmVal::I32(default), tags) = &abs[0] {
                         log::info!(
                             "Producing switch default for {}: {}",
                             orig_values[0],
                             default
                         );
                         EvalResult::Alias(
-                            AbstractValue::SwitchDefault(WasmVal::I32(default)),
+                            AbstractValue::SwitchDefault(WasmVal::I32(*default), *tags),
                             values[0],
                         )
                     } else {
@@ -1802,19 +1818,20 @@ impl<'a> Evaluator<'a> {
             let index = abs.iter().position(|abs| abs.is_switch_value()).unwrap();
             let pre = &abs[0..index];
             let post = &abs[(index + 1)..];
-            let (index, switch_values, def_value) = match &abs[index] {
-                AbstractValue::SwitchValue(values, index, def_value) => {
-                    (*index, values, *def_value)
+            let (index, switch_values, def_value, tags) = match &abs[index] {
+                AbstractValue::SwitchValue(values, index, def_value, tags) => {
+                    (*index, values, *def_value, *tags)
                 }
                 _ => unreachable!(),
             };
 
             let mut new_values = vec![];
             let mut private_state = state.clone();
+            let mut all_tags = ValueTags::default();
             for &value in switch_values.iter().chain(def_value.iter()) {
                 let mut abs = vec![];
                 abs.extend(pre.iter().cloned());
-                abs.push(AbstractValue::Concrete(value, ValueTags::default()));
+                abs.push(AbstractValue::Concrete(value, tags));
                 abs.extend(post.iter().cloned());
                 let result = self.abstract_eval(
                     orig_block,
@@ -1832,7 +1849,10 @@ impl<'a> Evaluator<'a> {
                     return Ok(EvalResult::Unhandled);
                 }
                 match result {
-                    EvalResult::Normal(AbstractValue::Concrete(val, _)) => new_values.push(val),
+                    EvalResult::Normal(AbstractValue::Concrete(val, tags)) => {
+                        new_values.push(val);
+                        all_tags = all_tags | tags;
+                    }
                     _ => return Ok(EvalResult::Unhandled),
                 }
             }
@@ -1849,7 +1869,7 @@ impl<'a> Evaluator<'a> {
                 def_value
             );
             return Ok(EvalResult::Normal(AbstractValue::SwitchValue(
-                new_values, index, def_value,
+                new_values, index, def_value, all_tags,
             )));
         }
 
@@ -1859,14 +1879,14 @@ impl<'a> Evaluator<'a> {
             let index = abs.iter().position(|abs| abs.is_switch_default()).unwrap();
             let pre = &abs[0..index];
             let post = &abs[(index + 1)..];
-            let def_value = match &abs[index] {
-                AbstractValue::SwitchDefault(def_value) => *def_value,
+            let (def_value, tags) = match &abs[index] {
+                AbstractValue::SwitchDefault(def_value, tags) => (*def_value, *tags),
                 _ => unreachable!(),
             };
 
             let mut abs = vec![];
             abs.extend(pre.iter().cloned());
-            abs.push(AbstractValue::Concrete(def_value, ValueTags::default()));
+            abs.push(AbstractValue::Concrete(def_value, tags));
             abs.extend(post.iter().cloned());
             let mut private_state = state.clone();
             let result = self.abstract_eval(
@@ -1885,9 +1905,9 @@ impl<'a> Evaluator<'a> {
                 return Ok(EvalResult::Unhandled);
             }
             match result {
-                EvalResult::Normal(AbstractValue::Concrete(val, _)) => {
+                EvalResult::Normal(AbstractValue::Concrete(val, tags)) => {
                     log::info!(" -> value {:?}", val);
-                    return Ok(EvalResult::Normal(AbstractValue::SwitchDefault(val)));
+                    return Ok(EvalResult::Normal(AbstractValue::SwitchDefault(val, tags)));
                 }
                 _ => {}
             }
