@@ -79,7 +79,7 @@ impl Intrinsics {
             switch_default: find_exported_func(
                 module,
                 "weval.switch.default",
-                &[Type::I32],
+                &[Type::I32, Type::I32, Type::I32],
                 &[Type::I32],
             ),
         }

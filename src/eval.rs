@@ -614,12 +614,13 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn evaluate_block_target(
+    fn evaluate_block_target<F: Fn(AbstractValue) -> AbstractValue>(
         &mut self,
         orig_block: Block,
         state: &PointState,
         target: &BlockTarget,
         pending_context: &PendingContext,
+        abs_map: F,
     ) -> BlockTarget {
         let mut args = vec![];
         let mut abs_args = vec![];
@@ -647,7 +648,7 @@ impl<'a> Evaluator<'a> {
                 abs,
             );
             args.push(val);
-            abs_args.push(abs);
+            abs_args.push(abs_map(abs));
         }
 
         // Parallel-move semantics: read all uses above, then write
@@ -701,6 +702,7 @@ impl<'a> Evaluator<'a> {
                             state,
                             if_true,
                             &state.pending_context,
+                            |abs| abs,
                         ),
                     },
                     Some(false) => Terminator::Br {
@@ -709,6 +711,7 @@ impl<'a> Evaluator<'a> {
                             state,
                             if_false,
                             &state.pending_context,
+                            |abs| abs,
                         ),
                     },
                     None => Terminator::CondBr {
@@ -718,12 +721,14 @@ impl<'a> Evaluator<'a> {
                             state,
                             if_true,
                             &state.pending_context,
+                            |abs| abs,
                         ),
                         if_false: self.evaluate_block_target(
                             orig_block,
                             state,
                             if_false,
                             &state.pending_context,
+                            |abs| abs,
                         ),
                     },
                 }
@@ -732,12 +737,14 @@ impl<'a> Evaluator<'a> {
                 PendingContext::Switch(index, contexts, default_context) => {
                     let targets = contexts
                         .iter()
-                        .map(|&context| {
+                        .enumerate()
+                        .map(|(i, &context)| {
                             self.evaluate_block_target(
                                 orig_block,
                                 state,
                                 target,
                                 &PendingContext::Single(context),
+                                |abs| abs.remap_switch_value(*index, contexts.len(), i),
                             )
                         })
                         .collect::<Vec<BlockTarget>>();
@@ -746,6 +753,7 @@ impl<'a> Evaluator<'a> {
                         state,
                         target,
                         &PendingContext::Single(*default_context),
+                        |abs| abs.remap_switch_default(*index, contexts.len()),
                     );
                     log::debug!("switch on terminator due to Switch pending context: index {} targets {:?} default {:?}", index, targets, default);
                     Terminator::Select {
@@ -760,6 +768,7 @@ impl<'a> Evaluator<'a> {
                         state,
                         target,
                         &state.pending_context,
+                        |abs| abs,
                     ),
                 },
             },
@@ -782,6 +791,7 @@ impl<'a> Evaluator<'a> {
                             state,
                             target,
                             &state.pending_context,
+                            |abs| abs,
                         ),
                     }
                 } else {
@@ -793,6 +803,7 @@ impl<'a> Evaluator<'a> {
                                 state,
                                 target,
                                 &state.pending_context,
+                                |abs| abs,
                             )
                         })
                         .collect::<Vec<_>>();
@@ -801,6 +812,7 @@ impl<'a> Evaluator<'a> {
                         state,
                         default,
                         &state.pending_context,
+                        |abs| abs,
                     );
                     Terminator::Select {
                         value,
@@ -989,7 +1001,7 @@ impl<'a> Evaluator<'a> {
 
                     let pending_context = if let Some(pc) = abs[0].is_const_u32() {
                         PendingContext::Single(make_context(pc))
-                    } else if let AbstractValue::SwitchValue(pcs, index, default_pc, _) = &abs[0] {
+                    } else if let AbstractValue::SwitchValue(index, pcs, default_pc, _) = &abs[0] {
                         let default_pc = default_pc.unwrap();
                         log::debug!(
                             "Pending context becomes switch: index {} pcs {:?} default {:?}",
@@ -1004,7 +1016,9 @@ impl<'a> Evaluator<'a> {
                                 .collect(),
                             make_context(default_pc.integer_value().unwrap() as u32),
                         )
-                    } else if let AbstractValue::SwitchDefault(default_pc, _) = &abs[0] {
+                    } else if let AbstractValue::SwitchDefault(_index, _limit, default_pc, _) =
+                        &abs[0]
+                    {
                         PendingContext::Single(make_context(
                             default_pc.integer_value().unwrap() as u32
                         ))
@@ -1064,22 +1078,33 @@ impl<'a> Evaluator<'a> {
                         let vals = (0..(*limit)).map(WasmVal::I32).collect::<Vec<_>>();
                         log::info!("Producing switch value for {}: {:?}", orig_values[0], vals);
                         EvalResult::Alias(
-                            AbstractValue::SwitchValue(vals, values[0], None, *tags),
+                            AbstractValue::SwitchValue(values[0], vals, None, *tags),
                             values[0],
                         )
                     } else {
                         panic!("Limit to weval_switch_value() is not a constant");
                     }
                 } else if Some(function_index) == self.intrinsics.switch_default {
-                    if let AbstractValue::Concrete(WasmVal::I32(default), tags) = &abs[0] {
+                    if let (
+                        AbstractValue::Concrete(WasmVal::I32(default), tags),
+                        AbstractValue::Concrete(WasmVal::I32(limit), _),
+                    ) = (&abs[0], &abs[2])
+                    {
+                        let index = values[1];
                         log::info!(
-                            "Producing switch default for {}: {}",
+                            "Producing switch default for {}: {} (limit {})",
                             orig_values[0],
-                            default
+                            default,
+                            limit
                         );
                         EvalResult::Alias(
-                            AbstractValue::SwitchDefault(WasmVal::I32(*default), *tags),
-                            values[0],
+                            AbstractValue::SwitchDefault(
+                                index,
+                                *limit,
+                                WasmVal::I32(*default),
+                                *tags,
+                            ),
+                            values[1],
                         )
                     } else {
                         panic!("Default index arg to weval_switch_default() is not a constant");
@@ -1819,7 +1844,7 @@ impl<'a> Evaluator<'a> {
             let pre = &abs[0..index];
             let post = &abs[(index + 1)..];
             let (index, switch_values, def_value, tags) = match &abs[index] {
-                AbstractValue::SwitchValue(values, index, def_value, tags) => {
+                AbstractValue::SwitchValue(index, values, def_value, tags) => {
                     (*index, values, *def_value, *tags)
                 }
                 _ => unreachable!(),
@@ -1869,7 +1894,7 @@ impl<'a> Evaluator<'a> {
                 def_value
             );
             return Ok(EvalResult::Normal(AbstractValue::SwitchValue(
-                new_values, index, def_value, all_tags,
+                index, new_values, def_value, all_tags,
             )));
         }
 
@@ -1879,8 +1904,10 @@ impl<'a> Evaluator<'a> {
             let index = abs.iter().position(|abs| abs.is_switch_default()).unwrap();
             let pre = &abs[0..index];
             let post = &abs[(index + 1)..];
-            let (def_value, tags) = match &abs[index] {
-                AbstractValue::SwitchDefault(def_value, tags) => (*def_value, *tags),
+            let (index, limit, def_value, tags) = match &abs[index] {
+                AbstractValue::SwitchDefault(index, limit, def_value, tags) => {
+                    (*index, *limit, *def_value, *tags)
+                }
                 _ => unreachable!(),
             };
 
@@ -1907,7 +1934,9 @@ impl<'a> Evaluator<'a> {
             match result {
                 EvalResult::Normal(AbstractValue::Concrete(val, tags)) => {
                     log::info!(" -> value {:?}", val);
-                    return Ok(EvalResult::Normal(AbstractValue::SwitchDefault(val, tags)));
+                    return Ok(EvalResult::Normal(AbstractValue::SwitchDefault(
+                        index, limit, val, tags,
+                    )));
                 }
                 _ => {}
             }
