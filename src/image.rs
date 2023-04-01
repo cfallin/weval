@@ -141,6 +141,19 @@ impl Image {
         }
     }
 
+    pub fn read_str(&self, id: Memory, mut addr: u32) -> anyhow::Result<String> {
+        let mut bytes = vec![];
+        loop {
+            let byte = self.read_u8(id, addr)?;
+            if byte == 0 {
+                break;
+            }
+            bytes.push(byte);
+            addr += 1;
+        }
+        Ok(std::str::from_utf8(&bytes[..])?.to_owned())
+    }
+
     pub fn write_u8(&mut self, id: Memory, addr: u32, value: u8) -> anyhow::Result<()> {
         let image = self.memories.get_mut(&id).unwrap();
         *image

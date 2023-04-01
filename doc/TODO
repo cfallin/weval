@@ -1,0 +1,5 @@
+- give immutableScriptData as a constant param too, and use it to get
+  tableSwitchCaseOffset and tableSwitchCasePC
+- rethink SwitchValue system? "specialize-switch" intrinsic that
+  converts next edge (if/else?) into a switch, then let the rest fall
+  out?

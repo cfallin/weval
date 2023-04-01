@@ -161,7 +161,17 @@ impl AbstractValue {
     }
 
     pub fn meet(a: &AbstractValue, b: &AbstractValue) -> AbstractValue {
-        match (a, b) {
+        let info = if a.is_switch_value()
+            || a.is_switch_default()
+            || b.is_switch_value()
+            || b.is_switch_default()
+        {
+            eprintln!("meet: {:?} + {:?}", a, b);
+            true
+        } else {
+            false
+        };
+        let result = match (a, b) {
             (AbstractValue::Top, x) | (x, AbstractValue::Top) => x.clone(),
             (x, y) if x == y => x.clone(),
             (AbstractValue::Concrete(a, t1), AbstractValue::Concrete(b, t2)) if a == b => {
@@ -211,7 +221,11 @@ impl AbstractValue {
                 log::trace!("values {:?} and {:?} meet to Runtime", av1, av2);
                 AbstractValue::Runtime(None, av1.tags().meet(av2.tags()))
             }
+        };
+        if info {
+            eprintln!(" -> {:?}", result);
         }
+        result
     }
 
     pub fn prop_sticky_tags(self, other: &AbstractValue) -> AbstractValue {

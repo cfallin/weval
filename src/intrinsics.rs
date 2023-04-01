@@ -18,6 +18,7 @@ pub struct Intrinsics {
     pub assert_const_memory: Option<Func>,
     pub switch_value: Option<Func>,
     pub switch_default: Option<Func>,
+    pub print: Option<Func>,
 }
 
 impl Intrinsics {
@@ -81,6 +82,12 @@ impl Intrinsics {
                 "weval.switch.default",
                 &[Type::I32, Type::I32, Type::I32],
                 &[Type::I32],
+            ),
+            print: find_exported_func(
+                module,
+                "weval.print",
+                &[Type::I32, Type::I32, Type::I32],
+                &[],
             ),
         }
     }

@@ -133,7 +133,7 @@ fn partially_evaluate_func(
     let orig_name = module.funcs[directive.func].name();
     let sig = module.funcs[directive.func].sig();
 
-    log::debug!("Specializing: {}", directive.func);
+    eprintln!("Specializing: {}", directive.func);
     log::debug!("body:\n{}", generic.display("| ", Some(module)));
 
     // Compute CFG info.
@@ -223,7 +223,7 @@ impl EvalResult {
 
 impl<'a> Evaluator<'a> {
     fn evaluate(&mut self) -> anyhow::Result<()> {
-        while let Some((orig_block, ctx, new_block)) = self.queue.pop_front() {
+        while let Some((orig_block, ctx, new_block)) = self.queue.pop_back() {
             self.queue_set.remove(&(orig_block, ctx));
             self.evaluate_block(orig_block, ctx, new_block)?;
         }
@@ -241,6 +241,7 @@ impl<'a> Evaluator<'a> {
         // recomputing a specialization with an existing output.
         self.func.blocks[new_block].insts.clear();
 
+        eprintln!("evaluating {}", orig_block);
         log::trace!(
             "evaluate_block: orig {} ctx {} new {}",
             orig_block,
@@ -545,7 +546,7 @@ impl<'a> Evaluator<'a> {
             context,
             self.context_desc(context)
         );
-        log::trace!(
+        eprintln!(
             "create_block: orig_block {} context {} -> {}",
             orig_block,
             context,
@@ -571,7 +572,7 @@ impl<'a> Evaluator<'a> {
         target: Block,
         pending_context: &PendingContext,
     ) -> (Block, Context) {
-        log::trace!(
+        eprintln!(
             "targeting block {} from {}, in context {}",
             target,
             orig_block,
@@ -1109,6 +1110,16 @@ impl<'a> Evaluator<'a> {
                     } else {
                         panic!("Default index arg to weval_switch_default() is not a constant");
                     }
+                } else if Some(function_index) == self.intrinsics.print {
+                    let message_ptr = abs[0].is_const_u32().unwrap();
+                    let message = self
+                        .image
+                        .read_str(self.image.main_heap.unwrap(), message_ptr)
+                        .unwrap();
+                    let line = abs[1].is_const_u32().unwrap();
+                    let val = abs[2].clone();
+                    eprintln!("print: line {}: {}: {:?}", line, message, val);
+                    EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
                 }
