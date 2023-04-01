@@ -1,7 +1,7 @@
-SSA revamp:
-
-- define context in terms of domtree
-  - invariant: a value used at a block in a given context can only be
-    defined in that context or a parent context
-  - static pass to find blocks that set PC; in context, note block
-    where set, and pop when going to block not dom'd by it
+- SM+weval
+  - (X) constant memory for resumeOffsets and tableSwitchCaseOffset
+    - transitively-constant memory?
+  - (X) finish switch-meet-with-constant update
+  - update all SwitchValue and SwitchDefault values to scalar Constants when
+    meeting blockparams
+    - need index in SwitchDefault too
