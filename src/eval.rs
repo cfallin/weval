@@ -418,7 +418,7 @@ impl<'a> Evaluator<'a> {
                     let (val, _) = self.use_value(state.context, orig_block, *val);
                     Some((
                         ValueDef::PickOutput(val, *idx, *ty),
-                        AbstractValue::Runtime(None, ValueTags::default()),
+                        AbstractValue::Runtime(Some(inst), ValueTags::default()),
                     ))
                 }
                 ValueDef::Operator(op, args, tys) => {
@@ -1858,6 +1858,7 @@ impl<'a> Evaluator<'a> {
                 abs.extend(pre.iter().cloned());
                 abs.push(AbstractValue::Concrete(value, tags));
                 abs.extend(post.iter().cloned());
+                log::debug!("SwitchValue: inst {} op {:?} abs {:?}", orig_inst, op, abs);
                 let result = self.abstract_eval(
                     orig_block,
                     new_block,
@@ -1915,6 +1916,7 @@ impl<'a> Evaluator<'a> {
             abs.extend(pre.iter().cloned());
             abs.push(AbstractValue::Concrete(def_value, tags));
             abs.extend(post.iter().cloned());
+            log::debug!("SwitchDefault inst {} op {:?} abs {:?}", orig_inst, op, abs);
             let mut private_state = state.clone();
             let result = self.abstract_eval(
                 orig_block,
@@ -1933,7 +1935,7 @@ impl<'a> Evaluator<'a> {
             }
             match result {
                 EvalResult::Normal(AbstractValue::Concrete(val, tags)) => {
-                    log::info!(" -> value {:?}", val);
+                    log::debug!(" -> value {:?} tags {:?}", val, tags);
                     return Ok(EvalResult::Normal(AbstractValue::SwitchDefault(
                         index, limit, val, tags,
                     )));

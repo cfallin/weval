@@ -190,17 +190,24 @@ impl AbstractValue {
             ) if val1 == val2 => {
                 AbstractValue::SwitchDefault(*index1, *limit1, *val1, t1.meet(*t2))
             }
+            (x, AbstractValue::Concrete(..)) | (AbstractValue::Concrete(..), x)
+                if x.is_switch_value() || x.is_switch_default() =>
+            {
+                x.clone()
+            }
             (AbstractValue::Runtime(cause1, t1), AbstractValue::Runtime(cause2, t2)) => {
+                log::debug!(
+                    "runtime({:?} meet runtime({:?}) -> runtime({:?})",
+                    cause1,
+                    cause2,
+                    cause1.or(*cause2)
+                );
                 AbstractValue::Runtime(cause1.or(*cause2), t1.meet(*t2))
             }
+            (AbstractValue::Runtime(cause1, t1), x) | (x, AbstractValue::Runtime(cause1, t1)) => {
+                AbstractValue::Runtime(*cause1, t1.meet(x.tags()))
+            }
             (av1, av2) => {
-                if av1.is_switch_value()
-                    || av1.is_switch_default()
-                    || av2.is_switch_value()
-                    || av2.is_switch_default()
-                {
-                    log::trace!("Meet({:?}, {:?}) -> runtime", av1, av2);
-                }
                 log::trace!("values {:?} and {:?} meet to Runtime", av1, av2);
                 AbstractValue::Runtime(None, av1.tags().meet(av2.tags()))
             }
@@ -244,24 +251,32 @@ impl AbstractValue {
     }
 
     pub fn remap_switch_value(self, index: Value, limit: usize, remapped_const: usize) -> Self {
-        match self {
-            Self::SwitchValue(sw_index, ref sw_values, _, tags)
+        match &self {
+            &Self::SwitchValue(sw_index, ref sw_values, _, tags)
                 if sw_index == index && sw_values.len() == limit =>
             {
+                eprintln!("remap switch: {:?} index {}", self, remapped_const);
                 Self::Concrete(sw_values[remapped_const], tags)
             }
-            x => x,
+            x => x.clone(),
         }
     }
 
     pub fn remap_switch_default(self, index: Value, limit: usize) -> Self {
-        match self {
-            Self::SwitchDefault(sw_index, sw_limit, sw_default, tags)
+        match &self {
+            &Self::SwitchDefault(sw_index, sw_limit, sw_default, tags)
                 if sw_index == index && sw_limit == limit as u32 =>
             {
+                eprintln!("remap default: {:?} -> {:?}", self, sw_default);
                 Self::Concrete(sw_default, tags)
             }
-            x => x,
+            &Self::SwitchValue(sw_index, ref sw_values, Some(sw_default), tags)
+                if sw_index == index && sw_values.len() == limit =>
+            {
+                eprintln!("remap default: {:?} -> {:?}", self, sw_default);
+                Self::Concrete(sw_default, tags)
+            }
+            x => x.clone(),
         }
     }
 }
