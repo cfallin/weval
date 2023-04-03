@@ -193,6 +193,7 @@ pub enum PendingContext {
     None,
     Single(Context),
     Switch(Value, Vec<Context>, Context),
+    IncompleteSwitch,
 }
 
 impl PendingContext {
@@ -201,6 +202,7 @@ impl PendingContext {
             Self::None => None,
             Self::Single(c) => Some(*c),
             Self::Switch(..) => panic!(),
+            Self::IncompleteSwitch => panic!(),
         }
     }
 }

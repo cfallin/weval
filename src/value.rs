@@ -76,7 +76,7 @@ pub enum AbstractValue {
     /// Evaluated as a vector of Concrete values.
     SwitchValue(Value, Vec<WasmVal>, Option<WasmVal>, ValueTags),
     /// A concrete value to be used as the default value for a switch.
-    SwitchDefault(Value, u32, WasmVal, ValueTags),
+    SwitchDefault(WasmVal, ValueTags),
     /// A value only computed at runtime. The instruction that
     /// computed it is specified, if known.
     Runtime(Option<waffle::Value>, ValueTags),
@@ -141,7 +141,7 @@ impl AbstractValue {
             &AbstractValue::Concrete(_, t) => t,
             &AbstractValue::Runtime(_, t) => t,
             &AbstractValue::SwitchValue(_, _, _, t) => t,
-            &AbstractValue::SwitchDefault(_, _, _, t) => t,
+            &AbstractValue::SwitchDefault(_, t) => t,
         }
     }
 
@@ -154,8 +154,8 @@ impl AbstractValue {
             &AbstractValue::SwitchValue(index, ref vals, def, t) => {
                 AbstractValue::SwitchValue(index, vals.clone(), def, t | new_tags)
             }
-            &AbstractValue::SwitchDefault(index, limit, val, t) => {
-                AbstractValue::SwitchDefault(index, limit, val, t | new_tags)
+            &AbstractValue::SwitchDefault(val, t) => {
+                AbstractValue::SwitchDefault(val, t | new_tags)
             }
         }
     }
@@ -178,27 +178,49 @@ impl AbstractValue {
                 AbstractValue::Concrete(*a, t1.meet(*t2))
             }
             (
-                AbstractValue::SwitchValue(index1, vals, None, t1),
-                AbstractValue::SwitchDefault(index2, limit, default, t2),
+                AbstractValue::SwitchValue(index, vals, None, t1),
+                AbstractValue::SwitchDefault(default, t2),
             )
             | (
-                AbstractValue::SwitchDefault(index2, limit, default, t2),
-                AbstractValue::SwitchValue(index1, vals, None, t1),
-            ) if *limit == vals.len() as u32 && index1 == index2 => AbstractValue::SwitchValue(
-                *index1,
+                AbstractValue::SwitchDefault(default, t2),
+                AbstractValue::SwitchValue(index, vals, None, t1),
+            ) => AbstractValue::SwitchValue(
+                *index,
                 vals.clone(),
                 Some(default.clone()),
                 t1.meet(*t2),
             ),
             (
-                AbstractValue::SwitchDefault(index1, limit1, val1, t1),
-                AbstractValue::Concrete(val2, t2),
+                AbstractValue::SwitchValue(index1, vals1, None, t1),
+                AbstractValue::SwitchValue(index2, vals2, Some(default), t2),
             )
             | (
-                AbstractValue::Concrete(val2, t2),
-                AbstractValue::SwitchDefault(index1, limit1, val1, t1),
-            ) if val1 == val2 => {
-                AbstractValue::SwitchDefault(*index1, *limit1, *val1, t1.meet(*t2))
+                AbstractValue::SwitchValue(index2, vals2, Some(default), t2),
+                AbstractValue::SwitchValue(index1, vals1, None, t1),
+            ) if *index1 == *index2 && vals1 == vals2 => AbstractValue::SwitchValue(
+                *index1,
+                vals1.clone(),
+                Some(default.clone()),
+                t1.meet(*t2),
+            ),
+            (
+                AbstractValue::SwitchValue(index, vals, Some(default1), t1),
+                AbstractValue::SwitchDefault(default2, t2),
+            )
+            | (
+                AbstractValue::SwitchDefault(default2, t2),
+                AbstractValue::SwitchValue(index, vals, Some(default1), t1),
+            ) if *default1 == *default2 => AbstractValue::SwitchValue(
+                *index,
+                vals.clone(),
+                Some(default1.clone()),
+                t1.meet(*t2),
+            ),
+            (AbstractValue::SwitchDefault(val1, t1), AbstractValue::Concrete(val2, t2))
+            | (AbstractValue::Concrete(val2, t2), AbstractValue::SwitchDefault(val1, t1))
+                if val1 == val2 =>
+            {
+                AbstractValue::SwitchDefault(*val1, t1.meet(*t2))
             }
             (x, AbstractValue::Concrete(..)) | (AbstractValue::Concrete(..), x)
                 if x.is_switch_value() || x.is_switch_default() =>
@@ -278,9 +300,7 @@ impl AbstractValue {
 
     pub fn remap_switch_default(self, index: Value, limit: usize) -> Self {
         match &self {
-            &Self::SwitchDefault(sw_index, sw_limit, sw_default, tags)
-                if sw_index == index && sw_limit == limit as u32 =>
-            {
+            &Self::SwitchDefault(sw_default, tags) => {
                 eprintln!("remap default: {:?} -> {:?}", self, sw_default);
                 Self::Concrete(sw_default, tags)
             }
