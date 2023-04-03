@@ -161,17 +161,7 @@ impl AbstractValue {
     }
 
     pub fn meet(a: &AbstractValue, b: &AbstractValue) -> AbstractValue {
-        let info = if a.is_switch_value()
-            || a.is_switch_default()
-            || b.is_switch_value()
-            || b.is_switch_default()
-        {
-            eprintln!("meet: {:?} + {:?}", a, b);
-            true
-        } else {
-            false
-        };
-        let result = match (a, b) {
+        match (a, b) {
             (AbstractValue::Top, x) | (x, AbstractValue::Top) => x.clone(),
             (x, y) if x == y => x.clone(),
             (AbstractValue::Concrete(a, t1), AbstractValue::Concrete(b, t2)) if a == b => {
@@ -243,11 +233,7 @@ impl AbstractValue {
                 log::trace!("values {:?} and {:?} meet to Runtime", av1, av2);
                 AbstractValue::Runtime(None, av1.tags().meet(av2.tags()))
             }
-        };
-        if info {
-            eprintln!(" -> {:?}", result);
         }
-        result
     }
 
     pub fn prop_sticky_tags(self, other: &AbstractValue) -> AbstractValue {
@@ -291,7 +277,7 @@ impl AbstractValue {
             &Self::SwitchValue(sw_index, ref sw_values, _, tags)
                 if sw_index == index && sw_values.len() == limit =>
             {
-                eprintln!("remap switch: {:?} index {}", self, remapped_const);
+                log::trace!("remap switch: {:?} index {}", self, remapped_const);
                 Self::Concrete(sw_values[remapped_const], tags)
             }
             x => x.clone(),
@@ -301,13 +287,13 @@ impl AbstractValue {
     pub fn remap_switch_default(self, index: Value, limit: usize) -> Self {
         match &self {
             &Self::SwitchDefault(sw_default, tags) => {
-                eprintln!("remap default: {:?} -> {:?}", self, sw_default);
+                log::trace!("remap default: {:?} -> {:?}", self, sw_default);
                 Self::Concrete(sw_default, tags)
             }
             &Self::SwitchValue(sw_index, ref sw_values, Some(sw_default), tags)
                 if sw_index == index && sw_values.len() == limit =>
             {
-                eprintln!("remap default: {:?} -> {:?}", self, sw_default);
+                log::trace!("remap default: {:?} -> {:?}", self, sw_default);
                 Self::Concrete(sw_default, tags)
             }
             x => x.clone(),
