@@ -771,9 +771,7 @@ impl<'a> Evaluator<'a> {
                         |abs| abs,
                     ),
                 },
-                PendingContext::IncompleteSwitch => {
-                    Terminator::Unreachable
-                }
+                PendingContext::IncompleteSwitch => Terminator::Unreachable,
             },
             &Terminator::Select {
                 value,
@@ -1022,7 +1020,7 @@ impl<'a> Evaluator<'a> {
                         } else {
                             PendingContext::IncompleteSwitch
                         }
-                    } else if let AbstractValue::SwitchDefault(default_pc, _) = &abs[0] {
+                    } else if let AbstractValue::SwitchDefault(_, default_pc, _) = &abs[0] {
                         PendingContext::Single(make_context(
                             default_pc.integer_value().unwrap() as u32
                         ))
@@ -1062,9 +1060,7 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_switchvalue {
                     log::trace!("assert_switchvalue: abs {:?}", abs[0]);
-                    if !matches!(&abs[0], AbstractValue::SwitchValue(..))
-                        && !matches!(&abs[0], AbstractValue::SwitchDefault(..))
-                    {
+                    if !abs[0].is_switch_value() && !abs[0].is_switch_default() {
                         panic!(
                             "weval_assert_switchvalue() failed: orig value {}: {:?}",
                             orig_values[0], abs[0]
@@ -1089,10 +1085,8 @@ impl<'a> Evaluator<'a> {
                         panic!("Limit to weval_switch_value() is not a constant");
                     }
                 } else if Some(function_index) == self.intrinsics.switch_default {
-                    if let (
-                        AbstractValue::Concrete(WasmVal::I32(default), tags),
-                        AbstractValue::Concrete(WasmVal::I32(limit), _),
-                    ) = (&abs[0], &abs[2])
+                    if let [AbstractValue::Concrete(WasmVal::I32(default), tags1), AbstractValue::SwitchValue(index, _, _, tags2), AbstractValue::Concrete(WasmVal::I32(limit), _)] =
+                        abs
                     {
                         log::info!(
                             "Producing switch default for {}: {} (limit {})",
@@ -1101,7 +1095,11 @@ impl<'a> Evaluator<'a> {
                             limit
                         );
                         EvalResult::Alias(
-                            AbstractValue::SwitchDefault(WasmVal::I32(*default), *tags),
+                            AbstractValue::SwitchDefault(
+                                *index,
+                                WasmVal::I32(*default),
+                                tags1.meet(*tags2),
+                            ),
                             values[1],
                         )
                     } else {
@@ -1115,7 +1113,7 @@ impl<'a> Evaluator<'a> {
                         .unwrap();
                     let line = abs[1].is_const_u32().unwrap();
                     let val = abs[2].clone();
-                    log::debug!("print: line {}: {}: {:?}", line, message, val);
+                    eprintln!("print: line {}: {}: {:?}", line, message, val);
                     EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
@@ -1913,8 +1911,8 @@ impl<'a> Evaluator<'a> {
             let index = abs.iter().position(|abs| abs.is_switch_default()).unwrap();
             let pre = &abs[0..index];
             let post = &abs[(index + 1)..];
-            let (def_value, tags) = match &abs[index] {
-                AbstractValue::SwitchDefault(def_value, tags) => (*def_value, *tags),
+            let (index, def_value, tags) = match &abs[index] {
+                AbstractValue::SwitchDefault(index, def_value, tags) => (*index, *def_value, *tags),
                 _ => unreachable!(),
             };
 
@@ -1942,7 +1940,9 @@ impl<'a> Evaluator<'a> {
             match result {
                 EvalResult::Normal(AbstractValue::Concrete(val, tags)) => {
                     log::debug!(" -> value {:?} tags {:?}", val, tags);
-                    return Ok(EvalResult::Normal(AbstractValue::SwitchDefault(val, tags)));
+                    return Ok(EvalResult::Normal(AbstractValue::SwitchDefault(
+                        index, val, tags,
+                    )));
                 }
                 _ => {}
             }
