@@ -744,7 +744,7 @@ impl<'a> Evaluator<'a> {
                                 state,
                                 target,
                                 &PendingContext::Single(context),
-                                |abs| abs.remap_switch_value(*index, contexts.len(), i),
+                                |abs| abs.remap_switch(*index, i),
                             )
                         })
                         .collect::<Vec<BlockTarget>>();
@@ -753,7 +753,7 @@ impl<'a> Evaluator<'a> {
                         state,
                         target,
                         &PendingContext::Single(*default_context),
-                        |abs| abs.remap_switch_default(*index, contexts.len()),
+                        |abs| abs.remap_switch(*index, contexts.len()),
                     );
                     log::debug!("switch on terminator due to Switch pending context: index {} targets {:?} default {:?}", index, targets, default);
                     Terminator::Select {
@@ -1002,28 +1002,23 @@ impl<'a> Evaluator<'a> {
 
                     let pending_context = if let Some(pc) = abs[0].is_const_u32() {
                         PendingContext::Single(make_context(pc))
-                    } else if let AbstractValue::SwitchValue(index, pcs, default_pc, _) = &abs[0] {
-                        if let Some(default_pc) = default_pc {
-                            log::debug!(
-                                "Pending context becomes switch: index {} pcs {:?} default {:?}",
-                                index,
-                                pcs,
-                                default_pc
-                            );
-                            PendingContext::Switch(
-                                *index,
-                                pcs.iter()
-                                    .map(|pc| make_context(pc.integer_value().unwrap() as u32))
-                                    .collect(),
-                                make_context(default_pc.integer_value().unwrap() as u32),
-                            )
-                        } else {
-                            PendingContext::IncompleteSwitch
-                        }
-                    } else if let AbstractValue::SwitchDefault(_, default_pc, _) = &abs[0] {
-                        PendingContext::Single(make_context(
-                            default_pc.integer_value().unwrap() as u32
-                        ))
+                    } else if let AbstractValue::Switch(index, pcs, default_pc, _) = &abs[0] {
+                        log::debug!(
+                            "Pending context becomes switch: index {} pcs {:?} default {:?}",
+                            index,
+                            pcs,
+                            default_pc
+                        );
+                        PendingContext::Switch(
+                            *index,
+                            pcs.iter()
+                                .map(|pc| make_context(pc.integer_value().unwrap() as u32))
+                                .collect(),
+                            make_context(default_pc.integer_value().unwrap() as u32),
+                        )
+                    } else if abs[0].is_switch_value() || abs[0].is_switch_default() {
+                        log::debug!("Pending context becomes IncompleteSwitch");
+                        PendingContext::IncompleteSwitch
                     } else {
                         panic!("PC is a runtime value: {:?}", abs[0]);
                     };
@@ -1058,15 +1053,6 @@ impl<'a> Evaluator<'a> {
                         );
                     }
                     EvalResult::Elide
-                } else if Some(function_index) == self.intrinsics.assert_switchvalue {
-                    log::trace!("assert_switchvalue: abs {:?}", abs[0]);
-                    if !abs[0].is_switch_value() && !abs[0].is_switch_default() {
-                        panic!(
-                            "weval_assert_switchvalue() failed: orig value {}: {:?}",
-                            orig_values[0], abs[0]
-                        );
-                    }
-                    EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_const_memory {
                     log::trace!("assert_const_memory: abs {:?} line {:?}", abs[0], abs[1]);
                     if !abs[0].tags().contains(ValueTags::const_memory()) {
@@ -1077,29 +1063,30 @@ impl<'a> Evaluator<'a> {
                     if let AbstractValue::Concrete(WasmVal::I32(limit), tags) = &abs[1] {
                         let vals = (0..(*limit)).map(WasmVal::I32).collect::<Vec<_>>();
                         log::info!("Producing switch value for {}: {:?}", orig_values[0], vals);
-                        EvalResult::Alias(
-                            AbstractValue::SwitchValue(values[0], vals, None, *tags),
-                            values[0],
-                        )
+                        EvalResult::Alias(AbstractValue::SwitchValue(vals, *tags), values[0])
                     } else {
                         panic!("Limit to weval_switch_value() is not a constant");
                     }
                 } else if Some(function_index) == self.intrinsics.switch_default {
-                    if let [AbstractValue::Concrete(WasmVal::I32(default), tags1), AbstractValue::SwitchValue(index, _, _, tags2), AbstractValue::Concrete(WasmVal::I32(limit), _)] =
-                        abs
-                    {
+                    if let AbstractValue::Concrete(WasmVal::I32(default), tags) = &abs[0] {
                         log::info!(
-                            "Producing switch default for {}: {} (limit {})",
+                            "Producing switch default for {}: {}",
                             orig_values[0],
                             default,
-                            limit
                         );
                         EvalResult::Alias(
-                            AbstractValue::SwitchDefault(
-                                *index,
-                                WasmVal::I32(*default),
-                                tags1.meet(*tags2),
-                            ),
+                            AbstractValue::SwitchDefault(WasmVal::I32(*default), *tags),
+                            values[0],
+                        )
+                    } else {
+                        panic!("Default index arg to weval_switch_default() is not a constant");
+                    }
+                } else if Some(function_index) == self.intrinsics.switch {
+                    if let AbstractValue::SwitchValueAndDefault(vals, default, tags) = &abs[1] {
+                        let index = values[0];
+                        log::info!("Tagging switch with index {}: {:?}", orig_values[0], abs[1]);
+                        EvalResult::Alias(
+                            AbstractValue::Switch(index, vals.clone(), *default, *tags),
                             values[1],
                         )
                     } else {
@@ -1113,7 +1100,7 @@ impl<'a> Evaluator<'a> {
                         .unwrap();
                     let line = abs[1].is_const_u32().unwrap();
                     let val = abs[2].clone();
-                    eprintln!("print: line {}: {}: {:?}", line, message, val);
+                    log::debug!("print: line {}: {}: {:?}", line, message, val);
                     EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
@@ -1849,10 +1836,8 @@ impl<'a> Evaluator<'a> {
             let index = abs.iter().position(|abs| abs.is_switch_value()).unwrap();
             let pre = &abs[0..index];
             let post = &abs[(index + 1)..];
-            let (index, switch_values, def_value, tags) = match &abs[index] {
-                AbstractValue::SwitchValue(index, values, def_value, tags) => {
-                    (*index, values, *def_value, *tags)
-                }
+            let (switch_values, tags) = match &abs[index] {
+                AbstractValue::SwitchValue(values, tags) => (values, *tags),
                 _ => unreachable!(),
             };
 
