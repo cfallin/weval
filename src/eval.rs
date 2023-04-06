@@ -738,13 +738,13 @@ impl<'a> Evaluator<'a> {
                     let targets = contexts
                         .iter()
                         .enumerate()
-                        .map(|(i, &context)| {
+                        .map(|(_i, &context)| {
                             self.evaluate_block_target(
                                 orig_block,
                                 state,
                                 target,
                                 &PendingContext::Single(context),
-                                |abs| abs.remap_switch(*index, i),
+                                |abs| abs, /* .remap_switch(*index, i), */
                             )
                         })
                         .collect::<Vec<BlockTarget>>();
@@ -753,7 +753,7 @@ impl<'a> Evaluator<'a> {
                         state,
                         target,
                         &PendingContext::Single(*default_context),
-                        |abs| abs.remap_switch(*index, contexts.len()),
+                        |abs| abs, /* .remap_switch(*index, contexts.len()) */
                     );
                     log::debug!("switch on terminator due to Switch pending context: index {} targets {:?} default {:?}", index, targets, default);
                     Terminator::Select {
@@ -876,23 +876,6 @@ impl<'a> Evaluator<'a> {
             return Ok(intrinsic_result);
         }
 
-        let switch_result = self.abstract_eval_switch(
-            orig_block,
-            new_block,
-            orig_inst,
-            op,
-            loc,
-            abs,
-            values,
-            orig_values,
-            tys,
-            state,
-        )?;
-        if switch_result.is_handled() {
-            log::debug!(" -> switch: {:?}", switch_result);
-            return Ok(switch_result);
-        }
-
         let mem_overlay_result =
             self.abstract_eval_mem_overlay(orig_inst, new_block, op, abs, values, tys, state)?;
         if mem_overlay_result.is_handled() {
@@ -1002,23 +985,6 @@ impl<'a> Evaluator<'a> {
 
                     let pending_context = if let Some(pc) = abs[0].is_const_u32() {
                         PendingContext::Single(make_context(pc))
-                    } else if let AbstractValue::Switch(index, pcs, default_pc, _) = &abs[0] {
-                        log::debug!(
-                            "Pending context becomes switch: index {} pcs {:?} default {:?}",
-                            index,
-                            pcs,
-                            default_pc
-                        );
-                        PendingContext::Switch(
-                            *index,
-                            pcs.iter()
-                                .map(|pc| make_context(pc.integer_value().unwrap() as u32))
-                                .collect(),
-                            make_context(default_pc.integer_value().unwrap() as u32),
-                        )
-                    } else if abs[0].is_switch_value() || abs[0].is_switch_default() {
-                        log::debug!("Pending context becomes IncompleteSwitch");
-                        PendingContext::IncompleteSwitch
                     } else {
                         panic!("PC is a runtime value: {:?}", abs[0]);
                     };
@@ -1043,10 +1009,7 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_const32 {
                     log::trace!("assert_const32: abs {:?} line {:?}", abs[0], abs[1]);
-                    if abs[0].is_const_u32().is_none()
-                        && !abs[0].is_switch_value()
-                        && !abs[0].is_switch_default()
-                    {
+                    if abs[0].is_const_u32().is_none() {
                         panic!(
                             "weval_assert_const32() failed: {:?}: line {:?}",
                             abs[0], abs[1]
@@ -1059,39 +1022,6 @@ impl<'a> Evaluator<'a> {
                         panic!("weval_assert_const_memory() failed: line {:?}", abs[1]);
                     }
                     EvalResult::Elide
-                } else if Some(function_index) == self.intrinsics.switch_value {
-                    if let AbstractValue::Concrete(WasmVal::I32(limit), tags) = &abs[1] {
-                        let vals = (0..(*limit)).map(WasmVal::I32).collect::<Vec<_>>();
-                        log::info!("Producing switch value for {}: {:?}", orig_values[0], vals);
-                        EvalResult::Alias(AbstractValue::SwitchValue(vals, *tags), values[0])
-                    } else {
-                        panic!("Limit to weval_switch_value() is not a constant");
-                    }
-                } else if Some(function_index) == self.intrinsics.switch_default {
-                    if let AbstractValue::Concrete(WasmVal::I32(default), tags) = &abs[0] {
-                        log::info!(
-                            "Producing switch default for {}: {}",
-                            orig_values[0],
-                            default,
-                        );
-                        EvalResult::Alias(
-                            AbstractValue::SwitchDefault(WasmVal::I32(*default), *tags),
-                            values[0],
-                        )
-                    } else {
-                        panic!("Default index arg to weval_switch_default() is not a constant");
-                    }
-                } else if Some(function_index) == self.intrinsics.switch {
-                    if let AbstractValue::SwitchValueAndDefault(vals, default, tags) = &abs[1] {
-                        let index = values[0];
-                        log::info!("Tagging switch with index {}: {:?}", orig_values[0], abs[1]);
-                        EvalResult::Alias(
-                            AbstractValue::Switch(index, vals.clone(), *default, *tags),
-                            values[1],
-                        )
-                    } else {
-                        panic!("Default index arg to weval_switch_default() is not a constant");
-                    }
                 } else if Some(function_index) == self.intrinsics.print {
                     let message_ptr = abs[0].is_const_u32().unwrap();
                     let message = self
@@ -1811,129 +1741,6 @@ impl<'a> Evaluator<'a> {
             .prop_sticky_tags(x)
             .prop_sticky_tags(y)
             .prop_sticky_tags(z)
-    }
-
-    fn abstract_eval_switch(
-        &mut self,
-        orig_block: Block,
-        new_block: Block,
-        orig_inst: Value,
-        op: Operator,
-        loc: SourceLoc,
-        abs: &[AbstractValue],
-        values: &[Value],
-        orig_values: &[Value],
-        tys: &[Type],
-        state: &mut PointState,
-    ) -> anyhow::Result<EvalResult> {
-        // If exactly one of the AbstractValues is a SwitchValue,
-        // recursively invoke abstract_eval for each value. If all
-        // results are Concrete, and if no state was updated, then we
-        // can return that this was handled properly, and build a
-        // SwitchValue back from the individual "lanes".
-        if abs.iter().filter(|abs| abs.is_switch_value()).count() == 1 {
-            log::info!(" -> exactly one arg is a SwitchValue");
-            let index = abs.iter().position(|abs| abs.is_switch_value()).unwrap();
-            let pre = &abs[0..index];
-            let post = &abs[(index + 1)..];
-            let (switch_values, tags) = match &abs[index] {
-                AbstractValue::SwitchValue(values, tags) => (values, *tags),
-                _ => unreachable!(),
-            };
-
-            let mut new_values = vec![];
-            let mut private_state = state.clone();
-            let mut all_tags = ValueTags::default();
-            for &value in switch_values.iter().chain(def_value.iter()) {
-                let mut abs = vec![];
-                abs.extend(pre.iter().cloned());
-                abs.push(AbstractValue::Concrete(value, tags));
-                abs.extend(post.iter().cloned());
-                log::debug!("SwitchValue: inst {} op {:?} abs {:?}", orig_inst, op, abs);
-                let result = self.abstract_eval(
-                    orig_block,
-                    new_block,
-                    orig_inst,
-                    op,
-                    loc,
-                    &abs[..],
-                    values,
-                    orig_values,
-                    tys,
-                    &mut private_state,
-                )?;
-                if private_state != *state {
-                    return Ok(EvalResult::Unhandled);
-                }
-                match result {
-                    EvalResult::Normal(AbstractValue::Concrete(val, tags)) => {
-                        new_values.push(val);
-                        all_tags = all_tags | tags;
-                    }
-                    _ => return Ok(EvalResult::Unhandled),
-                }
-            }
-
-            let def_value = if def_value.is_some() {
-                new_values.pop()
-            } else {
-                None
-            };
-
-            log::info!(
-                " -> new_values: {:?}, def_value {:?}",
-                new_values,
-                def_value
-            );
-            return Ok(EvalResult::Normal(AbstractValue::SwitchValue(
-                index, new_values, def_value, all_tags,
-            )));
-        }
-
-        // Likewise, but for SwitchDefault.
-        if abs.iter().filter(|abs| abs.is_switch_default()).count() == 1 {
-            log::info!(" -> exactly one arg is a SwitchDefault");
-            let index = abs.iter().position(|abs| abs.is_switch_default()).unwrap();
-            let pre = &abs[0..index];
-            let post = &abs[(index + 1)..];
-            let (index, def_value, tags) = match &abs[index] {
-                AbstractValue::SwitchDefault(index, def_value, tags) => (*index, *def_value, *tags),
-                _ => unreachable!(),
-            };
-
-            let mut abs = vec![];
-            abs.extend(pre.iter().cloned());
-            abs.push(AbstractValue::Concrete(def_value, tags));
-            abs.extend(post.iter().cloned());
-            log::debug!("SwitchDefault inst {} op {:?} abs {:?}", orig_inst, op, abs);
-            let mut private_state = state.clone();
-            let result = self.abstract_eval(
-                orig_block,
-                new_block,
-                orig_inst,
-                op,
-                loc,
-                &abs[..],
-                values,
-                orig_values,
-                tys,
-                &mut private_state,
-            )?;
-            if private_state != *state {
-                return Ok(EvalResult::Unhandled);
-            }
-            match result {
-                EvalResult::Normal(AbstractValue::Concrete(val, tags)) => {
-                    log::debug!(" -> value {:?} tags {:?}", val, tags);
-                    return Ok(EvalResult::Normal(AbstractValue::SwitchDefault(
-                        index, val, tags,
-                    )));
-                }
-                _ => {}
-            }
-        }
-
-        Ok(EvalResult::Unhandled)
     }
 
     fn add_blockparam_mem_args(&mut self) -> anyhow::Result<()> {

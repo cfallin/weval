@@ -1,7 +1,5 @@
 //! Symbolic and concrete values.
 
-use waffle::Value;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WasmVal {
     I32(u32),
@@ -69,18 +67,6 @@ pub enum AbstractValue {
     /// values can be used as pointers to read
     /// const-at-specialization-time memory.
     Concrete(WasmVal, ValueTags),
-    /// A value known to be within a range at specialization time, to
-    /// be used as a switch selector.
-    ///
-    /// Evaluated as a vector of Concrete values.
-    SwitchValue(Vec<WasmVal>, ValueTags),
-    /// A concrete value to be used as the default value for a switch.
-    SwitchDefault(WasmVal, ValueTags),
-    /// SwitchValue and SwitchDefault combined.
-    SwitchValueAndDefault(Vec<WasmVal>, WasmVal, ValueTags),
-    /// A complete switch input, composed of a SwitchValue meeting a
-    /// SwitchDefault with a given index.
-    Switch(Value, Vec<WasmVal>, WasmVal, ValueTags),
     /// A value only computed at runtime. The instruction that
     /// computed it is specified, if known.
     Runtime(Option<waffle::Value>, ValueTags),
@@ -144,10 +130,6 @@ impl AbstractValue {
             &AbstractValue::SymbolicPtr(_, _) => ValueTags::default(),
             &AbstractValue::Concrete(_, t) => t,
             &AbstractValue::Runtime(_, t) => t,
-            &AbstractValue::SwitchValue(_, t) => t,
-            &AbstractValue::SwitchDefault(_, t) => t,
-            &AbstractValue::SwitchValueAndDefault(_, _, t) => t,
-            &AbstractValue::Switch(_, _, _, t) => t,
         }
     }
 
@@ -157,18 +139,6 @@ impl AbstractValue {
             &AbstractValue::SymbolicPtr(l, off) => AbstractValue::SymbolicPtr(l, off),
             &AbstractValue::Concrete(k, t) => AbstractValue::Concrete(k, t | new_tags),
             &AbstractValue::Runtime(v, t) => AbstractValue::Runtime(v, t | new_tags),
-            &AbstractValue::SwitchValue(ref vals, t) => {
-                AbstractValue::SwitchValue(vals.clone(), t | new_tags)
-            }
-            &AbstractValue::SwitchDefault(val, t) => {
-                AbstractValue::SwitchDefault(val, t | new_tags)
-            }
-            &AbstractValue::SwitchValueAndDefault(ref vals, default, t) => {
-                AbstractValue::SwitchValueAndDefault(vals.clone(), default, t | new_tags)
-            }
-            &AbstractValue::Switch(index, ref vals, default, t) => {
-                AbstractValue::Switch(index, vals.clone(), default, t | new_tags)
-            }
         }
     }
 
@@ -178,21 +148,6 @@ impl AbstractValue {
             (x, y) if x == y => x.clone(),
             (AbstractValue::Concrete(a, t1), AbstractValue::Concrete(b, t2)) if a == b => {
                 AbstractValue::Concrete(*a, t1.meet(*t2))
-            }
-            (AbstractValue::SwitchValue(vals, t1), AbstractValue::SwitchDefault(default, t2))
-            | (AbstractValue::SwitchDefault(default, t2), AbstractValue::SwitchValue(vals, t1)) => {
-                AbstractValue::SwitchValueAndDefault(vals.clone(), default.clone(), t1.meet(*t2))
-            }
-            (AbstractValue::SwitchDefault(val1, t1), AbstractValue::Concrete(val2, t2))
-            | (AbstractValue::Concrete(val2, t2), AbstractValue::SwitchDefault(val1, t1))
-                if val1 == val2 =>
-            {
-                AbstractValue::SwitchDefault(*val1, t1.meet(*t2))
-            }
-            (x, AbstractValue::Concrete(..)) | (AbstractValue::Concrete(..), x)
-                if x.is_switch_value() || x.is_switch_default() =>
-            {
-                x.clone()
             }
             (AbstractValue::Runtime(cause1, t1), AbstractValue::Runtime(cause2, t2)) => {
                 log::debug!(
@@ -230,30 +185,5 @@ impl AbstractValue {
 
     pub fn is_const_truthy(&self) -> Option<bool> {
         self.is_const_u32().map(|k| k != 0)
-    }
-
-    pub fn is_switch_value(&self) -> bool {
-        match self {
-            Self::SwitchValue(..) => true,
-            _ => false,
-        }
-    }
-
-    pub fn is_switch_default(&self) -> bool {
-        match self {
-            Self::SwitchDefault(..) => true,
-            _ => false,
-        }
-    }
-
-    pub fn remap_switch(self, index: Value, index_value: usize) -> Self {
-        match &self {
-            &Self::Switch(sw_index, ref sw_values, sw_default, tags) if sw_index == index => {
-                log::trace!("remap switch: {:?} index {}", self, index_value);
-                let value = sw_values.get(index_value).cloned().unwrap_or(sw_default);
-                Self::Concrete(value, tags)
-            }
-            x => x.clone(),
-        }
     }
 }
