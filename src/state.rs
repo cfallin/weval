@@ -50,6 +50,8 @@ pub type PC = u32;
 pub enum ContextElem {
     Root,
     Loop(PC),
+    PendingSpecialize(Value, u32, u32),
+    Specialized(Value, u32),
 }
 
 /// Arena of contexts.
@@ -78,6 +80,18 @@ impl Contexts {
 
     pub fn leaf_element(&self, context: Context) -> ContextElem {
         self.contexts[context].1
+    }
+
+    pub fn pop_one_loop(&self, mut context: Context) -> Context {
+        loop {
+            match &self.contexts[context] {
+                (parent, ContextElem::Loop(_)) => return *parent,
+                (_, ContextElem::Root) => return context,
+                (parent, _) => {
+                    context = *parent;
+                }
+            }
+        }
     }
 }
 
@@ -183,28 +197,8 @@ pub struct PerContextState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PointState {
     pub context: Context,
-    pub pending_context: PendingContext,
+    pub pending_context: Option<Context>,
     pub flow: ProgPointState,
-}
-
-/// Context to switch to on next out-edge(s).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PendingContext {
-    None,
-    Single(Context),
-    Switch(Value, Vec<Context>, Context),
-    IncompleteSwitch,
-}
-
-impl PendingContext {
-    pub fn single(&self) -> Option<Context> {
-        match self {
-            Self::None => None,
-            Self::Single(c) => Some(*c),
-            Self::Switch(..) => panic!(),
-            Self::IncompleteSwitch => panic!(),
-        }
-    }
 }
 
 fn map_meet_with<

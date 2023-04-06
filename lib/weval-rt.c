@@ -32,6 +32,15 @@ const void* weval_assume_const_memory(const void* value) {
     }
 }
 
+__attribute__((export_name("weval.assume.const.memory.transitive")))
+const void* weval_assume_const_memory_transitive(const void* value) {
+    if (__hook) {
+        return (void*)2;
+    } else {
+        return value;
+    }
+}
+
 __attribute__((export_name("weval.make.symbolic.ptr")))
 void* weval_make_symbolic_ptr(void* value) {
     if (__hook) {
@@ -91,20 +100,20 @@ void weval_assert_const_memory(void* p, uint32_t line_no) {
     __accum += (uint32_t)p + line_no + 7;
 }
 
-__attribute__((export_name("weval.switch.value")))
-uint32_t weval_switch_value(uint32_t input, uint32_t limit) {
+__attribute__((export_name("weval.specialize.value")))
+uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi) {
     if (__hook) {
-        return 5;
+        return 7;
     } else {
-        return input;
+        if (value >= hi) {
+            return hi;
+        } else {
+            return value;
+        }
     }
 }
 
-__attribute__((export_name("weval.switch.default")))
-uint32_t weval_switch_default(uint32_t input) {
-    if (__hook) {
-        return 6;
-    } else {
-        return input;
-    }
+__attribute__((export_name("weval.print")))
+void weval_print(const char* message, uint32_t line, uint32_t val) {
+    __accum += 9;
 }

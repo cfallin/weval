@@ -68,6 +68,7 @@ extern "C" {
 #endif
 
 __attribute__((noinline)) const void* weval_assume_const_memory(const void* p);
+__attribute__((noinline)) const void* weval_assume_const_memory_transitive(const void* p);
 __attribute__((noinline)) void weval_push_context(uint32_t pc);
 __attribute__((noinline)) void weval_pop_context();
 __attribute__((noinline)) void weval_update_context(uint32_t pc);
@@ -78,8 +79,8 @@ __attribute__((noinline)) void weval_abort_specialization(uint32_t line_number,
                                                           uint32_t fatal);
 __attribute__((noinline)) void weval_assert_const32(uint32_t value, uint32_t line_no);
 __attribute__((noinline)) void weval_assert_const_memory(void* p, uint32_t line_no);
-__attribute__((noinline)) uint32_t weval_switch_value(uint32_t input, uint32_t limit);
-__attribute__((noinline)) uint32_t weval_switch_default(uint32_t input);
+__attribute__((noinline)) uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi);
+__attribute__((noinline)) void weval_print(const char* message, uint32_t line, uint32_t val);
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -95,6 +96,14 @@ template <typename T>
 T* assume_const_memory(T* t) {
   return (T*)weval_assume_const_memory((void*)t);
 }
+template <typename T>
+const T* assume_const_memory_transitive(const T* t) {
+  return (const T*)weval_assume_const_memory_transitive((const void*)t);
+}
+template <typename T>
+T* assume_const_memory_transitive(T* t) {
+  return (T*)weval_assume_const_memory_transitive((void*)t);
+}
 
 static inline void push_context(uint32_t pc) { weval_push_context(pc); }
 
@@ -109,15 +118,6 @@ template <typename T>
 void flush_to_mem() {
     weval_flush_to_mem();
 }
-
-static uint32_t switch_value(uint32_t input, uint32_t limit) {
-    return weval_switch_value(input, limit);
-}
-
-static uint32_t switch_default(uint32_t input) {
-    return weval_switch_default(input);
-}
-
 
 }  // namespace weval
 #endif  // __cplusplus

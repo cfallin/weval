@@ -13,8 +13,8 @@ use std::collections::{btree_map::Entry as BTreeEntry, hash_map::Entry as HashEn
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
-    entity::PerEntity, Block, BlockTarget, FuncDecl, FunctionBody, Module, Operator, Signature,
-    SourceLoc, Table, Terminator, Type, Value, ValueDef,
+    entity::PerEntity, Block, BlockDef, BlockTarget, FuncDecl, FunctionBody, Module, Operator,
+    Signature, SourceLoc, Table, Terminator, Type, Value, ValueDef,
 };
 
 struct Evaluator<'a> {
@@ -78,6 +78,7 @@ pub fn partially_evaluate(
             if opts.run_pre {
                 module.replace_body(directive.func, f.clone());
             }
+            split_blocks_at_specialization_points(&mut f, &intrinsics);
             funcs.insert(directive.func, f);
         }
     }
@@ -180,6 +181,101 @@ fn partially_evaluate_func(
     Ok((evaluator.func, sig, name))
 }
 
+// Split at every `weval_specialize_value()` call. Requires max-SSA
+// input, and creates max-SSA output.
+fn split_blocks_at_specialization_points(func: &mut FunctionBody, intrinsics: &Intrinsics) {
+    for block in 0..func.blocks.len() {
+        let block = Block::new(block);
+        for i in 0..func.blocks[block].insts.len() {
+            let inst = func.blocks[block].insts[i];
+            if let ValueDef::Operator(Operator::Call { function_index }, _, _) = &func.values[inst]
+            {
+                if Some(*function_index) == intrinsics.specialize_value {
+                    log::trace!("Splitting at weval_specialize_value for inst {}", inst);
+
+                    // Split the block here!
+                    // 1. Create a new block with the remainder of the instructions.
+                    // 2. Create a blockparam for every param of the
+                    //    original block, and every value def in the
+                    //    original block.
+                    // 3. Create an unconditional jump from original
+                    //    to split-off block.
+                    // 4. Rewrite all insts' args (and terminator's
+                    //    args) in the split-off block to use the
+                    //    blockparams.
+
+                    // Split *after* the call (the `i + 1`).
+                    let split_insts = func.blocks[block].insts.split_off(i + 1);
+                    let new_block = func.blocks.push(BlockDef::default());
+                    log::trace!(" -> new block: {}", new_block);
+                    func.blocks[new_block].insts = split_insts;
+                    let term = std::mem::take(&mut func.blocks[block].terminator);
+                    func.blocks[new_block].terminator = term;
+                    func.blocks[new_block].desc = format!(
+                        "Split from {} at value specialization on {}",
+                        func.blocks[block].desc, inst
+                    );
+
+                    let mut target = BlockTarget {
+                        block: new_block,
+                        args: vec![],
+                    };
+                    let mut remap = HashMap::default();
+                    let mut new_param_idx = 0;
+                    for param_idx in 0..func.blocks[block].params.len() {
+                        let (ty, orig_param) = func.blocks[block].params[param_idx];
+                        let new_param =
+                            func.values
+                                .push(ValueDef::BlockParam(new_block, new_param_idx, ty));
+                        new_param_idx += 1;
+                        func.blocks[new_block].params.push((ty, new_param));
+                        remap.insert(orig_param, new_param);
+                        target.args.push(orig_param);
+                    }
+                    for inst in 0..func.blocks[block].insts.len() {
+                        let inst = func.blocks[block].insts[inst];
+                        match &func.values[inst] {
+                            ValueDef::Operator(_, _, tys) if tys.len() == 1 => {
+                                let ty = tys[0];
+                                let new_param = func.values.push(ValueDef::BlockParam(
+                                    new_block,
+                                    new_param_idx,
+                                    ty,
+                                ));
+                                new_param_idx += 1;
+                                func.blocks[new_block].params.push((ty, new_param));
+                                remap.insert(inst, new_param);
+                                target.args.push(inst);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    for new_inst in 0..func.blocks[new_block].insts.len() {
+                        let new_inst = func.blocks[new_block].insts[new_inst];
+                        func.values[new_inst].update_uses(|u| {
+                            if let Some(r) = remap.get(u) {
+                                *u = *r;
+                            }
+                        });
+                    }
+                    func.blocks[new_block].terminator.update_uses(|u| {
+                        if let Some(r) = remap.get(u) {
+                            *u = *r;
+                        }
+                    });
+
+                    func.blocks[block].terminator = Terminator::Br { target };
+                }
+
+                break;
+            }
+        }
+    }
+
+    log::trace!("After splitting:\n{}\n", func.display_verbose("| ", None));
+}
+
 fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {
     match (ty, value) {
         (Type::I32, WasmVal::I32(k)) => Some(Operator::I32Const { value: k }),
@@ -252,7 +348,7 @@ impl<'a> Evaluator<'a> {
         // Create program-point state.
         let mut state = PointState {
             context: ctx,
-            pending_context: PendingContext::None,
+            pending_context: None,
             flow: self.state.state[ctx]
                 .block_entry
                 .get(&orig_block)
@@ -528,6 +624,10 @@ impl<'a> Evaluator<'a> {
         match self.state.contexts.leaf_element(ctx) {
             ContextElem::Root => "root".to_owned(),
             ContextElem::Loop(pc) => format!("PC {:?}", pc),
+            ContextElem::PendingSpecialize(index, lo, hi) => {
+                format!("Pending Specialization of {}: {}..={}", index, lo, hi)
+            }
+            ContextElem::Specialized(index, val) => format!("Specialization of {}: {}", index, val),
         }
     }
 
@@ -569,8 +669,8 @@ impl<'a> Evaluator<'a> {
         state: &PointState,
         orig_block: Block,
         target: Block,
-        pending_context: &PendingContext,
-    ) -> (Block, Context) {
+        target_context: Context,
+    ) -> Block {
         log::debug!(
             "targeting block {} from {}, in context {}",
             target,
@@ -578,7 +678,6 @@ impl<'a> Evaluator<'a> {
             state.context
         );
 
-        let target_context = pending_context.single().unwrap_or(state.context);
         log::trace!(" -> new context {}", target_context);
 
         log::trace!(
@@ -596,7 +695,7 @@ impl<'a> Evaluator<'a> {
                 self.block_map.insert((target_context, target), block);
                 self.queue_set.insert((target, target_context));
                 self.queue.push_back((target, target_context, block));
-                (block, target_context)
+                block
             }
             HashEntry::Occupied(o) => {
                 let target_specialized = *o.get();
@@ -609,18 +708,17 @@ impl<'a> Evaluator<'a> {
                             .push_back((target, target_context, target_specialized));
                     }
                 }
-                (target_specialized, target_context)
+                target_specialized
             }
         }
     }
 
-    fn evaluate_block_target<F: Fn(AbstractValue) -> AbstractValue>(
+    fn evaluate_block_target(
         &mut self,
         orig_block: Block,
         state: &PointState,
+        target_ctx: Context,
         target: &BlockTarget,
-        pending_context: &PendingContext,
-        abs_map: F,
     ) -> BlockTarget {
         let mut args = vec![];
         let mut abs_args = vec![];
@@ -632,8 +730,7 @@ impl<'a> Evaluator<'a> {
             target
         );
 
-        let (target_block, target_ctx) =
-            self.target_block(state, orig_block, target.block, pending_context);
+        let target_block = self.target_block(state, orig_block, target.block, target_ctx);
 
         for &arg in &target.args {
             let arg = self.generic.resolve_alias(arg);
@@ -648,7 +745,7 @@ impl<'a> Evaluator<'a> {
                 abs,
             );
             args.push(val);
-            abs_args.push(abs_map(abs));
+            abs_args.push(abs);
         }
 
         // Parallel-move semantics: read all uses above, then write
@@ -662,10 +759,27 @@ impl<'a> Evaluator<'a> {
             .zip(abs_generic_args.iter())
         {
             let &val = self.value_map.get(&(target_ctx, blockparam)).unwrap();
+
+            let abs = if let ContextElem::Specialized(index, val) =
+                self.state.contexts.leaf_element(target_ctx)
+            {
+                if index == blockparam {
+                    log::trace!(
+                        "Specialized context into block {} context {}: index {} becomes val {}",
+                        target_block, target_ctx, index, val
+                    );
+                    AbstractValue::Concrete(WasmVal::I32(val), ValueTags::default())
+                } else {
+                    abs.clone()
+                }
+            } else {
+                abs.clone()
+            };
+
             log::debug!(
                 "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?} from branch arg {}",
                 target.block, target_ctx, blockparam, val, abs, generic_arg);
-            changed |= self.def_value(orig_block, target_ctx, blockparam, val, abs.clone());
+            changed |= self.def_value(orig_block, target_ctx, blockparam, val, abs);
         }
 
         // If blockparam inputs changed, re-enqueue target for evaluation.
@@ -687,6 +801,8 @@ impl<'a> Evaluator<'a> {
             new_block,
             self.generic.blocks[orig_block].terminator
         );
+        let new_context = state.pending_context.unwrap_or(state.context);
+
         let new_term = match &self.generic.blocks[orig_block].terminator {
             &Terminator::None => Terminator::None,
             &Terminator::CondBr {
@@ -697,21 +813,14 @@ impl<'a> Evaluator<'a> {
                 let (cond, abs_cond) = self.use_value(state.context, orig_block, cond);
                 match abs_cond.is_const_truthy() {
                     Some(true) => Terminator::Br {
-                        target: self.evaluate_block_target(
-                            orig_block,
-                            state,
-                            if_true,
-                            &state.pending_context,
-                            |abs| abs,
-                        ),
+                        target: self.evaluate_block_target(orig_block, state, new_context, if_true),
                     },
                     Some(false) => Terminator::Br {
                         target: self.evaluate_block_target(
                             orig_block,
                             state,
+                            new_context,
                             if_false,
-                            &state.pending_context,
-                            |abs| abs,
                         ),
                     },
                     None => Terminator::CondBr {
@@ -719,60 +828,52 @@ impl<'a> Evaluator<'a> {
                         if_true: self.evaluate_block_target(
                             orig_block,
                             state,
+                            new_context,
                             if_true,
-                            &state.pending_context,
-                            |abs| abs,
                         ),
                         if_false: self.evaluate_block_target(
                             orig_block,
                             state,
+                            new_context,
                             if_false,
-                            &state.pending_context,
-                            |abs| abs,
                         ),
                     },
                 }
             }
-            &Terminator::Br { ref target } => match &state.pending_context {
-                PendingContext::Switch(index, contexts, default_context) => {
-                    let targets = contexts
-                        .iter()
-                        .enumerate()
-                        .map(|(_i, &context)| {
-                            self.evaluate_block_target(
-                                orig_block,
-                                state,
-                                target,
-                                &PendingContext::Single(context),
-                                |abs| abs, /* .remap_switch(*index, i), */
-                            )
-                        })
-                        .collect::<Vec<BlockTarget>>();
-                    let default = self.evaluate_block_target(
-                        orig_block,
-                        state,
-                        target,
-                        &PendingContext::Single(*default_context),
-                        |abs| abs, /* .remap_switch(*index, contexts.len()) */
+            &Terminator::Br { ref target } => {
+                if let ContextElem::PendingSpecialize(index, lo, hi) =
+                    self.state.contexts.leaf_element(new_context)
+                {
+                    log::trace!(
+                        "Branch to target {} with PendingSpecialize on {}",
+                        target.block, index
                     );
-                    log::debug!("switch on terminator due to Switch pending context: index {} targets {:?} default {:?}", index, targets, default);
+                    let parent = self.state.contexts.parent(new_context);
+                    assert_eq!(*target.args.last().unwrap(), index);
+                    let target_index = self.generic.blocks[target.block].params.last().unwrap().1;
+                    let mut targets: Vec<BlockTarget> = (lo..=hi)
+                        .map(|i| {
+                            let c = self
+                                .state
+                                .contexts
+                                .create(Some(parent), ContextElem::Specialized(target_index, i));
+                            log::trace!(" -> created new context {} for index {}", c, i);
+                            self.evaluate_block_target(orig_block, state, c, target)
+                        })
+                        .collect();
+                    let default = targets.pop().unwrap();
+                    let (value, _) = self.use_value(state.context, orig_block, index);
                     Terminator::Select {
-                        value: *index,
+                        value,
                         targets,
                         default,
                     }
+                } else {
+                    Terminator::Br {
+                        target: self.evaluate_block_target(orig_block, state, new_context, target),
+                    }
                 }
-                PendingContext::Single(..) | PendingContext::None => Terminator::Br {
-                    target: self.evaluate_block_target(
-                        orig_block,
-                        state,
-                        target,
-                        &state.pending_context,
-                        |abs| abs,
-                    ),
-                },
-                PendingContext::IncompleteSwitch => Terminator::Unreachable,
-            },
+            }
             &Terminator::Select {
                 value,
                 ref targets,
@@ -787,34 +888,17 @@ impl<'a> Evaluator<'a> {
                         default
                     };
                     Terminator::Br {
-                        target: self.evaluate_block_target(
-                            orig_block,
-                            state,
-                            target,
-                            &state.pending_context,
-                            |abs| abs,
-                        ),
+                        target: self.evaluate_block_target(orig_block, state, new_context, target),
                     }
                 } else {
                     let targets = targets
                         .iter()
                         .map(|target| {
-                            self.evaluate_block_target(
-                                orig_block,
-                                state,
-                                target,
-                                &state.pending_context,
-                                |abs| abs,
-                            )
+                            self.evaluate_block_target(orig_block, state, new_context, target)
                         })
                         .collect::<Vec<_>>();
-                    let default = self.evaluate_block_target(
-                        orig_block,
-                        state,
-                        default,
-                        &state.pending_context,
-                        |abs| abs,
-                    );
+                    let default =
+                        self.evaluate_block_target(orig_block, state, new_context, default);
                     Terminator::Select {
                         value,
                         targets,
@@ -912,9 +996,9 @@ impl<'a> Evaluator<'a> {
         &mut self,
         orig_block: Block,
         new_block: Block,
-        _orig_inst: Value,
+        orig_inst: Value,
         op: Operator,
-        loc: SourceLoc,
+        _loc: SourceLoc,
         abs: &[AbstractValue],
         values: &[Value],
         orig_values: &[Value],
@@ -943,54 +1027,50 @@ impl<'a> Evaluator<'a> {
                     let pc = abs[0]
                         .is_const_u32()
                         .expect("PC should not be a runtime value");
-                    let instantaneous_context =
-                        state.pending_context.single().unwrap_or(state.context);
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
                     let child = self
                         .state
                         .contexts
                         .create(Some(instantaneous_context), ContextElem::Loop(pc));
-                    state.pending_context = PendingContext::Single(child);
+                    state.pending_context = Some(child);
                     log::trace!("push context (pc {:?}): now {}", pc, child);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.pop_context {
-                    let instantaneous_context =
-                        state.pending_context.single().unwrap_or(state.context);
-                    let parent = match self.state.contexts.leaf_element(instantaneous_context) {
-                        ContextElem::Root => instantaneous_context,
-                        _ => self.state.contexts.parent(instantaneous_context),
-                    };
-                    state.pending_context = PendingContext::Single(parent);
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let parent = self.state.contexts.pop_one_loop(instantaneous_context);
+                    state.pending_context = Some(parent);
                     log::trace!("pop context: now {}", parent);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.update_context {
                     log::trace!("update context at {}: PC is {:?}", orig_values[0], abs[0]);
-                    if self.state.contexts.leaf_element(state.context) == ContextElem::Root {
-                        let loc = self.module.debug.source_locs[loc];
-                        let file = &self.module.debug.source_files[loc.file];
-                        panic!(
-                            "update_context in root context; loc {}:{}:{}",
-                            file, loc.line, loc.col
-                        );
-                    }
-                    let instantaneous_context =
-                        state.pending_context.single().unwrap_or(state.context);
-                    let mut make_context =
-                        |pc: u32| match self.state.contexts.leaf_element(instantaneous_context) {
-                            ContextElem::Root => instantaneous_context,
-                            _ => self.state.contexts.create(
-                                Some(self.state.contexts.parent(instantaneous_context)),
-                                ContextElem::Loop(pc),
-                            ),
-                        };
-
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let parent = self.state.contexts.pop_one_loop(instantaneous_context);
                     let pending_context = if let Some(pc) = abs[0].is_const_u32() {
-                        PendingContext::Single(make_context(pc))
+                        Some(
+                            self.state
+                                .contexts
+                                .create(Some(parent), ContextElem::Loop(pc)),
+                        )
                     } else {
                         panic!("PC is a runtime value: {:?}", abs[0]);
                     };
                     log::trace!("update context: now {:?}", pending_context);
                     state.pending_context = pending_context;
                     EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.specialize_value {
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let lo = abs[1].is_const_u32().unwrap();
+                    let hi = abs[2].is_const_u32().unwrap();
+                    let child = self.state.contexts.create(
+                        Some(instantaneous_context),
+                        ContextElem::PendingSpecialize(orig_inst, lo, hi),
+                    );
+                    log::trace!(
+                        "Creating pending-specize context for index {} lo {} hi {}",
+                        orig_inst, lo, hi
+                    );
+                    state.pending_context = Some(child);
+                    EvalResult::Alias(abs[0].clone(), values[0])
                 } else if Some(function_index) == self.intrinsics.flush_to_mem {
                     self.flush_to_mem(state, new_block);
                     EvalResult::Elide
@@ -1030,7 +1110,7 @@ impl<'a> Evaluator<'a> {
                         .unwrap();
                     let line = abs[1].is_const_u32().unwrap();
                     let val = abs[2].clone();
-                    log::debug!("print: line {}: {}: {:?}", line, message, val);
+                    log::trace!("print: line {}: {}: {:?}", line, message, val);
                     EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
