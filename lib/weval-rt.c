@@ -50,6 +50,15 @@ void* weval_make_symbolic_ptr(void* value) {
     }
 }
 
+__attribute__((export_name("weval.alias.with.symbolic.ptr")))
+void* weval_alias_with_symbolic_ptr(void* p, void* symbolic) {
+    if (__hook) {
+        return (void*)10;
+    } else {
+        return p;
+    }
+}
+
 __attribute__((export_name("weval.flush.to.mem")))
 void weval_flush_to_mem() {
     __accum += 4;
