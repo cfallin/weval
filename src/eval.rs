@@ -9,7 +9,7 @@ use crate::Options;
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
-use std::collections::{btree_map::Entry as BTreeEntry, hash_map::Entry as HashEntry, VecDeque};
+use std::collections::{hash_map::Entry as HashEntry, VecDeque};
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
@@ -448,11 +448,11 @@ impl<'a> Evaluator<'a> {
         );
         self.value_map.insert((context, orig_val), val);
         match self.state.state[context].ssa.values.entry(orig_val) {
-            BTreeEntry::Vacant(v) => {
+            HashEntry::Vacant(v) => {
                 v.insert(abs);
                 true
             }
-            BTreeEntry::Occupied(mut o) => {
+            HashEntry::Occupied(mut o) => {
                 let val_abs = o.get_mut();
                 let updated = AbstractValue::meet(val_abs, &abs);
                 let changed = updated != *val_abs;
@@ -612,11 +612,11 @@ impl<'a> Evaluator<'a> {
         state.update_across_edge();
 
         match self.state.state[context].block_entry.entry(block) {
-            BTreeEntry::Vacant(v) => {
+            HashEntry::Vacant(v) => {
                 v.insert(state);
                 true
             }
-            BTreeEntry::Occupied(mut o) => o.get_mut().meet_with(&state),
+            HashEntry::Occupied(mut o) => o.get_mut().meet_with(&state),
         }
     }
 
@@ -766,7 +766,10 @@ impl<'a> Evaluator<'a> {
                 if index == blockparam {
                     log::trace!(
                         "Specialized context into block {} context {}: index {} becomes val {}",
-                        target_block, target_ctx, index, val
+                        target_block,
+                        target_ctx,
+                        index,
+                        val
                     );
                     AbstractValue::Concrete(WasmVal::I32(val), ValueTags::default())
                 } else {
@@ -846,7 +849,8 @@ impl<'a> Evaluator<'a> {
                 {
                     log::trace!(
                         "Branch to target {} with PendingSpecialize on {}",
-                        target.block, index
+                        target.block,
+                        index
                     );
                     let parent = self.state.contexts.parent(new_context);
                     assert_eq!(*target.args.last().unwrap(), index);
@@ -1067,7 +1071,9 @@ impl<'a> Evaluator<'a> {
                     );
                     log::trace!(
                         "Creating pending-specize context for index {} lo {} hi {}",
-                        orig_inst, lo, hi
+                        orig_inst,
+                        lo,
+                        hi
                     );
                     state.pending_context = Some(child);
                     EvalResult::Alias(abs[0].clone(), values[0])

@@ -36,7 +36,8 @@
 
 use crate::image::Image;
 use crate::value::{AbstractValue, ValueTags};
-use std::collections::{hash_map::Entry, HashMap};
+use fxhash::FxHashMap as HashMap;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use waffle::entity::{EntityRef, EntityVec, PerEntity};
 use waffle::{Block, FunctionBody, Global, Type, Value};
@@ -100,7 +101,7 @@ impl Contexts {
 pub struct SSAState {
     /// AbstractValues in specialized function of generic function's
     /// SSA `Value`s.
-    pub values: BTreeMap<Value, AbstractValue>,
+    pub values: HashMap<Value, AbstractValue>,
 }
 
 /// The flow-sensitive part of the state.
@@ -187,10 +188,10 @@ pub struct FunctionState {
 pub struct PerContextState {
     pub ssa: SSAState,
     /// State at top of basic block.
-    pub block_entry: BTreeMap<Block, ProgPointState>,
+    pub block_entry: HashMap<Block, ProgPointState>,
     /// State at end of basic block, just prior to terminator and
     /// successor-specific updates.
-    pub block_exit: BTreeMap<Block, ProgPointState>,
+    pub block_exit: HashMap<Block, ProgPointState>,
 }
 
 /// State carried during a pass through a block.
