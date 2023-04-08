@@ -27,7 +27,7 @@ struct Evaluator<'a> {
     /// Memory image.
     image: &'a Image,
     /// Domtree for function body.
-    cfg: CFGInfo,
+    cfg: &'a CFGInfo,
     /// State of SSA values and program points:
     /// - per context:
     ///   - per SSA number, an abstract value
@@ -71,7 +71,6 @@ pub fn partially_evaluate(
         if !funcs.contains_key(&directive.func) {
             let mut f = module.clone_and_expand_body(directive.func)?;
             f.optimize();
-            f.convert_to_max_ssa();
             if opts.add_tracing {
                 waffle::passes::trace::run(&mut f);
             }
@@ -79,7 +78,12 @@ pub fn partially_evaluate(
                 module.replace_body(directive.func, f.clone());
             }
             split_blocks_at_specialization_points(&mut f, &intrinsics);
-            funcs.insert(directive.func, f);
+            // Compute CFG info.
+            let cfg = CFGInfo::new(&f);
+            add_blockparams_at_context_changes(&mut f, &cfg, &intrinsics);
+            f.recompute_edges();
+            f.validate()?;
+            funcs.insert(directive.func, (f, cfg));
         }
     }
 
@@ -90,8 +94,8 @@ pub fn partially_evaluate(
     let bodies = directives
         .par_iter()
         .map(|directive| {
-            let generic = funcs.get(&directive.func).unwrap();
-            partially_evaluate_func(module, generic, im, &intrinsics, directive)
+            let (generic, cfg) = funcs.get(&directive.func).unwrap();
+            partially_evaluate_func(module, generic, cfg, im, &intrinsics, directive)
                 .map(|tuple| (directive, tuple))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -127,6 +131,7 @@ pub fn partially_evaluate(
 fn partially_evaluate_func(
     module: &Module,
     generic: &FunctionBody,
+    cfg: &CFGInfo,
     image: &Image,
     intrinsics: &Intrinsics,
     directive: &Directive,
@@ -136,9 +141,6 @@ fn partially_evaluate_func(
 
     log::debug!("Specializing: {}", directive.func);
     log::debug!("body:\n{}", generic.display("| ", Some(module)));
-
-    // Compute CFG info.
-    let cfg = CFGInfo::new(generic);
 
     log::trace!("CFGInfo: {:?}", cfg);
 
@@ -181,8 +183,132 @@ fn partially_evaluate_func(
     Ok((evaluator.func, sig, name))
 }
 
-// Split at every `weval_specialize_value()` call. Requires max-SSA
-// input, and creates max-SSA output.
+/// Make all live values flow through blockparams on edges after a
+/// context-change (push/pop/update-context intrinsic), so that SSA is
+/// preserved in the specialized code.
+fn add_blockparams_at_context_changes(
+    func: &mut FunctionBody,
+    cfg: &CFGInfo,
+    intrinsics: &Intrinsics,
+) {
+    eprintln!(
+        "Before making values across context-changes blockparams:\n{}\n",
+        func.display_verbose("| ", None)
+    );
+
+    let mut change_blocks = HashSet::default();
+
+    for (block, blockdata) in func.blocks.entries() {
+        'insts: for &inst in &blockdata.insts {
+            if let ValueDef::Operator(Operator::Call { function_index }, _, _) = &func.values[inst]
+            {
+                if Some(*function_index) == intrinsics.push_context
+                    || Some(*function_index) == intrinsics.pop_context
+                    || Some(*function_index) == intrinsics.update_context
+                {
+                    change_blocks.insert(block);
+                    break 'insts;
+                }
+            }
+        }
+    }
+    eprintln!("change_blocks = {:?}", change_blocks);
+
+    let mut context_entry_blocks = HashSet::default();
+    for block in change_blocks {
+        func.blocks[block].terminator.visit_targets(|target| {
+            context_entry_blocks.insert(target.block);
+        });
+    }
+    eprintln!("context_entry_blocks = {:?}", context_entry_blocks);
+
+    // For every use-def link, walk the domtree from use up to def; at
+    // any edge from a change-block, insert a blockparam for the given
+    // value if not present. Perform this in postorder so that it
+    // works in a single pass.
+    //
+    // `remaps` contains a mapping from dest-block (the block that
+    // gets the blockparam) and original value to new value.
+    let mut remaps: HashMap<(Block, Value), Value> = HashMap::default();
+    for &block in cfg.rpo.values().rev() {
+        eprintln!("context-change blockparam insertion: visiting {}", block);
+        let mut visit_use = |func: &mut FunctionBody, u_ref: &mut Value| {
+            let u = func.resolve_and_update_alias(*u_ref);
+            eprintln!("-> visiting use {} resolves to {}", u_ref, u);
+            let ty = match func.values[u].ty() {
+                Some(ty) => ty,
+                None => return,
+            };
+            let def_block = cfg.def_block[u];
+            eprintln!(" -> defined in {}", def_block);
+            let mut b = block;
+            while b != def_block {
+                assert_ne!(b, Block::invalid());
+                let parent = cfg.domtree[b];
+                // Is `parent` a context-entry block? If so, the edge
+                // from `parent` to `b` needs to have this value as a
+                // blockparam, and we need to rewrite the use. We can
+                // break if this occurs, because we will later process
+                // the use in the branch as we go up the domtree.
+                let remap = if let Some(value) = remaps.get(&(b, u)) {
+                    Some(*value)
+                } else if context_entry_blocks.contains(&b)
+                    && !func.blocks[b].params.iter().any(|(_, param)| *param == u)
+                {
+                    eprintln!(
+                        " -> crosses domtree edge with context change to parent {}",
+                        parent
+                    );
+                    let blockparam = func.add_blockparam(b, ty);
+                    eprintln!(" -> created new blockparam {}", blockparam);
+                    for &pred in &cfg.preds[b] {
+                        let mut term = std::mem::take(&mut func.blocks[pred].terminator);
+                        term.update_targets(|target| {
+                            if target.block == b {
+                                target.args.push(u);
+                            }
+                        });
+                        func.blocks[pred].terminator = term;
+                    }
+                    remaps.insert((b, u), blockparam);
+                    Some(blockparam)
+                } else {
+                    None
+                };
+
+                if let Some(remap) = remap {
+                    eprintln!(" -> remapping {} to {}", u_ref, remap);
+                    *u_ref = remap;
+                    break;
+                }
+                b = parent;
+            }
+        };
+
+        for inst in 0..func.blocks[block].insts.len() {
+            let inst = func.blocks[block].insts[inst];
+            let mut value = std::mem::take(&mut func.values[inst]);
+            value.update_uses(|u| visit_use(func, u));
+            func.values[inst] = value;
+        }
+        let mut term = std::mem::take(&mut func.blocks[block].terminator);
+        term.update_uses(|u| visit_use(func, u));
+        // Very subtle correctness issue: the `visit_use` call above
+        // may insert new args into BlockTargets in
+        // terminators. However, it must not have added any to
+        // `block`'s terminator, because any value that is used across
+        // self-loop will already be a blockparam.
+        func.blocks[block].terminator = term;
+    }
+
+    eprintln!(
+        "After making values across context-changes blockparams:\n{}\n",
+        func.display_verbose("| ", None)
+    );
+}
+
+/// Split at every `weval_specialize_value()` call. Requires max-SSA
+/// input, and creates max-SSA output.
 fn split_blocks_at_specialization_points(func: &mut FunctionBody, intrinsics: &Intrinsics) {
     for block in 0..func.blocks.len() {
         let block = Block::new(block);
@@ -412,6 +538,7 @@ impl<'a> Evaluator<'a> {
         orig_block: Block,
         orig_val: Value,
     ) -> (Value, AbstractValue) {
+        let orig_val = self.generic.resolve_alias(orig_val);
         log::trace!(
             "using value {} at block {} in context {}",
             orig_val,
@@ -425,8 +552,8 @@ impl<'a> Evaluator<'a> {
             return (val, abs.clone());
         }
         panic!(
-            "Could not find value for {} in context {}",
-            orig_val, context
+            "Could not find value for {} in context {} from block {}",
+            orig_val, context, orig_block
         );
     }
 
