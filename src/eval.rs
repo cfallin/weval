@@ -632,6 +632,9 @@ impl<'a> Evaluator<'a> {
             context,
             block
         );
+        self.func.blocks[block]
+            .params
+            .reserve(self.generic.blocks[orig_block].params.len());
         for &(ty, param) in &self.generic.blocks[orig_block].params {
             let new_param = self.func.add_blockparam(block, ty);
             log::trace!(" -> blockparam {} maps to {}", param, new_param);
@@ -704,9 +707,9 @@ impl<'a> Evaluator<'a> {
         target_ctx: Context,
         target: &BlockTarget,
     ) -> BlockTarget {
-        let mut args = vec![];
-        let mut abs_args = vec![];
-        let mut abs_generic_args = vec![];
+        let n_args = self.generic.blocks[orig_block].params.len();
+        let mut args = Vec::with_capacity(n_args);
+        let mut abs_args = Vec::with_capacity(n_args);
         log::trace!(
             "evaluate target: block {} context {} to {:?}",
             orig_block,
@@ -718,7 +721,6 @@ impl<'a> Evaluator<'a> {
 
         for &arg in &target.args {
             let arg = self.generic.resolve_alias(arg);
-            abs_generic_args.push(arg);
             let (val, abs) = self.use_value(state.context, orig_block, arg);
             log::trace!(
                 "blockparam: block {} context {}: arg {} has val {} abs {:?}",
@@ -735,12 +737,11 @@ impl<'a> Evaluator<'a> {
         // Parallel-move semantics: read all uses above, then write
         // all defs below.
         let mut changed = false;
-        for ((blockparam, abs), generic_arg) in self.generic.blocks[target.block]
+        for (blockparam, abs) in self.generic.blocks[target.block]
             .params
             .iter()
             .map(|(_, val)| *val)
             .zip(abs_args.iter())
-            .zip(abs_generic_args.iter())
         {
             let &val = self.value_map.get(&(target_ctx, blockparam)).unwrap();
 
@@ -764,8 +765,8 @@ impl<'a> Evaluator<'a> {
             };
 
             log::debug!(
-                "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?} from branch arg {}",
-                target.block, target_ctx, blockparam, val, abs, generic_arg);
+                "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?}",
+                target.block, target_ctx, blockparam, val, abs);
             changed |= self.def_value(orig_block, target_ctx, blockparam, val, abs);
         }
 
