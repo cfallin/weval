@@ -235,6 +235,7 @@ fn add_blockparams_at_context_changes(
         });
     }
 
+    log::trace!("context_entry_blocks = {:?}", context_entry_blocks);
     func.convert_to_max_ssa(Some(context_entry_blocks));
 
     log::trace!(
@@ -502,11 +503,15 @@ impl<'a> Evaluator<'a> {
                     .insert(new_block);
             }
             return (val, abs.clone());
+        } else {
+            log::trace!(
+                "Could not find value for {} in context {} from block {}",
+                orig_val,
+                context,
+                orig_block
+            );
+            (Value::invalid(), AbstractValue::default())
         }
-        panic!(
-            "Could not find value for {} in context {} from block {}",
-            orig_val, context, orig_block
-        );
     }
 
     fn def_value(
