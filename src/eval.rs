@@ -39,12 +39,16 @@ struct Evaluator<'a> {
     block_map: HashMap<(Context, Block), Block>,
     /// Reverse map from specialized block to its original ctx/block.
     block_rev_map: PerEntity<Block, (Context, Block)>,
-    /// Dependencies for updates: some use in a given block with a
-    /// given context occurs of a value defined in another block at
-    /// another context.
-    block_deps: HashMap<(Context, Block), HashSet<(Context, Block)>>,
+    /// Dependencies: for each block, a list of blocks that use defs
+    /// within it.
+    block_deps: PerEntity<Block, HashSet<Block>>,
+    /// Predecessor info in specialized-block domain.
+    block_preds: PerEntity<Block, Vec<Block>>,
     /// Map of (ctx, value_in_generic) to specialized value_in_func.
     value_map: HashMap<(Context, Value), Value>,
+    /// Map of (context, block, value) to (context, value) for SSA
+    /// reconstruction.
+    value_def: HashMap<(Context, Block, Value), (Context, Value)>,
     /// Map of (ctx, block, sym_addr) to blockparams for address and
     /// mem-renmaed value.
     mem_blockparam_map: HashMap<(Context, Block, SymbolicAddr), (Value, Value)>,
@@ -152,8 +156,10 @@ fn partially_evaluate_func(
         func,
         block_map: HashMap::default(),
         block_rev_map: PerEntity::default(),
-        block_deps: HashMap::default(),
+        block_deps: PerEntity::default(),
+        block_preds: PerEntity::default(),
         value_map: HashMap::default(),
+        value_def: HashMap::default(),
         mem_blockparam_map: HashMap::default(),
         queue: VecDeque::new(),
         queue_set: HashSet::default(),
