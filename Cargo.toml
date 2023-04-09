@@ -16,3 +16,5 @@ env_logger = "0.9"
 fxhash = "0.2"
 rayon = "1.5"
 
+[profile.release]
+debug = true
