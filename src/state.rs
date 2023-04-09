@@ -98,14 +98,10 @@ impl Contexts {
 
 /// The flow-insensitive part of the satte.
 #[derive(Clone, Debug, Default)]
-pub struct SSAState {
-    /// AbstractValues in specialized function of generic function's
-    /// SSA `Value`s.
-    pub values: HashMap<Value, AbstractValue>,
-}
+pub struct SSAState {}
 
 /// The flow-sensitive part of the state.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ProgPointState {
     /// Memory overlay. We store only aligned u32s here.
     pub mem_overlay: BTreeMap<SymbolicAddr, MemValue>,
@@ -177,21 +173,16 @@ impl MemValue {
 }
 
 /// The state for a function body during analysis.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct FunctionState {
     pub contexts: Contexts,
-    pub state: PerEntity<Context, PerContextState>,
-}
-
-/// The state for one context.
-#[derive(Clone, Debug, Default)]
-pub struct PerContextState {
-    pub ssa: SSAState,
-    /// State at top of basic block.
-    pub block_entry: HashMap<Block, ProgPointState>,
-    /// State at end of basic block, just prior to terminator and
-    /// successor-specific updates.
-    pub block_exit: HashMap<Block, ProgPointState>,
+    /// AbstractValues in specialized function, indexed by specialized
+    /// Value.
+    pub values: PerEntity<Value, AbstractValue>,
+    /// Block-entry abstract values, indexed by specialized Block.
+    pub block_entry: PerEntity<Block, ProgPointState>,
+    /// Block-exit abstract values, indexed by specialized Block.
+    pub block_exit: PerEntity<Block, ProgPointState>,
 }
 
 /// State carried during a pass through a block.
@@ -348,28 +339,30 @@ impl ProgPointState {
 
 impl FunctionState {
     pub fn new() -> FunctionState {
-        FunctionState {
-            contexts: Contexts::default(),
-            state: PerEntity::default(),
-        }
+        FunctionState::default()
     }
 
-    pub fn init_args(
+    pub fn init(&mut self, im: &Image) -> (Context, ProgPointState) {
+        let ctx = self.contexts.create(None, ContextElem::Root);
+        (ctx, ProgPointState::entry(im))
+    }
+
+    pub fn set_args(
         &mut self,
         orig_body: &FunctionBody,
-        im: &Image,
         args: &[AbstractValue],
-    ) -> (Context, ProgPointState) {
+        ctx: Context,
+        value_map: &HashMap<(Context, Value), Value>,
+    ) {
         // For each blockparam of the entry block, set the value of the SSA arg.
         debug_assert_eq!(args.len(), orig_body.blocks[orig_body.entry].params.len());
-        let ctx = self.contexts.create(None, ContextElem::Root);
         for ((_, orig_value), abs) in orig_body.blocks[orig_body.entry]
             .params
             .iter()
             .zip(args.iter())
         {
-            self.state[ctx].ssa.values.insert(*orig_value, abs.clone());
+            let spec_value = *value_map.get(&(ctx, *orig_value)).unwrap();
+            self.values[spec_value] = abs.clone();
         }
-        (ctx, ProgPointState::entry(im))
     }
 }

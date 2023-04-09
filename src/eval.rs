@@ -160,9 +160,7 @@ fn partially_evaluate_func(
         queue: VecDeque::new(),
         queue_set: HashSet::default(),
     };
-    let (ctx, entry_state) = evaluator
-        .state
-        .init_args(generic, image, &directive.const_params[..]);
+    let (ctx, entry_state) = evaluator.state.init(image);
     log::trace!("after init_args, state is {:?}", evaluator.state);
     let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
     evaluator.func.entry = specialized_entry;
@@ -170,6 +168,12 @@ fn partially_evaluate_func(
         .queue
         .push_back((evaluator.generic.entry, ctx, specialized_entry));
     evaluator.queue_set.insert((evaluator.generic.entry, ctx));
+    evaluator.state.set_args(
+        evaluator.generic,
+        &directive.const_params[..],
+        ctx,
+        &evaluator.value_map,
+    );
     evaluator.evaluate()?;
 
     log::debug!(
@@ -349,11 +353,7 @@ impl<'a> Evaluator<'a> {
         let mut state = PointState {
             context: ctx,
             pending_context: None,
-            flow: self.state.state[ctx]
-                .block_entry
-                .get(&orig_block)
-                .cloned()
-                .unwrap(),
+            flow: self.state.block_entry[new_block].clone(),
         };
         log::trace!(" -> state = {:?}", state);
 
@@ -394,9 +394,7 @@ impl<'a> Evaluator<'a> {
             })?;
 
         // Store the exit state at this point for later use.
-        self.state.state[ctx]
-            .block_exit
-            .insert(orig_block, state.flow.clone());
+        self.state.block_exit[new_block] = state.flow.clone();
 
         self.evaluate_term(orig_block, &mut state, new_block);
 
@@ -418,9 +416,9 @@ impl<'a> Evaluator<'a> {
             orig_block,
             context
         );
-        if let Some(abs) = self.state.state[context].ssa.values.get(&orig_val) {
+        if let Some(&val) = self.value_map.get(&(context, orig_val)) {
+            let abs = &self.state.values[val];
             log::trace!(" -> found abstract  value {:?} at context {}", abs, context);
-            let &val = self.value_map.get(&(context, orig_val)).unwrap();
             log::trace!(" -> runtime value {}", val);
             return (val, abs.clone());
         }
@@ -447,26 +445,18 @@ impl<'a> Evaluator<'a> {
             abs
         );
         self.value_map.insert((context, orig_val), val);
-        match self.state.state[context].ssa.values.entry(orig_val) {
-            HashEntry::Vacant(v) => {
-                v.insert(abs);
-                true
-            }
-            HashEntry::Occupied(mut o) => {
-                let val_abs = o.get_mut();
-                let updated = AbstractValue::meet(val_abs, &abs);
-                let changed = updated != *val_abs;
-                log::debug!(
-                    " -> meet: cur {:?} input {:?} result {:?} (changed: {})",
-                    val_abs,
-                    abs,
-                    updated,
-                    changed,
-                );
-                *val_abs = updated;
-                changed
-            }
-        }
+        let val_abs = &mut self.state.values[val];
+        let updated = AbstractValue::meet(val_abs, &abs);
+        let changed = updated != *val_abs;
+        log::debug!(
+            " -> meet: cur {:?} input {:?} result {:?} (changed: {})",
+            val_abs,
+            abs,
+            updated,
+            changed,
+        );
+        *val_abs = updated;
+        changed
     }
 
     fn enqueue_block_if_existing(&mut self, orig_block: Block, context: Context) {
@@ -488,10 +478,6 @@ impl<'a> Evaluator<'a> {
         let mut arg_values = vec![];
 
         log::trace!("evaluate_block_body: {}: state {:?}", orig_block, state);
-        for &(_, param) in &self.generic.blocks[orig_block].params {
-            let (_, abs) = self.use_value(state.context, orig_block, param);
-            log::trace!(" -> param {}: {:?}", param, abs);
-        }
 
         for &inst in &self.generic.blocks[orig_block].insts {
             let input_ctx = state.context;
@@ -604,20 +590,15 @@ impl<'a> Evaluator<'a> {
 
     fn meet_into_block_entry(
         &mut self,
-        block: Block,
-        context: Context,
+        _block: Block,
+        _context: Context,
+        new_block: Block,
         state: &ProgPointState,
     ) -> bool {
         let mut state = state.clone();
         state.update_across_edge();
 
-        match self.state.state[context].block_entry.entry(block) {
-            HashEntry::Vacant(v) => {
-                v.insert(state);
-                true
-            }
-            HashEntry::Occupied(mut o) => o.get_mut().meet_with(&state),
-        }
+        self.state.block_entry[new_block].meet_with(&state)
     }
 
     fn context_desc(&self, ctx: Context) -> String {
@@ -658,9 +639,7 @@ impl<'a> Evaluator<'a> {
         }
         self.block_map.insert((context, orig_block), block);
         self.block_rev_map[block] = (context, orig_block);
-        self.state.state[context]
-            .block_entry
-            .insert(orig_block, state);
+        self.state.block_entry[block] = state;
         block
     }
 
@@ -700,7 +679,12 @@ impl<'a> Evaluator<'a> {
             HashEntry::Occupied(o) => {
                 let target_specialized = *o.get();
                 log::trace!(" -> already existing block {}", target_specialized);
-                let changed = self.meet_into_block_entry(target, target_context, &state.flow);
+                let changed = self.meet_into_block_entry(
+                    target,
+                    target_context,
+                    target_specialized,
+                    &state.flow,
+                );
                 if changed {
                     log::trace!("   -> changed");
                     if self.queue_set.insert((target, target_context)) {
@@ -1149,16 +1133,8 @@ impl<'a> Evaluator<'a> {
     }
 
     fn flush_on_edge(&mut self, from: Block, to: Block, succ_idx: usize) {
-        let (from_ctx, from_orig_block) = self.block_rev_map[from];
-        let from_state = self.state.state[from_ctx]
-            .block_exit
-            .get(&from_orig_block)
-            .unwrap();
-        let (to_ctx, to_orig_block) = self.block_rev_map[to];
-        let to_state = self.state.state[to_ctx]
-            .block_exit
-            .get(&to_orig_block)
-            .unwrap();
+        let from_state = &self.state.block_exit[from];
+        let to_state = &self.state.block_exit[to];
 
         let mut edge_block = None;
         for (sym_addr, value) in &from_state.mem_overlay {
@@ -1834,7 +1810,7 @@ impl<'a> Evaluator<'a> {
         // specialized block, and create blockparams for all values
         // that in the end were `BlockParam`.
         for (&(ctx, orig_block), &block) in &self.block_map {
-            let succ_state = self.state.state[ctx].block_entry.get(&orig_block).unwrap();
+            let succ_state = &self.state.block_entry[block];
 
             for (&addr, val) in &succ_state.mem_overlay {
                 let ty = val.to_type().ok_or_else(|| {
@@ -1864,11 +1840,7 @@ impl<'a> Evaluator<'a> {
 
             for pred_idx in 0..self.func.blocks[block].preds.len() {
                 let pred = self.func.blocks[block].preds[pred_idx];
-                let (pred_ctx, pred_orig_block) = self.block_rev_map[pred];
-                let pred_state = self.state.state[pred_ctx]
-                    .block_exit
-                    .get(&pred_orig_block)
-                    .unwrap();
+                let pred_state = &self.state.block_exit[pred];
                 let pred_succ_idx = self.func.blocks[block].pos_in_pred_succ[pred_idx];
 
                 for &addr in succ_state.mem_overlay.keys() {
