@@ -70,7 +70,6 @@ pub fn partially_evaluate(
     for directive in directives {
         if !funcs.contains_key(&directive.func) {
             let mut f = module.clone_and_expand_body(directive.func)?;
-            f.optimize();
             f.convert_to_max_ssa();
             if opts.add_tracing {
                 waffle::passes::trace::run(&mut f);
@@ -1880,6 +1879,7 @@ impl<'a> Evaluator<'a> {
         // consistent (non-conflicting) state on inputs.
         self.add_blockparam_mem_spills()?;
 
+        #[cfg(debug_assertions)]
         self.func.validate().unwrap();
 
         Ok(())
