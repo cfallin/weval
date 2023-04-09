@@ -9,7 +9,7 @@ use crate::Options;
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
-use std::collections::{hash_map::Entry as HashEntry, VecDeque};
+use std::collections::{hash_map::Entry as HashEntry, BTreeSet, VecDeque};
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
@@ -39,10 +39,12 @@ struct Evaluator<'a> {
     block_map: HashMap<(Context, Block), Block>,
     /// Reverse map from specialized block to its original ctx/block.
     block_rev_map: PerEntity<Block, (Context, Block)>,
+    /// Specialized block that defines a given specialized value.
+    def_block: PerEntity<Value, Block>,
     /// Dependencies for updates: some use in a given block with a
     /// given context occurs of a value defined in another block at
     /// another context.
-    block_deps: HashMap<(Context, Block), HashSet<(Context, Block)>>,
+    block_deps: HashMap<Block, BTreeSet<Block>>,
     /// Map of (ctx, value_in_generic) to specialized value_in_func.
     value_map: HashMap<(Context, Value), Value>,
     /// Map of (ctx, block, sym_addr) to blockparams for address and
@@ -156,6 +158,7 @@ fn partially_evaluate_func(
         func,
         block_map: HashMap::default(),
         block_rev_map: PerEntity::default(),
+        def_block: PerEntity::default(),
         block_deps: HashMap::default(),
         value_map: HashMap::default(),
         mem_blockparam_map: HashMap::default(),
@@ -191,7 +194,7 @@ fn add_blockparams_at_context_changes(
     cfg: &CFGInfo,
     intrinsics: &Intrinsics,
 ) {
-    eprintln!(
+    log::trace!(
         "Before making values across context-changes blockparams:\n{}\n",
         func.display_verbose("| ", None)
     );
@@ -212,96 +215,29 @@ fn add_blockparams_at_context_changes(
             }
         }
     }
-    eprintln!("change_blocks = {:?}", change_blocks);
+    log::trace!("change_blocks = {:?}", change_blocks);
 
-    let mut context_entry_blocks = HashSet::default();
+    let mut context_entry_blocks = std::collections::HashSet::default();
     for block in change_blocks {
         func.blocks[block].terminator.visit_targets(|target| {
             context_entry_blocks.insert(target.block);
         });
     }
-    eprintln!("context_entry_blocks = {:?}", context_entry_blocks);
+    log::trace!("context_entry_blocks = {:?}", context_entry_blocks);
 
-    // For every use-def link, walk the domtree from use up to def; at
-    // any edge from a change-block, insert a blockparam for the given
-    // value if not present. Perform this in postorder so that it
-    // works in a single pass.
-    //
-    // `remaps` contains a mapping from dest-block (the block that
-    // gets the blockparam) and original value to new value.
-    let mut remaps: HashMap<(Block, Value), Value> = HashMap::default();
-    for &block in cfg.rpo.values().rev() {
-        eprintln!("context-change blockparam insertion: visiting {}", block);
-        let mut visit_use = |func: &mut FunctionBody, u_ref: &mut Value| {
-            let u = func.resolve_and_update_alias(*u_ref);
-            eprintln!("-> visiting use {} resolves to {}", u_ref, u);
-            let ty = match func.values[u].ty() {
-                Some(ty) => ty,
-                None => return,
-            };
-            let def_block = cfg.def_block[u];
-            eprintln!(" -> defined in {}", def_block);
-            let mut b = block;
-            while b != def_block {
-                assert_ne!(b, Block::invalid());
-                let parent = cfg.domtree[b];
-                // Is `parent` a context-entry block? If so, the edge
-                // from `parent` to `b` needs to have this value as a
-                // blockparam, and we need to rewrite the use. We can
-                // break if this occurs, because we will later process
-                // the use in the branch as we go up the domtree.
-                let remap = if let Some(value) = remaps.get(&(b, u)) {
-                    Some(*value)
-                } else if context_entry_blocks.contains(&b)
-                    && !func.blocks[b].params.iter().any(|(_, param)| *param == u)
-                {
-                    eprintln!(
-                        " -> crosses domtree edge with context change to parent {}",
-                        parent
-                    );
-                    let blockparam = func.add_blockparam(b, ty);
-                    eprintln!(" -> created new blockparam {}", blockparam);
-                    for &pred in &cfg.preds[b] {
-                        let mut term = std::mem::take(&mut func.blocks[pred].terminator);
-                        term.update_targets(|target| {
-                            if target.block == b {
-                                target.args.push(u);
-                            }
-                        });
-                        func.blocks[pred].terminator = term;
-                    }
-                    remaps.insert((b, u), blockparam);
-                    Some(blockparam)
-                } else {
-                    None
-                };
-
-                if let Some(remap) = remap {
-                    eprintln!(" -> remapping {} to {}", u_ref, remap);
-                    *u_ref = remap;
-                    break;
-                }
-                b = parent;
+    // Also treat every back-edge (TODO: reachable from a context-entry
+    // block) as a cut-block.
+    for block in func.blocks.iter() {
+        func.blocks[block].terminator.visit_targets(|target| {
+            if !cfg.dominates(block, target.block) {
+                context_entry_blocks.insert(target.block);
             }
-        };
-
-        for inst in 0..func.blocks[block].insts.len() {
-            let inst = func.blocks[block].insts[inst];
-            let mut value = std::mem::take(&mut func.values[inst]);
-            value.update_uses(|u| visit_use(func, u));
-            func.values[inst] = value;
-        }
-        let mut term = std::mem::take(&mut func.blocks[block].terminator);
-        term.update_uses(|u| visit_use(func, u));
-        // Very subtle correctness issue: the `visit_use` call above
-        // may insert new args into BlockTargets in
-        // terminators. However, it must not have added any to
-        // `block`'s terminator, because any value that is used across
-        // self-loop will already be a blockparam.
-        func.blocks[block].terminator = term;
+        });
     }
 
-    eprintln!(
+    func.convert_to_max_ssa(Some(context_entry_blocks));
+
+    log::trace!(
         "After making values across context-changes blockparams:\n{}\n",
         func.display_verbose("| ", None)
     );
@@ -448,6 +384,14 @@ impl<'a> Evaluator<'a> {
         while let Some((orig_block, ctx, new_block)) = self.queue.pop_back() {
             self.queue_set.remove(&(orig_block, ctx));
             self.evaluate_block(orig_block, ctx, new_block)?;
+            if let Some(deps) = self.block_deps.get(&new_block) {
+                for &dep in deps {
+                    let (ctx, orig_block) = self.block_rev_map[dep];
+                    if self.queue_set.insert((orig_block, ctx)) {
+                        self.queue.push_back((orig_block, ctx, dep));
+                    }
+                }
+            }
         }
         self.finalize()?;
         Ok(())
@@ -537,6 +481,7 @@ impl<'a> Evaluator<'a> {
         context: Context,
         orig_block: Block,
         orig_val: Value,
+        new_block: Block,
     ) -> (Value, AbstractValue) {
         let orig_val = self.generic.resolve_alias(orig_val);
         log::trace!(
@@ -549,6 +494,13 @@ impl<'a> Evaluator<'a> {
             log::trace!(" -> found abstract  value {:?} at context {}", abs, context);
             let &val = self.value_map.get(&(context, orig_val)).unwrap();
             log::trace!(" -> runtime value {}", val);
+            let def_new_block = self.def_block[val];
+            if new_block != def_new_block {
+                self.block_deps
+                    .entry(def_new_block)
+                    .or_default()
+                    .insert(new_block);
+            }
             return (val, abs.clone());
         }
         panic!(
@@ -560,6 +512,7 @@ impl<'a> Evaluator<'a> {
     fn def_value(
         &mut self,
         block: Block,
+        new_block: Block,
         context: Context,
         orig_val: Value,
         val: Value,
@@ -574,6 +527,7 @@ impl<'a> Evaluator<'a> {
             abs
         );
         self.value_map.insert((context, orig_val), val);
+        self.def_block[val] = new_block;
         match self.state.state[context].ssa.values.entry(orig_val) {
             HashEntry::Vacant(v) => {
                 v.insert(abs);
@@ -616,7 +570,7 @@ impl<'a> Evaluator<'a> {
 
         log::trace!("evaluate_block_body: {}: state {:?}", orig_block, state);
         for &(_, param) in &self.generic.blocks[orig_block].params {
-            let (_, abs) = self.use_value(state.context, orig_block, param);
+            let (_, abs) = self.use_value(state.context, orig_block, param, new_block);
             log::trace!(" -> param {}: {:?}", param, abs);
         }
 
@@ -638,7 +592,7 @@ impl<'a> Evaluator<'a> {
                 }
                 ValueDef::PickOutput(val, idx, ty) => {
                     // Directly transcribe.
-                    let (val, _) = self.use_value(state.context, orig_block, *val);
+                    let (val, _) = self.use_value(state.context, orig_block, *val, new_block);
                     Some((
                         ValueDef::PickOutput(val, *idx, *ty),
                         AbstractValue::Runtime(Some(inst), ValueTags::default()),
@@ -652,7 +606,7 @@ impl<'a> Evaluator<'a> {
                         log::trace!(" * arg {}", arg);
                         let arg = self.generic.resolve_alias(arg);
                         log::trace!(" -> resolves to arg {}", arg);
-                        let (val, abs) = self.use_value(state.context, orig_block, arg);
+                        let (val, abs) = self.use_value(state.context, orig_block, arg, new_block);
                         arg_abs_values.push(abs);
                         arg_values.push(val);
                     }
@@ -705,7 +659,7 @@ impl<'a> Evaluator<'a> {
                     let mut arg_values = vec![];
                     for &arg in args {
                         let arg = self.generic.resolve_alias(arg);
-                        let (val, _abs) = self.use_value(state.context, orig_block, arg);
+                        let (val, _abs) = self.use_value(state.context, orig_block, arg, new_block);
                         arg_values.push(val);
                     }
                     Some((
@@ -722,7 +676,14 @@ impl<'a> Evaluator<'a> {
                 self.value_map.insert((input_ctx, inst), result_value);
                 self.func.append_to_block(new_block, result_value);
 
-                self.def_value(orig_block, input_ctx, inst, result_value, result_abs);
+                self.def_value(
+                    orig_block,
+                    new_block,
+                    input_ctx,
+                    inst,
+                    result_value,
+                    result_abs,
+                );
             }
         }
 
@@ -843,6 +804,7 @@ impl<'a> Evaluator<'a> {
     fn evaluate_block_target(
         &mut self,
         orig_block: Block,
+        new_block: Block,
         state: &PointState,
         target_ctx: Context,
         target: &BlockTarget,
@@ -862,7 +824,7 @@ impl<'a> Evaluator<'a> {
         for &arg in &target.args {
             let arg = self.generic.resolve_alias(arg);
             abs_generic_args.push(arg);
-            let (val, abs) = self.use_value(state.context, orig_block, arg);
+            let (val, abs) = self.use_value(state.context, orig_block, arg, new_block);
             log::trace!(
                 "blockparam: block {} context {}: arg {} has val {} abs {:?}",
                 orig_block,
@@ -909,7 +871,7 @@ impl<'a> Evaluator<'a> {
             log::debug!(
                 "blockparam: updating with new def: block {} context {} param {} val {} abstract {:?} from branch arg {}",
                 target.block, target_ctx, blockparam, val, abs, generic_arg);
-            changed |= self.def_value(orig_block, target_ctx, blockparam, val, abs);
+            changed |= self.def_value(orig_block, target_block, target_ctx, blockparam, val, abs);
         }
 
         // If blockparam inputs changed, re-enqueue target for evaluation.
@@ -940,14 +902,21 @@ impl<'a> Evaluator<'a> {
                 ref if_true,
                 ref if_false,
             } => {
-                let (cond, abs_cond) = self.use_value(state.context, orig_block, cond);
+                let (cond, abs_cond) = self.use_value(state.context, orig_block, cond, new_block);
                 match abs_cond.is_const_truthy() {
                     Some(true) => Terminator::Br {
-                        target: self.evaluate_block_target(orig_block, state, new_context, if_true),
+                        target: self.evaluate_block_target(
+                            orig_block,
+                            new_block,
+                            state,
+                            new_context,
+                            if_true,
+                        ),
                     },
                     Some(false) => Terminator::Br {
                         target: self.evaluate_block_target(
                             orig_block,
+                            new_block,
                             state,
                             new_context,
                             if_false,
@@ -957,12 +926,14 @@ impl<'a> Evaluator<'a> {
                         cond,
                         if_true: self.evaluate_block_target(
                             orig_block,
+                            new_block,
                             state,
                             new_context,
                             if_true,
                         ),
                         if_false: self.evaluate_block_target(
                             orig_block,
+                            new_block,
                             state,
                             new_context,
                             if_false,
@@ -980,8 +951,8 @@ impl<'a> Evaluator<'a> {
                         index
                     );
                     let parent = self.state.contexts.parent(new_context);
-                    assert_eq!(*target.args.last().unwrap(), index);
-                    let target_index = self.generic.blocks[target.block].params.last().unwrap().1;
+                    let branch_arg_idx = target.args.iter().position(|&arg| arg == index).unwrap();
+                    let target_index = self.generic.blocks[target.block].params[branch_arg_idx].1;
                     let mut targets: Vec<BlockTarget> = (lo..=hi)
                         .map(|i| {
                             let c = self
@@ -989,11 +960,11 @@ impl<'a> Evaluator<'a> {
                                 .contexts
                                 .create(Some(parent), ContextElem::Specialized(target_index, i));
                             log::trace!(" -> created new context {} for index {}", c, i);
-                            self.evaluate_block_target(orig_block, state, c, target)
+                            self.evaluate_block_target(orig_block, new_block, state, c, target)
                         })
                         .collect();
                     let default = targets.pop().unwrap();
-                    let (value, _) = self.use_value(state.context, orig_block, index);
+                    let (value, _) = self.use_value(state.context, orig_block, index, new_block);
                     Terminator::Select {
                         value,
                         targets,
@@ -1001,7 +972,13 @@ impl<'a> Evaluator<'a> {
                     }
                 } else {
                     Terminator::Br {
-                        target: self.evaluate_block_target(orig_block, state, new_context, target),
+                        target: self.evaluate_block_target(
+                            orig_block,
+                            new_block,
+                            state,
+                            new_context,
+                            target,
+                        ),
                     }
                 }
             }
@@ -1010,7 +987,8 @@ impl<'a> Evaluator<'a> {
                 ref targets,
                 ref default,
             } => {
-                let (value, abs_value) = self.use_value(state.context, orig_block, value);
+                let (value, abs_value) =
+                    self.use_value(state.context, orig_block, value, new_block);
                 if let Some(selector) = abs_value.is_const_u32() {
                     let selector = selector as usize;
                     let target = if selector < targets.len() {
@@ -1019,17 +997,34 @@ impl<'a> Evaluator<'a> {
                         default
                     };
                     Terminator::Br {
-                        target: self.evaluate_block_target(orig_block, state, new_context, target),
+                        target: self.evaluate_block_target(
+                            orig_block,
+                            new_block,
+                            state,
+                            new_context,
+                            target,
+                        ),
                     }
                 } else {
                     let targets = targets
                         .iter()
                         .map(|target| {
-                            self.evaluate_block_target(orig_block, state, new_context, target)
+                            self.evaluate_block_target(
+                                orig_block,
+                                new_block,
+                                state,
+                                new_context,
+                                target,
+                            )
                         })
                         .collect::<Vec<_>>();
-                    let default =
-                        self.evaluate_block_target(orig_block, state, new_context, default);
+                    let default = self.evaluate_block_target(
+                        orig_block,
+                        new_block,
+                        state,
+                        new_context,
+                        default,
+                    );
                     Terminator::Select {
                         value,
                         targets,
@@ -1040,7 +1035,10 @@ impl<'a> Evaluator<'a> {
             &Terminator::Return { ref values } => {
                 let values = values
                     .iter()
-                    .map(|&value| self.use_value(state.context, orig_block, value).0)
+                    .map(|&value| {
+                        self.use_value(state.context, orig_block, value, new_block)
+                            .0
+                    })
                     .collect::<Vec<_>>();
                 Terminator::Return { values }
             }
