@@ -141,8 +141,8 @@ fn partially_evaluate_func(
     let orig_name = module.funcs[directive.func].name();
     let sig = module.funcs[directive.func].sig();
 
-    log::debug!("Specializing: {}", directive.func);
-    log::debug!("body:\n{}", generic.display("| ", Some(module)));
+    log::trace!("Specializing: {}", directive.func);
+    log::trace!("body:\n{}", generic.display("| ", Some(module)));
 
     log::trace!("CFGInfo: {:?}", cfg);
 
@@ -238,7 +238,7 @@ fn add_blockparams_at_context_changes(
     log::trace!("context_entry_blocks = {:?}", context_entry_blocks);
     func.convert_to_max_ssa(Some(context_entry_blocks));
 
-    log::trace!(
+    eprintln!(
         "After making values across context-changes blockparams:\n{}\n",
         func.display_verbose("| ", None)
     );
@@ -574,10 +574,6 @@ impl<'a> Evaluator<'a> {
         let mut arg_values = vec![];
 
         log::trace!("evaluate_block_body: {}: state {:?}", orig_block, state);
-        for &(_, param) in &self.generic.blocks[orig_block].params {
-            let (_, abs) = self.use_value(state.context, orig_block, param, new_block);
-            log::trace!(" -> param {}: {:?}", param, abs);
-        }
 
         for &inst in &self.generic.blocks[orig_block].insts {
             let input_ctx = state.context;
@@ -1246,7 +1242,7 @@ impl<'a> Evaluator<'a> {
                         .unwrap();
                     let line = abs[1].is_const_u32().unwrap();
                     let val = abs[2].clone();
-                    log::trace!("print: line {}: {}: {:?}", line, message, val);
+                    eprintln!("print: line {}: {}: {:?}", line, message, val);
                     EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
