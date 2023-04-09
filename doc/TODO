@@ -1,3 +1,4 @@
-- rethink SwitchValue system? "specialize-switch" intrinsic that
-  converts next edge (if/else?) into a switch, then let the rest fall
-  out?
+- Come up with a better scheme than max-SSA for SSA reconstruction across
+  contexts
+
+- Memory-renaming: "alias taint" scheme
