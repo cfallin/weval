@@ -320,14 +320,20 @@ impl EvalResult {
     }
 }
 
+const MAX_BLOCKS: usize = 100_000;
+const MAX_VALUES: usize = 1_000_000;
+
 impl<'a> Evaluator<'a> {
-    fn evaluate(&mut self) -> anyhow::Result<()> {
+    fn evaluate(&mut self) -> anyhow::Result<bool> {
         while let Some((orig_block, ctx, new_block)) = self.queue.pop_back() {
+            if self.func.blocks.len() > MAX_BLOCKS || self.func.values.len() > MAX_VALUES {
+                return Ok(false);
+            }
             self.queue_set.remove(&(orig_block, ctx));
             self.evaluate_block(orig_block, ctx, new_block)?;
         }
         self.finalize()?;
-        Ok(())
+        Ok(true)
     }
 
     fn evaluate_block(
