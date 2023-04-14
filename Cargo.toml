@@ -6,7 +6,7 @@ license = "Apache-2.0 WITH LLVM-Exception"
 edition = "2021"
 
 [dependencies]
-waffle = "0.0.13"
+waffle = "0.0.16"
 anyhow = "1.0"
 structopt = "0.3"
 wasm-encoder = "0.20"
@@ -15,6 +15,7 @@ log = "0.4"
 env_logger = "0.9"
 fxhash = "0.2"
 rayon = "1.5"
+indicatif = "0.17"
 
 [profile.release]
 debug = true

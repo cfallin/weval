@@ -61,16 +61,22 @@ pub fn partially_evaluate(
     im: &mut Image,
     directives: &[Directive],
     opts: &Options,
+    mut progress: Option<indicatif::ProgressBar>,
 ) -> anyhow::Result<()> {
     let intrinsics = Intrinsics::find(module);
     log::trace!("intrinsics: {:?}", intrinsics);
     let mut mem_updates = HashMap::default();
 
+    // Sort directives by out-address, and remove duplicates.
+    let mut directives = directives.to_vec();
+    directives.sort_by_key(|d| d.func_index_out_addr);
+    directives.dedup_by_key(|d| d.func_index_out_addr);
+
     let mut funcs = HashMap::default();
-    for directive in directives {
+    for directive in &directives {
         if !funcs.contains_key(&directive.func) {
             let mut f = module.clone_and_expand_body(directive.func)?;
-            f.convert_to_max_ssa();
+            f.convert_to_max_ssa(None);
             if opts.add_tracing {
                 waffle::passes::trace::run(&mut f);
             }
@@ -86,17 +92,32 @@ pub fn partially_evaluate(
         return Ok(());
     }
 
+    if let Some(p) = progress.as_mut() {
+        p.set_length(directives.len() as u64);
+    }
+
+    let directives = directives
+        .iter()
+        .zip(std::iter::from_fn(move || {
+            Some(progress.as_ref().map(|bar| bar.clone()))
+        }))
+        .collect::<Vec<_>>();
     let bodies = directives
         .par_iter()
-        .map(|directive| {
+        .map(|(directive, progress)| {
             let generic = funcs.get(&directive.func).unwrap();
-            partially_evaluate_func(module, generic, im, &intrinsics, directive)
-                .map(|tuple| (directive, tuple))
+            let (body, sig, name) =
+                partially_evaluate_func(module, generic, im, &intrinsics, directive)?;
+            let bytes = body.compile()?;
+            if let Some(p) = progress {
+                p.inc(1);
+            }
+            Ok((directive, (bytes, sig, name)))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    for (directive, (body, sig, name)) in bodies {
+    for (directive, (bytes, sig, name)) in bodies {
         // Add function to module.
-        let func = module.funcs.push(FuncDecl::Body(sig, name, body));
+        let func = module.funcs.push(FuncDecl::Compiled(sig, name, bytes));
         // Append to table.
         let func_table = &mut module.tables[Table::from(0)];
         let table_idx = {
@@ -108,8 +129,8 @@ pub fn partially_evaluate(
         if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
             func_table.max = Some(table_idx + 1);
         }
-        log::info!("New func index {} -> table index {}", func, table_idx);
-        log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
+        log::debug!("New func index {} -> table index {}", func, table_idx);
+        log::debug!(" -> writing to 0x{:x}", directive.func_index_out_addr);
         // Update memory image.
         mem_updates.insert(directive.func_index_out_addr, table_idx);
     }
@@ -133,7 +154,7 @@ fn partially_evaluate_func(
     let orig_name = module.funcs[directive.func].name();
     let sig = module.funcs[directive.func].sig();
 
-    log::debug!("Specializing: {}", directive.func);
+    log::info!("Specializing: {:?}", directive);
     log::debug!("body:\n{}", generic.display("| ", Some(module)));
 
     // Compute CFG info.
@@ -175,6 +196,7 @@ fn partially_evaluate_func(
     );
     evaluator.evaluate()?;
 
+    log::info!("Specialization of {:?} done", directive);
     log::debug!(
         "Adding func:\n{}",
         evaluator.func.display_verbose("| ", Some(module))
@@ -1080,7 +1102,7 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.trace_line {
                     let line_num = abs[0].is_const_u32().unwrap_or(0);
-                    log::info!("trace: line number {}: current context {} at block {}, pending context {:?}",
+                    log::debug!("trace: line number {}: current context {} at block {}, pending context {:?}",
                                 line_num, state.context, orig_block, state.pending_context);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_const32 {

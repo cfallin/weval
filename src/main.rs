@@ -61,7 +61,14 @@ fn main() -> anyhow::Result<()> {
     log::debug!("Directives: {:?}", directives);
 
     // Partially evaluate.
-    eval::partially_evaluate(&mut module, &mut im, &directives[..], &opts)?;
+    let progress = indicatif::ProgressBar::new(0);
+    eval::partially_evaluate(
+        &mut module,
+        &mut im,
+        &directives[..],
+        &opts,
+        Some(progress),
+    )?;
 
     // Run in interpreter, if requested. `run_pre` also causes about
     // `partially_evaluate` to not actually perform the transform,
