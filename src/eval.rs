@@ -108,16 +108,16 @@ pub fn partially_evaluate(
             let generic = funcs.get(&directive.func).unwrap();
             let (body, sig, name) =
                 partially_evaluate_func(module, generic, im, &intrinsics, directive)?;
-            let bytes = body.compile()?;
+            let body = body.compile()?;
             if let Some(p) = progress {
                 p.inc(1);
             }
-            Ok((directive, (bytes, sig, name)))
+            Ok((directive, (body, sig, name)))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    for (directive, (bytes, sig, name)) in bodies {
+    for (directive, (body, sig, name)) in bodies {
         // Add function to module.
-        let func = module.funcs.push(FuncDecl::Compiled(sig, name, bytes));
+        let func = module.funcs.push(FuncDecl::Compiled(sig, name, body));
         // Append to table.
         let func_table = &mut module.tables[Table::from(0)];
         let table_idx = {
