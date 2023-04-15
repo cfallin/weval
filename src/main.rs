@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
@@ -127,14 +128,25 @@ fn run_diff(orig_module: waffle::Module<'_>, wevaled_module: waffle::Module<'_>)
     let wevaled = TraceIter::new(wevaled_module.without_orig_bytes());
 
     let mut progress: u64 = 0;
+    let mut last_n = VecDeque::new();
     for ((orig_id, orig_args), (wevaled_id, wevaled_args)) in orig.zip(wevaled) {
         progress += 1;
         if progress % 1000000 == 0 {
             eprintln!("{} steps", progress);
         }
+        
+        last_n.push_back((orig_id, orig_args.clone()));
+        if last_n.len() > 10 {
+            last_n.pop_front();
+        }
+        
         if orig_id != wevaled_id || orig_args != wevaled_args {
             eprintln!("Original:\n{}\n", orig_text);
             eprintln!("wevaled:\n{}\n", wevaled_text);
+            eprintln!("Recent tracepoints:");
+            for (id, args) in last_n {
+                eprintln!("* {}, {:?}", id, args);
+            }
             panic!(
                 "Mismatch: orig ({}, {:?}), wevaled ({}, {:?})",
                 orig_id, orig_args, wevaled_id, wevaled_args
