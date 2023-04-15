@@ -121,6 +121,8 @@ impl Iterator for TraceIter {
 }
 
 fn run_diff(orig_module: waffle::Module<'_>, wevaled_module: waffle::Module<'_>) {
+    let orig_text = format!("{}", orig_module.display());
+    let wevaled_text = format!("{}", wevaled_module.display());
     let orig = TraceIter::new(orig_module.without_orig_bytes());
     let wevaled = TraceIter::new(wevaled_module.without_orig_bytes());
 
@@ -131,6 +133,8 @@ fn run_diff(orig_module: waffle::Module<'_>, wevaled_module: waffle::Module<'_>)
             eprintln!("{} steps", progress);
         }
         if orig_id != wevaled_id || orig_args != wevaled_args {
+            eprintln!("Original:\n{}\n", orig_text);
+            eprintln!("wevaled:\n{}\n", wevaled_text);
             panic!(
                 "Mismatch: orig ({}, {:?}), wevaled ({}, {:?})",
                 orig_id, orig_args, wevaled_id, wevaled_args
