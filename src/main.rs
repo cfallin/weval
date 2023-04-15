@@ -24,13 +24,10 @@ pub struct Options {
     #[structopt(long = "tracing")]
     add_tracing: bool,
 
-    /// Run IR in interpreter prior to weval'ing.
-    #[structopt(long = "run-pre")]
-    run_pre: bool,
-
-    /// Run IR in interpreter after weval'ing.
-    #[structopt(long = "run-post")]
-    run_post: bool,
+    /// Run IR in interpreter differentially, before and after
+    /// wevaling, comparing trace outputs.
+    #[structopt(long = "run-diff")]
+    run_diff: bool,
 
     /// Optimization fuel, for bisecting issues, or 0 for infinite.
     #[structopt(long = "opt-fuel", default_value = "0")]
@@ -49,7 +46,7 @@ fn main() -> anyhow::Result<()> {
 
     // If we're going to run the interpreter, we need to expand all
     // functions.
-    if opts.run_pre || opts.run_post {
+    if opts.run_diff {
         module.expand_all_funcs()?;
     }
 
@@ -62,48 +59,82 @@ fn main() -> anyhow::Result<()> {
 
     // Partially evaluate.
     let progress = indicatif::ProgressBar::new(0);
-    eval::partially_evaluate(
-        &mut module,
-        &mut im,
-        &directives[..],
-        &opts,
-        Some(progress),
-    )?;
-
-    // Run in interpreter, if requested. `run_pre` also causes about
-    // `partially_evaluate` to not actually perform the transform,
-    // only insert tracing.
-    if opts.run_pre {
-        run_interp(&module);
-        return Ok(());
-    }
+    let mut result =
+        eval::partially_evaluate(module, &mut im, &directives[..], &opts, Some(progress))?;
 
     // Update memories in module.
-    image::update(&mut module, &im);
+    image::update(&mut result.module, &im);
 
-    log::debug!("Final module:\n{}", module.display());
+    log::debug!("Final module:\n{}", result.module.display());
 
-    if opts.run_post {
-        run_interp(&module);
+    if opts.run_diff {
+        run_diff(result.orig_module.unwrap(), result.module);
         return Ok(());
     }
 
-    let bytes = module.to_wasm_bytes()?;
+    let bytes = result.module.to_wasm_bytes()?;
     std::fs::write(&opts.output_module, &bytes[..])?;
 
     Ok(())
 }
 
-fn run_interp(module: &waffle::Module<'_>) {
-    let mut ctx = waffle::InterpContext::new(module).unwrap();
-    if let Some(start) = module.start_func {
-        ctx.call(module, start, &[]).ok().unwrap();
+struct TraceIter {
+    thread: std::thread::JoinHandle<()>,
+    channel: std::sync::mpsc::Receiver<(usize, Vec<waffle::ConstVal>)>,
+}
+
+impl TraceIter {
+    fn new(module: waffle::Module<'static>) -> TraceIter {
+        let mut ctx = waffle::InterpContext::new(&module).unwrap();
+        if let Some(start) = module.start_func {
+            ctx.call(&module, start, &[]).ok().unwrap();
+        }
+
+        let entry = if let Some(waffle::Export {
+            kind: waffle::ExportKind::Func(func),
+            ..
+        }) = module.exports.iter().find(|e| &e.name == "_start")
+        {
+            *func
+        } else {
+            panic!("No _start entrypoint");
+        };
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            ctx.trace_handler = Some(Box::new(move |id, args| sender.send((id, args)).is_ok()));
+            let _ = ctx.call(&module, entry, &[]);
+        });
+
+        TraceIter {
+            thread,
+            channel: receiver,
+        }
     }
-    if let Some(waffle::Export {
-        kind: waffle::ExportKind::Func(func),
-        ..
-    }) = module.exports.iter().find(|e| &e.name == "_start")
-    {
-        ctx.call(&module, *func, &[]).ok().unwrap();
+}
+
+impl Iterator for TraceIter {
+    type Item = (usize, Vec<waffle::ConstVal>);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.channel.recv().ok()
+    }
+}
+
+fn run_diff(orig_module: waffle::Module<'_>, wevaled_module: waffle::Module<'_>) {
+    let orig = TraceIter::new(orig_module.without_orig_bytes());
+    let wevaled = TraceIter::new(wevaled_module.without_orig_bytes());
+
+    let mut progress: u64 = 0;
+    for ((orig_id, orig_args), (wevaled_id, wevaled_args)) in orig.zip(wevaled) {
+        progress += 1;
+        if progress % 1000000 == 0 {
+            eprintln!("{} steps", progress);
+        }
+        if orig_id != wevaled_id || orig_args != wevaled_args {
+            panic!(
+                "Mismatch: orig ({}, {:?}), wevaled ({}, {:?})",
+                orig_id, orig_args, wevaled_id, wevaled_args
+            );
+        }
     }
 }

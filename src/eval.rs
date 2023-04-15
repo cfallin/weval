@@ -55,15 +55,21 @@ struct Evaluator<'a> {
     queue_set: HashSet<(Block, Context)>,
 }
 
-/// Partially evaluates according to the given directives.
-pub fn partially_evaluate(
-    module: &mut Module,
+pub struct PartialEvalResult<'a> {
+    pub orig_module: Option<Module<'a>>,
+    pub module: Module<'a>,
+}
+
+/// Partially evaluates according to the given directives. Returns
+/// clone of original module, with tracing added.
+pub fn partially_evaluate<'a>(
+    mut module: Module<'a>,
     im: &mut Image,
     directives: &[Directive],
     opts: &Options,
     mut progress: Option<indicatif::ProgressBar>,
-) -> anyhow::Result<()> {
-    let intrinsics = Intrinsics::find(module);
+) -> anyhow::Result<PartialEvalResult<'a>> {
+    let intrinsics = Intrinsics::find(&module);
     log::trace!("intrinsics: {:?}", intrinsics);
     let mut mem_updates = HashMap::default();
 
@@ -80,7 +86,7 @@ pub fn partially_evaluate(
             if opts.add_tracing {
                 waffle::passes::trace::run(&mut f);
             }
-            if opts.run_pre {
+            if opts.run_diff {
                 module.replace_body(directive.func, f.clone());
             }
             split_blocks_at_specialization_points(&mut f, &intrinsics);
@@ -88,9 +94,11 @@ pub fn partially_evaluate(
         }
     }
 
-    if opts.run_pre {
-        return Ok(());
-    }
+    let orig_module = if opts.run_diff {
+        Some(module.clone())
+    } else {
+        None
+    };
 
     if let Some(p) = progress.as_mut() {
         p.set_length(directives.len() as u64);
@@ -107,17 +115,22 @@ pub fn partially_evaluate(
         .map(|(directive, progress)| {
             let generic = funcs.get(&directive.func).unwrap();
             let (body, sig, name) =
-                partially_evaluate_func(module, generic, im, &intrinsics, directive)?;
-            let body = body.compile()?;
+                partially_evaluate_func(&module, generic, im, &intrinsics, directive)?;
             if let Some(p) = progress {
                 p.inc(1);
             }
-            Ok((directive, (body, sig, name)))
+            let decl = if opts.run_diff {
+                FuncDecl::Body(sig, name, body)
+            } else {
+                let body = body.compile()?;
+                FuncDecl::Compiled(sig, name, body)
+            };
+            Ok((directive, decl))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    for (directive, (body, sig, name)) in bodies {
+    for (directive, decl) in bodies {
         // Add function to module.
-        let func = module.funcs.push(FuncDecl::Compiled(sig, name, body));
+        let func = module.funcs.push(decl);
         // Append to table.
         let func_table = &mut module.tables[Table::from(0)];
         let table_idx = {
@@ -141,7 +154,10 @@ pub fn partially_evaluate(
         im.write_u32(heap, addr, value)?;
     }
 
-    Ok(())
+    Ok(PartialEvalResult {
+        orig_module,
+        module,
+    })
 }
 
 fn partially_evaluate_func(
