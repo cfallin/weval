@@ -110,20 +110,31 @@ pub fn partially_evaluate<'a>(
         .collect::<Vec<_>>();
     let bodies = directives
         .par_iter()
-        .map(|(directive, progress)| {
+        .flat_map(|(directive, progress)| {
             let generic = funcs.get(&directive.func).unwrap();
-            let (body, sig, name) =
-                partially_evaluate_func(&module, generic, im, &intrinsics, directive)?;
+            let result = match partially_evaluate_func(&module, generic, im, &intrinsics, directive)
+            {
+                Ok(result) => result,
+                Err(e) => return Some(Err(e)),
+            };
+
             if let Some(p) = progress {
                 p.inc(1);
             }
-            let decl = if opts.run_diff {
-                FuncDecl::Body(sig, name, body)
+            if let Some((body, sig, name)) = result {
+                let decl = if opts.run_diff {
+                    FuncDecl::Body(sig, name, body)
+                } else {
+                    let body = match body.compile() {
+                        Ok(body) => body,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    FuncDecl::Compiled(sig, name, body)
+                };
+                Some(Ok((directive, decl)))
             } else {
-                let body = body.compile()?;
-                FuncDecl::Compiled(sig, name, body)
-            };
-            Ok((directive, decl))
+                None
+            }
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     for (directive, decl) in bodies {
@@ -178,7 +189,7 @@ fn partially_evaluate_func(
     image: &Image,
     intrinsics: &Intrinsics,
     directive: &Directive,
-) -> anyhow::Result<(FunctionBody, Signature, String)> {
+) -> anyhow::Result<Option<(FunctionBody, Signature, String)>> {
     let orig_name = module.funcs[directive.func].name();
     let sig = module.funcs[directive.func].sig();
 
@@ -222,7 +233,10 @@ fn partially_evaluate_func(
         ctx,
         &evaluator.value_map,
     );
-    evaluator.evaluate()?;
+    let success = evaluator.evaluate()?;
+    if !success {
+        return Ok(None);
+    }
 
     log::info!("Specialization of {:?} done", directive);
     log::debug!(
@@ -231,7 +245,7 @@ fn partially_evaluate_func(
     );
     let name = format!("{} (specialized)", orig_name);
     evaluator.func.optimize();
-    Ok((evaluator.func, sig, name))
+    Ok(Some((evaluator.func, sig, name)))
 }
 
 // Split at every `weval_specialize_value()` call. Requires max-SSA
