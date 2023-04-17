@@ -98,10 +98,24 @@ impl TraceIter {
             panic!("No _start entrypoint");
         };
 
-        let (sender, receiver) = std::sync::mpsc::channel();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1000);
         let thread = std::thread::spawn(move || {
-            ctx.trace_handler = Some(Box::new(move |id, args| sender.send((id, args)).is_ok()));
-            let _ = ctx.call(&module, entry, &[]);
+            let count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let count_cloned = count.clone();
+            ctx.trace_handler = Some(Box::new(move |id, args| {
+                count_cloned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                sender.send((id, args)).is_ok()
+            }));
+            let result = ctx.call(&module, entry, &[]);
+            if let Err(e) = result.ok() {
+                eprintln!(
+                    "Panic after {} steps: {:?}",
+                    count.load(std::sync::atomic::Ordering::Relaxed),
+                    e
+                );
+                let handler = ctx.trace_handler.unwrap();
+                handler(0, vec![]);
+            }
         });
 
         TraceIter {
