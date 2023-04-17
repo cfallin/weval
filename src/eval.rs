@@ -83,10 +83,8 @@ pub fn partially_evaluate<'a>(
         if !funcs.contains_key(&directive.func) {
             let mut f = module.clone_and_expand_body(directive.func)?;
             f.convert_to_max_ssa(None);
-            if opts.add_tracing {
-                waffle::passes::trace::run(&mut f);
-            }
             if opts.run_diff {
+                waffle::passes::trace::run(&mut f);
                 module.replace_body(directive.func, f.clone());
             }
             split_blocks_at_specialization_points(&mut f, &intrinsics);
@@ -94,7 +92,7 @@ pub fn partially_evaluate<'a>(
         }
     }
 
-    let orig_module = if opts.run_diff {
+    let mut orig_module = if opts.run_diff {
         Some(module.clone())
     } else {
         None
@@ -144,6 +142,20 @@ pub fn partially_evaluate<'a>(
         }
         log::debug!("New func index {} -> table index {}", func, table_idx);
         log::debug!(" -> writing to 0x{:x}", directive.func_index_out_addr);
+        
+        // If we're doing differential testing, append to *original
+        // module*'s function table too, but with the generic function
+        // index.
+        if opts.run_diff {
+            let orig_func_table = &mut orig_module.as_mut().unwrap().tables[Table::from(0)];
+            let orig_func_table_elts = orig_func_table.func_elements.as_mut().unwrap();
+            assert_eq!(table_idx, orig_func_table_elts.len() as u32);
+            orig_func_table_elts.push(directive.func);
+            if orig_func_table.max.is_some() && table_idx >= orig_func_table.max.unwrap() {
+                orig_func_table.max = Some(table_idx + 1);
+            }
+        }
+        
         // Update memory image.
         mem_updates.insert(directive.func_index_out_addr, table_idx);
     }

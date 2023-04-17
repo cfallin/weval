@@ -21,10 +21,6 @@ pub struct Options {
     #[structopt(short = "o")]
     output_module: PathBuf,
 
-    /// Add tracing to IR, for debugging.
-    #[structopt(long = "tracing")]
-    add_tracing: bool,
-
     /// Run IR in interpreter differentially, before and after
     /// wevaling, comparing trace outputs.
     #[structopt(long = "run-diff")]
@@ -69,6 +65,7 @@ fn main() -> anyhow::Result<()> {
     log::debug!("Final module:\n{}", result.module.display());
 
     if opts.run_diff {
+        image::update(result.orig_module.as_mut().unwrap(), &im);
         run_diff(result.orig_module.unwrap(), result.module);
         return Ok(());
     }
@@ -131,15 +128,15 @@ fn run_diff(orig_module: waffle::Module<'_>, wevaled_module: waffle::Module<'_>)
     let mut last_n = VecDeque::new();
     for ((orig_id, orig_args), (wevaled_id, wevaled_args)) in orig.zip(wevaled) {
         progress += 1;
-        if progress % 1000000 == 0 {
+        if progress % 100000 == 0 {
             eprintln!("{} steps", progress);
         }
-        
+
         last_n.push_back((orig_id, orig_args.clone()));
         if last_n.len() > 10 {
             last_n.pop_front();
         }
-        
+
         if orig_id != wevaled_id || orig_args != wevaled_args {
             eprintln!("Original:\n{}\n", orig_text);
             eprintln!("wevaled:\n{}\n", wevaled_text);
