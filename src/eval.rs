@@ -9,7 +9,7 @@ use crate::Options;
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
-use std::collections::{hash_map::Entry as HashEntry, VecDeque};
+use std::collections::{hash_map::Entry as HashEntry, BTreeSet, VecDeque};
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
@@ -39,10 +39,11 @@ struct Evaluator<'a> {
     block_map: HashMap<(Context, Block), Block>,
     /// Reverse map from specialized block to its original ctx/block.
     block_rev_map: PerEntity<Block, (Context, Block)>,
-    /// Preds in specialized block CFG.
-    block_preds: PerEntity<Block, Vec<Block>>,
     /// Map of (ctx, value_in_generic) to specialized value_in_func.
     value_map: HashMap<(Context, Value), Value>,
+    /// Dependency map from a given value to any blocks (in
+    /// specialized function) that must be re-evaluated if it changes.
+    value_dep_blocks: HashMap<(Context, Value), BTreeSet<Block>>,
     /// Map of (ctx, block, sym_addr) to blockparams for address and
     /// mem-renmaed value.
     mem_blockparam_map: HashMap<(Context, Block, SymbolicAddr), (Value, Value)>,
@@ -80,15 +81,19 @@ pub fn partially_evaluate<'a>(
     for directive in &directives {
         if !funcs.contains_key(&directive.func) {
             let mut f = module.clone_and_expand_body(directive.func)?;
-            f.convert_to_max_ssa(None);
+
+            split_blocks_at_specialization_points(&mut f, &intrinsics);
+
+            f.recompute_edges();
+            let cfg = CFGInfo::new(&f);
+            let cut_blocks = find_cut_blocks(&f, &cfg, &intrinsics);
+
+            f.convert_to_max_ssa(Some(cut_blocks));
+
             if opts.run_diff {
                 waffle::passes::trace::run(&mut f);
                 module.replace_body(directive.func, f.clone());
             }
-            split_blocks_at_specialization_points(&mut f, &intrinsics);
-            // Compute CFG info.
-            f.recompute_edges();
-            let cfg = CFGInfo::new(&f);
             funcs.insert(directive.func, (f, cfg));
         }
     }
@@ -210,8 +215,8 @@ fn partially_evaluate_func(
         func,
         block_map: HashMap::default(),
         block_rev_map: PerEntity::default(),
-        block_preds: PerEntity::default(),
         value_map: HashMap::default(),
+        value_dep_blocks: HashMap::default(),
         mem_blockparam_map: HashMap::default(),
         queue: VecDeque::new(),
         queue_set: HashSet::default(),
@@ -257,18 +262,8 @@ fn split_blocks_at_specialization_points(func: &mut FunctionBody, intrinsics: &I
                 if Some(*function_index) == intrinsics.specialize_value {
                     log::trace!("Splitting at weval_specialize_value for inst {}", inst);
 
-                    // Split the block here!
-                    // 1. Create a new block with the remainder of the instructions.
-                    // 2. Create a blockparam for every param of the
-                    //    original block, and every value def in the
-                    //    original block.
-                    // 3. Create an unconditional jump from original
-                    //    to split-off block.
-                    // 4. Rewrite all insts' args (and terminator's
-                    //    args) in the split-off block to use the
-                    //    blockparams.
-
-                    // Split *after* the call (the `i + 1`).
+                    // Split the block here!  Split *after* the call
+                    // (the `i + 1`).
                     let split_insts = func.blocks[block].insts.split_off(i + 1);
                     let new_block = func.blocks.push(BlockDef::default());
                     log::trace!(" -> new block: {}", new_block);
@@ -280,55 +275,10 @@ fn split_blocks_at_specialization_points(func: &mut FunctionBody, intrinsics: &I
                         func.blocks[block].desc, inst
                     );
 
-                    let mut target = BlockTarget {
+                    let target = BlockTarget {
                         block: new_block,
                         args: vec![],
                     };
-                    let mut remap = HashMap::default();
-                    let mut new_param_idx = 0;
-                    for param_idx in 0..func.blocks[block].params.len() {
-                        let (ty, orig_param) = func.blocks[block].params[param_idx];
-                        let new_param =
-                            func.values
-                                .push(ValueDef::BlockParam(new_block, new_param_idx, ty));
-                        new_param_idx += 1;
-                        func.blocks[new_block].params.push((ty, new_param));
-                        remap.insert(orig_param, new_param);
-                        target.args.push(orig_param);
-                    }
-                    for inst in 0..func.blocks[block].insts.len() {
-                        let inst = func.blocks[block].insts[inst];
-                        match &func.values[inst] {
-                            ValueDef::Operator(_, _, tys) if tys.len() == 1 => {
-                                let ty = tys[0];
-                                let new_param = func.values.push(ValueDef::BlockParam(
-                                    new_block,
-                                    new_param_idx,
-                                    ty,
-                                ));
-                                new_param_idx += 1;
-                                func.blocks[new_block].params.push((ty, new_param));
-                                remap.insert(inst, new_param);
-                                target.args.push(inst);
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    for new_inst in 0..func.blocks[new_block].insts.len() {
-                        let new_inst = func.blocks[new_block].insts[new_inst];
-                        func.values[new_inst].update_uses(|u| {
-                            if let Some(r) = remap.get(u) {
-                                *u = *r;
-                            }
-                        });
-                    }
-                    func.blocks[new_block].terminator.update_uses(|u| {
-                        if let Some(r) = remap.get(u) {
-                            *u = *r;
-                        }
-                    });
-
                     func.blocks[block].terminator = Terminator::Br { target };
                 }
 
@@ -338,6 +288,84 @@ fn split_blocks_at_specialization_points(func: &mut FunctionBody, intrinsics: &I
     }
 
     log::trace!("After splitting:\n{}\n", func.display_verbose("| ", None));
+}
+
+fn find_cut_blocks(
+    func: &FunctionBody,
+    cfg: &CFGInfo,
+    intrinsics: &Intrinsics,
+) -> std::collections::HashSet<Block> {
+    let mut blocks = std::collections::HashSet::default();
+
+    // Find the blocks that change context on out-edges.
+    let mut change_ctx_blocks = HashSet::default();
+    'blocks: for (block, blockdata) in func.blocks.entries() {
+        for &inst in &blockdata.insts {
+            if let ValueDef::Operator(Operator::Call { function_index }, ..) = &func.values[inst] {
+                if Some(*function_index) == intrinsics.update_context
+                    || Some(*function_index) == intrinsics.push_context
+                    || Some(*function_index) == intrinsics.pop_context
+                    || Some(*function_index) == intrinsics.specialize_value
+                {
+                    change_ctx_blocks.insert(block);
+                    continue 'blocks;
+                }
+            }
+        }
+    }
+
+    // For each block, we'll find a "highest same-context ancestor" in
+    // the domtree.
+    let mut highest_same_ctx_ancestor: PerEntity<Block, Block> = PerEntity::default();
+    let mut queue = vec![func.entry];
+    let mut queue_set = HashSet::default();
+    queue_set.insert(func.entry);
+    highest_same_ctx_ancestor[func.entry] = func.entry;
+    while let Some(block) = queue.pop() {
+        queue_set.remove(&block);
+
+        func.blocks[block].terminator.visit_targets(|target| {
+            let succ = target.block;
+            let current = highest_same_ctx_ancestor[succ];
+            let inbound = if change_ctx_blocks.contains(&block) {
+                blocks.insert(succ);
+                block
+            } else {
+                highest_same_ctx_ancestor[block]
+            };
+            let new = if !cfg.dominates(inbound, succ) {
+                blocks.insert(succ);
+                succ
+            } else if current.is_invalid() || cfg.dominates(current, inbound) {
+                inbound
+            } else {
+                current
+            };
+
+            let changed = new != current;
+            highest_same_ctx_ancestor[succ] = new;
+            log::trace!("highest same-context ancestor for {}: {}", succ, new);
+            if changed {
+                if queue_set.insert(succ) {
+                    queue.push(succ);
+                }
+            }
+        });
+    }
+
+    log::trace!("cut blocks = {:?}", blocks);
+    blocks
+}
+
+fn meet_ancestors(cfg: &CFGInfo, a: Block, b: Block) -> Block {
+    if cfg.dominates(a, b) {
+        a
+    } else if cfg.dominates(b, a) {
+        b
+    } else {
+        assert!(cfg.domtree[a].is_valid());
+        meet_ancestors(cfg, cfg.domtree[a], b)
+    }
 }
 
 fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {
@@ -474,6 +502,7 @@ impl<'a> Evaluator<'a> {
         &mut self,
         context: Context,
         orig_block: Block,
+        new_block: Block,
         orig_val: Value,
     ) -> (Value, AbstractValue) {
         log::trace!(
@@ -483,6 +512,12 @@ impl<'a> Evaluator<'a> {
             context
         );
         if let Some(&val) = self.value_map.get(&(context, orig_val)) {
+            if self.cfg.def_block[orig_val] != orig_block {
+                self.value_dep_blocks
+                    .entry((context, orig_val))
+                    .or_default()
+                    .insert(new_block);
+            }
             let abs = &self.state.values[val];
             log::trace!(" -> found abstract  value {:?} at context {}", abs, context);
             log::trace!(" -> runtime value {}", val);
@@ -522,6 +557,18 @@ impl<'a> Evaluator<'a> {
             changed,
         );
         *val_abs = updated;
+
+        if changed {
+            if let Some(deps) = self.value_dep_blocks.get(&(context, orig_val)) {
+                for &new_block in deps {
+                    let (ctx, block) = self.block_rev_map[new_block];
+                    if self.queue_set.insert((block, ctx)) {
+                        self.queue.push_back((block, ctx, new_block));
+                    }
+                }
+            }
+        }
+
         changed
     }
 
@@ -563,7 +610,7 @@ impl<'a> Evaluator<'a> {
                 }
                 ValueDef::PickOutput(val, idx, ty) => {
                     // Directly transcribe.
-                    let (val, _) = self.use_value(state.context, orig_block, *val);
+                    let (val, _) = self.use_value(state.context, orig_block, new_block, *val);
                     Some((
                         ValueDef::PickOutput(val, *idx, *ty),
                         AbstractValue::Runtime(Some(inst), ValueTags::default()),
@@ -577,7 +624,7 @@ impl<'a> Evaluator<'a> {
                         log::trace!(" * arg {}", arg);
                         let arg = self.generic.resolve_alias(arg);
                         log::trace!(" -> resolves to arg {}", arg);
-                        let (val, abs) = self.use_value(state.context, orig_block, arg);
+                        let (val, abs) = self.use_value(state.context, orig_block, new_block, arg);
                         arg_abs_values.push(abs);
                         arg_values.push(val);
                     }
@@ -630,7 +677,7 @@ impl<'a> Evaluator<'a> {
                     let mut arg_values = vec![];
                     for &arg in args {
                         let arg = self.generic.resolve_alias(arg);
-                        let (val, _abs) = self.use_value(state.context, orig_block, arg);
+                        let (val, _abs) = self.use_value(state.context, orig_block, new_block, arg);
                         arg_values.push(val);
                     }
                     Some((
@@ -716,7 +763,7 @@ impl<'a> Evaluator<'a> {
         &mut self,
         state: &PointState,
         orig_block: Block,
-        new_block: Block,
+        _new_block: Block,
         target: Block,
         target_context: Context,
     ) -> Block {
@@ -737,7 +784,7 @@ impl<'a> Evaluator<'a> {
             target_context
         );
 
-        let block = match self.block_map.entry((target_context, target)) {
+        match self.block_map.entry((target_context, target)) {
             HashEntry::Vacant(_) => {
                 let block = self.create_block(target, target_context, state.flow.clone());
                 log::trace!(" -> created block {}", block);
@@ -764,13 +811,7 @@ impl<'a> Evaluator<'a> {
                 }
                 target_specialized
             }
-        };
-
-        if !self.block_preds[new_block].contains(&block) {
-            self.block_preds[new_block].push(block);
         }
-
-        block
     }
 
     fn evaluate_block_target(
@@ -796,7 +837,7 @@ impl<'a> Evaluator<'a> {
 
         for &arg in &target.args {
             let arg = self.generic.resolve_alias(arg);
-            let (val, abs) = self.use_value(state.context, orig_block, arg);
+            let (val, abs) = self.use_value(state.context, orig_block, new_block, arg);
             log::trace!(
                 "blockparam: block {} context {}: arg {} has val {} abs {:?}",
                 orig_block,
@@ -873,7 +914,7 @@ impl<'a> Evaluator<'a> {
                 ref if_true,
                 ref if_false,
             } => {
-                let (cond, abs_cond) = self.use_value(state.context, orig_block, cond);
+                let (cond, abs_cond) = self.use_value(state.context, orig_block, new_block, cond);
                 match abs_cond.is_const_truthy() {
                     Some(true) => Terminator::Br {
                         target: self.evaluate_block_target(
@@ -922,20 +963,21 @@ impl<'a> Evaluator<'a> {
                         index
                     );
                     let parent = self.state.contexts.parent(new_context);
-                    assert_eq!(*target.args.last().unwrap(), index);
-                    let target_index = self.generic.blocks[target.block].params.last().unwrap().1;
+                    let index_of_value = target.args.iter().position(|&arg| arg == index).unwrap();
+                    let target_specialized_value =
+                        self.generic.blocks[target.block].params[index_of_value].1;
                     let mut targets: Vec<BlockTarget> = (lo..=hi)
                         .map(|i| {
-                            let c = self
-                                .state
-                                .contexts
-                                .create(Some(parent), ContextElem::Specialized(target_index, i));
+                            let c = self.state.contexts.create(
+                                Some(parent),
+                                ContextElem::Specialized(target_specialized_value, i),
+                            );
                             log::trace!(" -> created new context {} for index {}", c, i);
                             self.evaluate_block_target(orig_block, new_block, state, c, target)
                         })
                         .collect();
                     let default = targets.pop().unwrap();
-                    let (value, _) = self.use_value(state.context, orig_block, index);
+                    let (value, _) = self.use_value(state.context, orig_block, new_block, index);
                     Terminator::Select {
                         value,
                         targets,
@@ -958,7 +1000,8 @@ impl<'a> Evaluator<'a> {
                 ref targets,
                 ref default,
             } => {
-                let (value, abs_value) = self.use_value(state.context, orig_block, value);
+                let (value, abs_value) =
+                    self.use_value(state.context, orig_block, new_block, value);
                 if let Some(selector) = abs_value.is_const_u32() {
                     let selector = selector as usize;
                     let target = if selector < targets.len() {
@@ -1005,7 +1048,10 @@ impl<'a> Evaluator<'a> {
             &Terminator::Return { ref values } => {
                 let values = values
                     .iter()
-                    .map(|&value| self.use_value(state.context, orig_block, value).0)
+                    .map(|&value| {
+                        self.use_value(state.context, orig_block, new_block, value)
+                            .0
+                    })
                     .collect::<Vec<_>>();
                 Terminator::Return { values }
             }
