@@ -39,6 +39,8 @@ struct Evaluator<'a> {
     block_map: HashMap<(Context, Block), Block>,
     /// Reverse map from specialized block to its original ctx/block.
     block_rev_map: PerEntity<Block, (Context, Block)>,
+    /// Preds in specialized block CFG.
+    block_preds: PerEntity<Block, Vec<Block>>,
     /// Dependencies for updates: some use in a given block with a
     /// given context occurs of a value defined in another block at
     /// another context.
@@ -212,6 +214,7 @@ fn partially_evaluate_func(
         func,
         block_map: HashMap::default(),
         block_rev_map: PerEntity::default(),
+        block_preds: PerEntity::default(),
         block_deps: HashMap::default(),
         value_map: HashMap::default(),
         mem_blockparam_map: HashMap::default(),
@@ -718,6 +721,7 @@ impl<'a> Evaluator<'a> {
         &mut self,
         state: &PointState,
         orig_block: Block,
+        new_block: Block,
         target: Block,
         target_context: Context,
     ) -> Block {
@@ -738,7 +742,7 @@ impl<'a> Evaluator<'a> {
             target_context
         );
 
-        match self.block_map.entry((target_context, target)) {
+        let block = match self.block_map.entry((target_context, target)) {
             HashEntry::Vacant(_) => {
                 let block = self.create_block(target, target_context, state.flow.clone());
                 log::trace!(" -> created block {}", block);
@@ -765,12 +769,19 @@ impl<'a> Evaluator<'a> {
                 }
                 target_specialized
             }
+        };
+
+        if !self.block_preds[new_block].contains(&block) {
+            self.block_preds[new_block].push(block);
         }
+
+        block
     }
 
     fn evaluate_block_target(
         &mut self,
         orig_block: Block,
+        new_block: Block,
         state: &PointState,
         target_ctx: Context,
         target: &BlockTarget,
@@ -785,7 +796,8 @@ impl<'a> Evaluator<'a> {
             target
         );
 
-        let target_block = self.target_block(state, orig_block, target.block, target_ctx);
+        let target_block =
+            self.target_block(state, orig_block, new_block, target.block, target_ctx);
 
         for &arg in &target.args {
             let arg = self.generic.resolve_alias(arg);
@@ -869,11 +881,18 @@ impl<'a> Evaluator<'a> {
                 let (cond, abs_cond) = self.use_value(state.context, orig_block, cond);
                 match abs_cond.is_const_truthy() {
                     Some(true) => Terminator::Br {
-                        target: self.evaluate_block_target(orig_block, state, new_context, if_true),
+                        target: self.evaluate_block_target(
+                            orig_block,
+                            new_block,
+                            state,
+                            new_context,
+                            if_true,
+                        ),
                     },
                     Some(false) => Terminator::Br {
                         target: self.evaluate_block_target(
                             orig_block,
+                            new_block,
                             state,
                             new_context,
                             if_false,
@@ -883,12 +902,14 @@ impl<'a> Evaluator<'a> {
                         cond,
                         if_true: self.evaluate_block_target(
                             orig_block,
+                            new_block,
                             state,
                             new_context,
                             if_true,
                         ),
                         if_false: self.evaluate_block_target(
                             orig_block,
+                            new_block,
                             state,
                             new_context,
                             if_false,
@@ -915,7 +936,7 @@ impl<'a> Evaluator<'a> {
                                 .contexts
                                 .create(Some(parent), ContextElem::Specialized(target_index, i));
                             log::trace!(" -> created new context {} for index {}", c, i);
-                            self.evaluate_block_target(orig_block, state, c, target)
+                            self.evaluate_block_target(orig_block, new_block, state, c, target)
                         })
                         .collect();
                     let default = targets.pop().unwrap();
@@ -927,7 +948,13 @@ impl<'a> Evaluator<'a> {
                     }
                 } else {
                     Terminator::Br {
-                        target: self.evaluate_block_target(orig_block, state, new_context, target),
+                        target: self.evaluate_block_target(
+                            orig_block,
+                            new_block,
+                            state,
+                            new_context,
+                            target,
+                        ),
                     }
                 }
             }
@@ -945,17 +972,34 @@ impl<'a> Evaluator<'a> {
                         default
                     };
                     Terminator::Br {
-                        target: self.evaluate_block_target(orig_block, state, new_context, target),
+                        target: self.evaluate_block_target(
+                            orig_block,
+                            new_block,
+                            state,
+                            new_context,
+                            target,
+                        ),
                     }
                 } else {
                     let targets = targets
                         .iter()
                         .map(|target| {
-                            self.evaluate_block_target(orig_block, state, new_context, target)
+                            self.evaluate_block_target(
+                                orig_block,
+                                new_block,
+                                state,
+                                new_context,
+                                target,
+                            )
                         })
                         .collect::<Vec<_>>();
-                    let default =
-                        self.evaluate_block_target(orig_block, state, new_context, default);
+                    let default = self.evaluate_block_target(
+                        orig_block,
+                        new_block,
+                        state,
+                        new_context,
+                        default,
+                    );
                     Terminator::Select {
                         value,
                         targets,
