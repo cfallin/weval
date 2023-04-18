@@ -41,10 +41,6 @@ struct Evaluator<'a> {
     block_rev_map: PerEntity<Block, (Context, Block)>,
     /// Preds in specialized block CFG.
     block_preds: PerEntity<Block, Vec<Block>>,
-    /// Dependencies for updates: some use in a given block with a
-    /// given context occurs of a value defined in another block at
-    /// another context.
-    block_deps: HashMap<(Context, Block), HashSet<(Context, Block)>>,
     /// Map of (ctx, value_in_generic) to specialized value_in_func.
     value_map: HashMap<(Context, Value), Value>,
     /// Map of (ctx, block, sym_addr) to blockparams for address and
@@ -215,7 +211,6 @@ fn partially_evaluate_func(
         block_map: HashMap::default(),
         block_rev_map: PerEntity::default(),
         block_preds: PerEntity::default(),
-        block_deps: HashMap::default(),
         value_map: HashMap::default(),
         mem_blockparam_map: HashMap::default(),
         queue: VecDeque::new(),
