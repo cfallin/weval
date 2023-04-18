@@ -27,7 +27,7 @@ struct Evaluator<'a> {
     /// Memory image.
     image: &'a Image,
     /// Domtree for function body.
-    cfg: CFGInfo,
+    cfg: &'a CFGInfo,
     /// State of SSA values and program points:
     /// - per context:
     ///   - per SSA number, an abstract value
@@ -88,7 +88,10 @@ pub fn partially_evaluate<'a>(
                 module.replace_body(directive.func, f.clone());
             }
             split_blocks_at_specialization_points(&mut f, &intrinsics);
-            funcs.insert(directive.func, f);
+            // Compute CFG info.
+            f.recompute_edges();
+            let cfg = CFGInfo::new(&f);
+            funcs.insert(directive.func, (f, cfg));
         }
     }
 
@@ -111,12 +114,12 @@ pub fn partially_evaluate<'a>(
     let bodies = directives
         .par_iter()
         .flat_map(|(directive, progress)| {
-            let generic = funcs.get(&directive.func).unwrap();
-            let result = match partially_evaluate_func(&module, generic, im, &intrinsics, directive)
-            {
-                Ok(result) => result,
-                Err(e) => return Some(Err(e)),
-            };
+            let (generic, cfg) = funcs.get(&directive.func).unwrap();
+            let result =
+                match partially_evaluate_func(&module, generic, cfg, im, &intrinsics, directive) {
+                    Ok(result) => result,
+                    Err(e) => return Some(Err(e)),
+                };
 
             if let Some(p) = progress {
                 p.inc(1);
@@ -153,7 +156,7 @@ pub fn partially_evaluate<'a>(
         }
         log::debug!("New func index {} -> table index {}", func, table_idx);
         log::debug!(" -> writing to 0x{:x}", directive.func_index_out_addr);
-        
+
         // If we're doing differential testing, append to *original
         // module*'s function table too, but with the generic function
         // index.
@@ -166,7 +169,7 @@ pub fn partially_evaluate<'a>(
                 orig_func_table.max = Some(table_idx + 1);
             }
         }
-        
+
         // Update memory image.
         mem_updates.insert(directive.func_index_out_addr, table_idx);
     }
@@ -186,6 +189,7 @@ pub fn partially_evaluate<'a>(
 fn partially_evaluate_func(
     module: &Module,
     generic: &FunctionBody,
+    cfg: &CFGInfo,
     image: &Image,
     intrinsics: &Intrinsics,
     directive: &Directive,
@@ -195,11 +199,6 @@ fn partially_evaluate_func(
 
     log::info!("Specializing: {:?}", directive);
     log::debug!("body:\n{}", generic.display("| ", Some(module)));
-
-    // Compute CFG info.
-    let cfg = CFGInfo::new(generic);
-
-    log::trace!("CFGInfo: {:?}", cfg);
 
     // Build the evaluator.
     let func = FunctionBody::new(module, sig);
