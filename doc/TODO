@@ -1,18 +1,7 @@
-- Come up with a better scheme than max-SSA for SSA reconstruction across
-  contexts
-  - context-update (not push) only on backedge? then look up in parent
-    context? what constraints do we need to check for this to work? do
-    we need to designate a "context-switch header" and enforce
-    structure on the push/update/pop?
-
 - Memory-renaming: "alias taint" scheme
-
-- Improve memory efficiency (involves waffle too):
-  - hashconsing/interning?
-  - smaller `ValueDef`?
-  - shared operand lists in pooled `Vec`s?
 
 - Limits on size of created specialization and/or on number of specializations
   - perhaps in SM too: out-of-line more aggressively from interpreter loop
+  - make sure we're merging appropriate bailout paths (in SM)
 
 - Functionality to remove specialization request from queue when GC'd or moved
