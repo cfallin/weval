@@ -9,6 +9,7 @@ mod eval;
 mod image;
 mod intrinsics;
 mod state;
+mod stats;
 mod value;
 
 #[derive(Clone, Debug, StructOpt)]
@@ -26,9 +27,9 @@ pub struct Options {
     #[structopt(long = "run-diff")]
     run_diff: bool,
 
-    /// Optimization fuel, for bisecting issues, or 0 for infinite.
-    #[structopt(long = "opt-fuel", default_value = "0")]
-    fuel: u64,
+    /// Show stats on specialization code size.
+    #[structopt(long = "show-stats")]
+    show_stats: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -68,6 +69,27 @@ fn main() -> anyhow::Result<()> {
         image::update(result.orig_module.as_mut().unwrap(), &im);
         run_diff(result.orig_module.unwrap(), result.module);
         return Ok(());
+    }
+
+    if opts.show_stats {
+        for stats in result.stats {
+            eprintln!(
+                "Function {}: {} blocks, {} insts)",
+                stats.generic, stats.generic_blocks, stats.generic_insts,
+            );
+            eprintln!(
+                "   specialized: {} blocks, {} insts",
+                stats.specialized_blocks, stats.specialized_insts
+            );
+            let mut buckets = stats
+                .blocks_and_insts_by_bucket
+                .into_iter()
+                .collect::<Vec<_>>();
+            buckets.sort_by_key(|(_bucket, (_blocks, insts))| std::cmp::Reverse(*insts));
+            for (bucket, (blocks, insts)) in buckets {
+                eprintln!(" * bucket {:?}: {} blocks, {} insts", bucket, blocks, insts);
+            }
+        }
     }
 
     let bytes = result.module.to_wasm_bytes()?;

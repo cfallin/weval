@@ -4,12 +4,14 @@ use crate::directive::Directive;
 use crate::image::Image;
 use crate::intrinsics::Intrinsics;
 use crate::state::*;
+use crate::stats::SpecializationStats;
 use crate::value::{AbstractValue, ValueTags, WasmVal};
 use crate::Options;
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
 use std::collections::{hash_map::Entry as HashEntry, BTreeSet, VecDeque};
+use std::sync::Mutex;
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::{
@@ -57,6 +59,7 @@ struct Evaluator<'a> {
 pub struct PartialEvalResult<'a> {
     pub orig_module: Option<Module<'a>>,
     pub module: Module<'a>,
+    pub stats: Vec<SpecializationStats>,
 }
 
 /// Partially evaluates according to the given directives. Returns
@@ -82,6 +85,8 @@ pub fn partially_evaluate<'a>(
         if !funcs.contains_key(&directive.func) {
             let mut f = module.clone_and_expand_body(directive.func)?;
 
+            let stats = Mutex::new(SpecializationStats::new(directive.func, &f));
+
             split_blocks_at_specialization_points(&mut f, &intrinsics);
 
             f.recompute_edges();
@@ -94,7 +99,7 @@ pub fn partially_evaluate<'a>(
                 waffle::passes::trace::run(&mut f);
                 module.replace_body(directive.func, f.clone());
             }
-            funcs.insert(directive.func, (f, cfg));
+            funcs.insert(directive.func, (f, cfg, stats));
         }
     }
 
@@ -117,7 +122,7 @@ pub fn partially_evaluate<'a>(
     let bodies = directives
         .par_iter()
         .flat_map(|(directive, progress)| {
-            let (generic, cfg) = funcs.get(&directive.func).unwrap();
+            let (generic, cfg, stats) = funcs.get(&directive.func).unwrap();
             let result =
                 match partially_evaluate_func(&module, generic, cfg, im, &intrinsics, directive) {
                     Ok(result) => result,
@@ -127,7 +132,11 @@ pub fn partially_evaluate<'a>(
             if let Some(p) = progress {
                 p.inc(1);
             }
-            if let Some((body, sig, name)) = result {
+            if let Some((body, sig, name, block_rev_map, contexts)) = result {
+                stats
+                    .lock()
+                    .unwrap()
+                    .add_specialization(&body, &block_rev_map, &contexts);
                 let decl = if opts.run_diff {
                     FuncDecl::Body(sig, name, body)
                 } else {
@@ -183,9 +192,16 @@ pub fn partially_evaluate<'a>(
         im.write_u32(heap, addr, value)?;
     }
 
+    let mut stats = funcs
+        .drain()
+        .map(|(_, (_, _, stats))| stats.into_inner().unwrap())
+        .collect::<Vec<_>>();
+    stats.sort_by_key(|stats| stats.generic);
+
     Ok(PartialEvalResult {
         orig_module,
         module,
+        stats,
     })
 }
 
@@ -196,7 +212,15 @@ fn partially_evaluate_func(
     image: &Image,
     intrinsics: &Intrinsics,
     directive: &Directive,
-) -> anyhow::Result<Option<(FunctionBody, Signature, String)>> {
+) -> anyhow::Result<
+    Option<(
+        FunctionBody,
+        Signature,
+        String,
+        PerEntity<Block, (Context, Block)>,
+        Contexts,
+    )>,
+> {
     let orig_name = module.funcs[directive.func].name();
     let sig = module.funcs[directive.func].sig();
 
@@ -247,7 +271,13 @@ fn partially_evaluate_func(
     );
     let name = format!("{} (specialized)", orig_name);
     evaluator.func.optimize();
-    Ok(Some((evaluator.func, sig, name)))
+    Ok(Some((
+        evaluator.func,
+        sig,
+        name,
+        evaluator.block_rev_map,
+        evaluator.state.contexts,
+    )))
 }
 
 // Split at every `weval_specialize_value()` call. Requires max-SSA
@@ -1198,6 +1228,11 @@ impl<'a> Evaluator<'a> {
                     };
                     log::trace!("update context: now {:?}", pending_context);
                     state.pending_context = pending_context;
+                    EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.context_bucket {
+                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
+                    let bucket = abs[0].is_const_u32().unwrap();
+                    self.state.contexts.context_bucket[instantaneous_context] = Some(bucket);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.specialize_value {
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);

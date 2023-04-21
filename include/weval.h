@@ -83,6 +83,8 @@ __attribute__((noinline)) void weval_assert_const_memory(void* p, uint32_t line_
 __attribute__((noinline)) uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi);
 __attribute__((noinline)) void weval_print(const char* message, uint32_t line, uint32_t val);
 
+__attribute__((noinline)) void weval_context_bucket(uint32_t bucket);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

@@ -59,6 +59,7 @@ pub enum ContextElem {
 #[derive(Clone, Default, Debug)]
 pub struct Contexts {
     contexts: EntityVec<Context, (Context, ContextElem)>,
+    pub(crate) context_bucket: PerEntity<Context, Option<u32>>,
     dedup: HashMap<(Context, ContextElem), Context>, // map from (parent, tail_elem) to ID
 }
 

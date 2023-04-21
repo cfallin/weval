@@ -74,6 +74,12 @@ void weval_update_context(uint32_t pc) {
     __accum += pc + 2;
 }
 
+__attribute__((export_name("weval.context.bucket")))
+void weval_context_bucket(uint32_t pc) {
+    __accum += pc + 3;
+}
+
+
 __attribute__((export_name("weval.pop.context")))
 void weval_pop_context() {
     __accum += 3;
