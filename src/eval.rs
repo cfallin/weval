@@ -14,6 +14,7 @@ use std::collections::{hash_map::Entry as HashEntry, BTreeSet, VecDeque};
 use std::sync::Mutex;
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
+use waffle::pool::ListRef;
 use waffle::{
     entity::PerEntity, Block, BlockDef, BlockTarget, FuncDecl, FunctionBody, Module, Operator,
     Signature, SourceLoc, Table, Terminator, Type, Value, ValueDef,
@@ -618,7 +619,6 @@ impl<'a> Evaluator<'a> {
     ) -> anyhow::Result<()> {
         // Reused below for each instruction.
         let mut arg_abs_values = vec![];
-        let mut arg_values = vec![];
 
         log::trace!("evaluate_block_body: {}: state {:?}", orig_block, state);
 
@@ -647,16 +647,19 @@ impl<'a> Evaluator<'a> {
                     ))
                 }
                 ValueDef::Operator(op, args, tys) => {
+                    let args_slice = &self.generic.arg_pool[*args];
+                    let tys_slice = &self.generic.type_pool[*tys];
+
                     // Collect AbstractValues for args.
                     arg_abs_values.clear();
-                    arg_values.clear();
-                    for &arg in args {
+                    let mut arg_values = self.func.arg_pool.allocate(args.len(), Value::invalid());
+                    for (i, &arg) in args_slice.iter().enumerate() {
                         log::trace!(" * arg {}", arg);
                         let arg = self.generic.resolve_alias(arg);
                         log::trace!(" -> resolves to arg {}", arg);
                         let (val, abs) = self.use_value(state.context, orig_block, new_block, arg);
                         arg_abs_values.push(abs);
-                        arg_values.push(val);
+                        self.func.arg_pool[arg_values][i] = val;
                     }
                     let loc = self.generic.source_locs[inst];
 
@@ -667,23 +670,31 @@ impl<'a> Evaluator<'a> {
                         inst,
                         *op,
                         loc,
-                        &arg_abs_values[..],
-                        &arg_values[..],
-                        &args[..],
-                        &tys[..],
+                        /* abstract values = */ &arg_abs_values[..],
+                        /* new values = */ arg_values,
+                        /* orig_values = */ args_slice,
+                        tys_slice,
                         state,
                     )?;
                     // Transcribe either the original operation, or a
                     // constant, to the output.
 
+                    let specialized_tys = self
+                        .func
+                        .type_pool
+                        .from_iter(self.generic.type_pool[*tys].iter().cloned());
                     match result {
                         EvalResult::Unhandled => unreachable!(),
                         EvalResult::Alias(av, val) => Some((ValueDef::Alias(val), av)),
                         EvalResult::Elide => None,
                         EvalResult::Normal(AbstractValue::Concrete(bits, t)) if tys.len() == 1 => {
-                            if let Some(const_op) = const_operator(tys[0], bits) {
+                            if let Some(const_op) = const_operator(tys_slice[0], bits) {
                                 Some((
-                                    ValueDef::Operator(const_op, vec![], tys.clone()),
+                                    ValueDef::Operator(
+                                        const_op,
+                                        ListRef::default(),
+                                        specialized_tys,
+                                    ),
                                     AbstractValue::Concrete(bits, t),
                                 ))
                             } else {
@@ -691,27 +702,32 @@ impl<'a> Evaluator<'a> {
                                     ValueDef::Operator(
                                         *op,
                                         std::mem::take(&mut arg_values),
-                                        tys.clone(),
+                                        specialized_tys,
                                     ),
                                     AbstractValue::Runtime(None, t),
                                 ))
                             }
                         }
                         EvalResult::Normal(av) => Some((
-                            ValueDef::Operator(*op, std::mem::take(&mut arg_values), tys.clone()),
+                            ValueDef::Operator(
+                                *op,
+                                std::mem::take(&mut arg_values),
+                                specialized_tys,
+                            ),
                             av,
                         )),
                     }
                 }
                 ValueDef::Trace(id, args) => {
-                    let mut arg_values = vec![];
-                    for &arg in args {
+                    let new_args = self.func.arg_pool.allocate(args.len(), Value::invalid());
+                    let args_slice = &self.generic.arg_pool[*args];
+                    for (i, &arg) in args_slice.iter().enumerate() {
                         let arg = self.generic.resolve_alias(arg);
                         let (val, _abs) = self.use_value(state.context, orig_block, new_block, arg);
-                        arg_values.push(val);
+                        self.func.arg_pool[new_args][i] = val;
                     }
                     Some((
-                        ValueDef::Trace(*id, std::mem::take(&mut arg_values)),
+                        ValueDef::Trace(*id, new_args),
                         AbstractValue::Runtime(None, ValueTags::default()),
                     ))
                 }
@@ -1100,7 +1116,7 @@ impl<'a> Evaluator<'a> {
         op: Operator,
         loc: SourceLoc,
         abs: &[AbstractValue],
-        values: &[Value],
+        values: ListRef<Value>,
         orig_values: &[Value],
         tys: &[Type],
         state: &mut PointState,
@@ -1172,29 +1188,35 @@ impl<'a> Evaluator<'a> {
         op: Operator,
         _loc: SourceLoc,
         abs: &[AbstractValue],
-        values: &[Value],
+        values: ListRef<Value>,
         orig_values: &[Value],
         state: &mut PointState,
     ) -> EvalResult {
         match op {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.assume_const_memory {
-                    EvalResult::Alias(abs[0].with_tags(ValueTags::const_memory()), values[0])
+                    EvalResult::Alias(
+                        abs[0].with_tags(ValueTags::const_memory()),
+                        self.func.arg_pool[values][0],
+                    )
                 } else if Some(function_index) == self.intrinsics.assume_const_memory_transitive {
                     EvalResult::Alias(
                         abs[0].with_tags(
                             ValueTags::const_memory() | ValueTags::const_memory_transitive(),
                         ),
-                        values[0],
+                        self.func.arg_pool[values][0],
                     )
                 } else if Some(function_index) == self.intrinsics.make_symbolic_ptr {
-                    let label_index = values[0].index() as u32;
+                    let label_index = self.func.arg_pool[values][0].index() as u32;
                     log::trace!(
                         "value {} is getting symbolic label {}",
-                        values[0],
+                        self.func.arg_pool[values][0],
                         label_index
                     );
-                    EvalResult::Alias(AbstractValue::SymbolicPtr(label_index, 0), values[0])
+                    EvalResult::Alias(
+                        AbstractValue::SymbolicPtr(label_index, 0),
+                        self.func.arg_pool[values][0],
+                    )
                 } else if Some(function_index) == self.intrinsics.push_context {
                     let pc = abs[0]
                         .is_const_u32()
@@ -1249,7 +1271,7 @@ impl<'a> Evaluator<'a> {
                         hi
                     );
                     state.pending_context = Some(child);
-                    EvalResult::Alias(abs[0].clone(), values[0])
+                    EvalResult::Alias(abs[0].clone(), self.func.arg_pool[values][0])
                 } else if Some(function_index) == self.intrinsics.flush_to_mem {
                     self.flush_to_mem(state, new_block);
                     EvalResult::Elide
@@ -1309,10 +1331,11 @@ impl<'a> Evaluator<'a> {
                     dirty,
                     abs: _,
                 } if dirty => {
+                    let args = self.func.arg_pool.double(addr, data);
                     let store = self.func.add_value(ValueDef::Operator(
                         store_operator(ty).unwrap(),
-                        vec![addr, data],
-                        vec![],
+                        args,
+                        ListRef::default(),
                     ));
                     self.func.append_to_block(new_block, store);
                 }
@@ -1348,10 +1371,11 @@ impl<'a> Evaluator<'a> {
                     // We need to flush the value back to memory, if
                     // "dirty" (different from what is already in
                     // memory).
+                    let vals = self.func.arg_pool.double(*addr, *data);
                     let store = self.func.add_value(ValueDef::Operator(
                         store_operator(*ty).unwrap(),
-                        vec![*addr, *data],
-                        vec![],
+                        vals,
+                        ListRef::default(),
                     ));
                     log::trace!("from block {} to block {}: symbolic addr {:?} had addr {} data {}, but not in succ: {:?}",
                                 from, to, sym_addr, addr, data, other);
@@ -1374,7 +1398,7 @@ impl<'a> Evaluator<'a> {
         new_block: Block,
         op: Operator,
         abs: &[AbstractValue],
-        vals: &[Value],
+        vals: ListRef<Value>,
         tys: &[Type],
         state: &mut PointState,
     ) -> anyhow::Result<EvalResult> {
@@ -1405,10 +1429,12 @@ impl<'a> Evaluator<'a> {
                         // Create the original load, so we have access
                         // to its value; then insert it into the mem
                         // overlay.
+                        let vals_list = self.func.arg_pool.deep_clone(vals);
+                        let tys_list = self.func.single_type_list(tys[0]);
                         let l = self.func.add_value(ValueDef::Operator(
                             op.clone(),
-                            vals.to_vec(),
-                            tys.to_vec(),
+                            vals_list,
+                            tys_list,
                         ));
                         self.func.append_to_block(new_block, l);
                         state.flow.mem_overlay.insert(
@@ -1416,7 +1442,7 @@ impl<'a> Evaluator<'a> {
                             MemValue::Value {
                                 data: l,
                                 ty: tys[0],
-                                addr: vals[0],
+                                addr: self.func.arg_pool[vals][0],
                                 dirty: false,
                                 abs: abs[0].clone(),
                             },
@@ -1438,14 +1464,18 @@ impl<'a> Evaluator<'a> {
                     Operator::I64Store { .. } => Type::I64,
                     _ => anyhow::bail!("Bad store type to symbolic ptr"),
                 };
-                log::trace!("store to symbolic loc {:?}: value {}", abs[0], vals[1]);
+                log::trace!(
+                    "store to symbolic loc {:?}: value {}",
+                    abs[0],
+                    self.func.arg_pool[vals][1]
+                );
                 // TODO: check for overlapping values
                 state.flow.mem_overlay.insert(
                     SymbolicAddr(label, off),
                     MemValue::Value {
-                        data: vals[1],
+                        data: self.func.arg_pool[vals][1],
                         ty: data_ty,
-                        addr: vals[0],
+                        addr: self.func.arg_pool[vals][0],
                         dirty: true,
                         abs: abs[1].clone(),
                     },
