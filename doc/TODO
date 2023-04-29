@@ -1,7 +1,26 @@
-- Memory-renaming: "alias taint" scheme
+- weval: support removal of enqueued specialization request; and make request
+  an inlined-intrusive object (in ImmutableScriptData?
+  SharedImmutableScriptData?).
 
-- Limits on size of created specialization and/or on number of specializations
-  - perhaps in SM too: out-of-line more aggressively from interpreter loop
-  - make sure we're merging appropriate bailout paths (in SM)
+- interpreter: clean up unused label situation and other warnings.
 
-- Functionality to remove specialization request from queue when GC'd or moved
+- (x) interpreter: split out the "put everything in a context" patch.
+- interpreter: "make PC a local variable" patch
+- interpreter: make the explicit-call ifdef'd (and split out the patch).
+- interpreter: turn-off-interrupts-in-WASI-mode patch (and coverage, and ...)
+
+- interpreter: weval annotations patch; make sure its changes are fairly local
+  if we have to carry it in our own tree; put it under a config option too.
+
+- weval: use imports for intrinsics, rather than dummy functions. Write
+  implementations that wizer can provide.
+  - how do we remove these in processed module? rewrite generic InterpretInner
+    to elide; remove imports too; may force renumbering of all other functions?
+    - do a separate post-pass, written in a custom way with wasmparser +
+      wasm-encoder, that renumbers function index references and deletes
+      specified imports
+
+- spidermonkey-wasi-embedding: turn it into a submodule, and have a local (not
+  Dockerized) build mode. Use this to develop.
+  - carry two copies of spidermonkey.wasm: with and without annotations
+  - embed weval as a library, just like wizer
