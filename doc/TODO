@@ -1,16 +1,26 @@
-- weval: support removal of enqueued specialization request; and make request
+- (x) weval: support removal of enqueued specialization request; and make request
   an inlined-intrusive object (in ImmutableScriptData?
   SharedImmutableScriptData?).
 
-- interpreter: clean up unused label situation and other warnings.
+- (x) interpreter: clean up unused label situation and other warnings.
+
+- (x) interpreter: upstream the "wizer support in JS shell" patch
 
 - (x) interpreter: split out the "put everything in a context" patch.
-- interpreter: "make PC a local variable" patch
-- interpreter: make the explicit-call ifdef'd (and split out the patch).
+- (x) interpreter: make the explicit-call ifdef'd (and split out the patch).
+- (x) interpreter: "make PC a local variable" patch
 - interpreter: turn-off-interrupts-in-WASI-mode patch (and coverage, and ...)
 
 - interpreter: weval annotations patch; make sure its changes are fairly local
   if we have to carry it in our own tree; put it under a config option too.
+  - include "slowpath to interpreter" fallback here
+  - include ImmutableScriptData "specialized function pointer" field,
+    registration / de-registration, etc
+  - include third_party weval header
+  - include "constant memory" intrinsics
+  - include push/pop/update-context intrinsics
+
+  - make one mozconfig option imply the rest
 
 - weval: use imports for intrinsics, rather than dummy functions. Write
   implementations that wizer can provide.

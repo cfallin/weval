@@ -15,6 +15,7 @@ typedef struct weval_req_arg_t weval_req_arg_t;
 
 struct weval_req_t {
   weval_req_t* next;
+  weval_req_t* prev;
   weval_func_t func;
   weval_req_arg_t* args;
   uint32_t nargs;
@@ -40,23 +41,29 @@ struct weval_req_arg_t {
 };
 
 extern weval_req_t* weval_req_pending_head;
-extern weval_req_t* weval_req_freelist_head;
 
 static inline void weval_request(weval_req_t* req) {
   req->next = weval_req_pending_head;
+  req->prev = NULL;
+  if (weval_req_pending_head) {
+    weval_req_pending_head->prev = req;
+  }
   weval_req_pending_head = req;
 }
 
-static inline void weval_free() {
-  weval_req_t* next = NULL;
-  for (; weval_req_freelist_head; weval_req_freelist_head = next) {
-    next = weval_req_freelist_head->next;
-    if (weval_req_freelist_head->args) {
-      free(weval_req_freelist_head->args);
-    }
-    free(weval_req_freelist_head);
+static inline void weval_free(weval_req_t* req) {
+  if (req->prev) {
+    req->prev->next = req->next;
+  } else if (weval_req_pending_head == req) {
+    weval_req_pending_head = req->next;
   }
-  weval_req_freelist_head = NULL;
+  if (req->next) {
+    req->next->prev = req->prev;
+  }
+  if (req->args) {
+    free(req->args);
+  }
+  free(req);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -68,20 +75,27 @@ extern "C" {
 #endif
 
 __attribute__((noinline)) const void* weval_assume_const_memory(const void* p);
-__attribute__((noinline)) const void* weval_assume_const_memory_transitive(const void* p);
+__attribute__((noinline)) const void* weval_assume_const_memory_transitive(
+    const void* p);
 __attribute__((noinline)) void weval_push_context(uint32_t pc);
 __attribute__((noinline)) void weval_pop_context();
 __attribute__((noinline)) void weval_update_context(uint32_t pc);
 __attribute__((noinline)) void* weval_make_symbolic_ptr(void* p);
-__attribute__((noinline)) void* weval_alias_with_symbolic_ptr(void* p, void* symbolic);
+__attribute__((noinline)) void* weval_alias_with_symbolic_ptr(void* p,
+                                                              void* symbolic);
 __attribute__((noinline)) void weval_flush_to_mem();
 __attribute__((noinline)) void weval_trace_line(uint32_t line_number);
 __attribute__((noinline)) void weval_abort_specialization(uint32_t line_number,
                                                           uint32_t fatal);
-__attribute__((noinline)) void weval_assert_const32(uint32_t value, uint32_t line_no);
-__attribute__((noinline)) void weval_assert_const_memory(void* p, uint32_t line_no);
-__attribute__((noinline)) uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi);
-__attribute__((noinline)) void weval_print(const char* message, uint32_t line, uint32_t val);
+__attribute__((noinline)) void weval_assert_const32(uint32_t value,
+                                                    uint32_t line_no);
+__attribute__((noinline)) void weval_assert_const_memory(void* p,
+                                                         uint32_t line_no);
+__attribute__((noinline)) uint32_t weval_specialize_value(uint32_t value,
+                                                          uint32_t lo,
+                                                          uint32_t hi);
+__attribute__((noinline)) void weval_print(const char* message, uint32_t line,
+                                           uint32_t val);
 
 __attribute__((noinline)) void weval_context_bucket(uint32_t bucket);
 
@@ -119,7 +133,7 @@ static T* make_symbolic_ptr(T* t) {
 }
 template <typename T>
 void flush_to_mem() {
-    weval_flush_to_mem();
+  weval_flush_to_mem();
 }
 
 }  // namespace weval
@@ -246,19 +260,17 @@ struct StoreArgs<RuntimeArg<T>, Rest...> {
 }  // namespace impl
 
 template <typename Ret, typename... Args, typename... WrappedArgs>
-bool weval(impl::FuncPtr<Ret, Args...>* dest,
-           impl::FuncPtr<Ret, Args...> generic, WrappedArgs... args) {
-  weval_free();
-
+weval_req_t* weval(impl::FuncPtr<Ret, Args...>* dest,
+                   impl::FuncPtr<Ret, Args...> generic, WrappedArgs... args) {
   weval_req_t* req = (weval_req_t*)malloc(sizeof(weval_req_t));
   if (!req) {
-    return false;
+    return nullptr;
   }
   uint32_t nargs = sizeof...(Args);
   weval_req_arg_t* arg_storage =
       (weval_req_arg_t*)malloc(sizeof(weval_req_arg_t) * nargs);
   if (!arg_storage) {
-    return false;
+    return nullptr;
   }
   impl::StoreArgs<WrappedArgs...>()(arg_storage, args...);
 
@@ -269,8 +281,10 @@ bool weval(impl::FuncPtr<Ret, Args...>* dest,
 
   weval_request(req);
 
-  return true;
+  return req;
 }
+
+inline void free(weval_req_t* req) { weval_free(req); }
 
 }  // namespace weval
 

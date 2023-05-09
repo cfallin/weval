@@ -17,17 +17,12 @@ pub struct Directive {
 }
 
 pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>> {
-    // Is there a function called "weval.pending.head" and one called
-    // "weval.freelist.head"? If so, are both function bodies simple
-    // constants? These provide the addresses of two singly-linked
-    // lists; we move requests from one to the other and accumulate
-    // directive information.
+    // Is there a function called "weval.pending.head"?  If so, is the
+    // function body a simple constant? This provides the address of a
+    // doubly-linked list; we process requests and unlink them.
 
-    let (pending_head_addr, freelist_head_addr) = match (
-        find_global_data_by_exported_func(module, "weval.pending.head"),
-        find_global_data_by_exported_func(module, "weval.freelist.head"),
-    ) {
-        (Some(x), Some(y)) => (x, y),
+    let pending_head_addr = match find_global_data_by_exported_func(module, "weval.pending.head") {
+        Some(x) => x,
         _ => {
             return Ok(vec![]);
         }
@@ -39,14 +34,21 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
     };
 
     let mut head = im.read_u32(heap, pending_head_addr)?;
-    let mut freelist = im.read_u32(heap, freelist_head_addr)?;
     let mut directives = vec![];
     while head != 0 {
         directives.push(decode_weval_req(im, heap, head)?);
         let next = im.read_u32(heap, head)?;
-        im.write_u32(heap, head, freelist)?;
-        im.write_u32(heap, freelist_head_addr, head)?;
-        freelist = head;
+        let prev = im.read_u32(heap, head + 4)?;
+        if next != 0 {
+            im.write_u32(heap, next + 4, prev)?;
+        }
+        if prev != 0 {
+            im.write_u32(heap, prev, next)?;
+        } else {
+            im.write_u32(heap, pending_head_addr, next)?;
+        }
+        im.write_u32(heap, head, 0)?;
+        im.write_u32(heap, head + 4, 0)?;
         head = next;
     }
 
@@ -54,11 +56,11 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
 }
 
 fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Directive> {
-    let func_table_index = im.read_u32(heap, head + 4)?;
+    let func_table_index = im.read_u32(heap, head + 8)?;
     let func = im.func_ptr(func_table_index)?;
-    let mut arg_ptr = im.read_u32(heap, head + 8)?;
-    let nargs = im.read_u32(heap, head + 12)?;
-    let func_index_out_addr = im.read_u32(heap, head + 16)?;
+    let mut arg_ptr = im.read_u32(heap, head + 12)?;
+    let nargs = im.read_u32(heap, head + 16)?;
+    let func_index_out_addr = im.read_u32(heap, head + 20)?;
 
     let mut const_params = vec![];
     for _ in 0..nargs {
@@ -71,7 +73,7 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
                 1 => AbstractValue::Concrete(WasmVal::I64(im.read_u64(heap, arg_ptr + 8)?), tags),
                 2 => AbstractValue::Concrete(WasmVal::F32(im.read_u32(heap, arg_ptr + 8)?), tags),
                 3 => AbstractValue::Concrete(WasmVal::F64(im.read_u64(heap, arg_ptr + 8)?), tags),
-                _ => anyhow::bail!("Invalid type"),
+                _ => anyhow::bail!("Invalid type: {}", ty),
             }
         } else {
             AbstractValue::Runtime(None, tags)
