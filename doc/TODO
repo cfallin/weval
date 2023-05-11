@@ -9,9 +9,9 @@
 - (x) interpreter: split out the "put everything in a context" patch.
 - (x) interpreter: make the explicit-call ifdef'd (and split out the patch).
 - (x) interpreter: "make PC a local variable" patch
-- interpreter: turn-off-interrupts-in-WASI-mode patch (and coverage, and ...)
+- (x) interpreter: turn-off-interrupts-in-WASI-mode patch (and coverage, and ...)
 
-- interpreter: weval annotations patch; make sure its changes are fairly local
+- (x) interpreter: weval annotations patch; make sure its changes are fairly local
   if we have to carry it in our own tree; put it under a config option too.
   - include "slowpath to interpreter" fallback here
   - include ImmutableScriptData "specialized function pointer" field,

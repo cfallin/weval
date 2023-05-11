@@ -149,6 +149,7 @@ pub fn partially_evaluate<'a>(
                 };
                 Some(Ok((directive, decl)))
             } else {
+                log::info!("Failed to weval for directive {:?}", directive);
                 None
             }
         })
@@ -167,8 +168,8 @@ pub fn partially_evaluate<'a>(
         if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
             func_table.max = Some(table_idx + 1);
         }
-        log::debug!("New func index {} -> table index {}", func, table_idx);
-        log::debug!(" -> writing to 0x{:x}", directive.func_index_out_addr);
+        log::info!("New func index {} -> table index {}", func, table_idx);
+        log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
 
         // If we're doing differential testing, append to *original
         // module*'s function table too, but with the generic function
@@ -447,6 +448,11 @@ impl<'a> Evaluator<'a> {
     fn evaluate(&mut self) -> anyhow::Result<bool> {
         while let Some((orig_block, ctx, new_block)) = self.queue.pop_back() {
             if self.func.blocks.len() > MAX_BLOCKS || self.func.values.len() > MAX_VALUES {
+                log::info!(
+                    " -> too many blocks or values: {} blocks {} values",
+                    self.func.blocks.len(),
+                    self.func.values.len()
+                );
                 return Ok(false);
             }
             self.queue_set.remove(&(orig_block, ctx));
@@ -704,7 +710,7 @@ impl<'a> Evaluator<'a> {
                                         std::mem::take(&mut arg_values),
                                         specialized_tys,
                                     ),
-                                    AbstractValue::Runtime(None, t),
+                                    AbstractValue::Runtime(Some(inst), t),
                                 ))
                             }
                         }
@@ -728,7 +734,7 @@ impl<'a> Evaluator<'a> {
                     }
                     Some((
                         ValueDef::Trace(*id, new_args),
-                        AbstractValue::Runtime(None, ValueTags::default()),
+                        AbstractValue::Runtime(Some(inst), ValueTags::default()),
                     ))
                 }
                 _ => unreachable!(
@@ -1311,7 +1317,7 @@ impl<'a> Evaluator<'a> {
                         .unwrap();
                     let line = abs[1].is_const_u32().unwrap();
                     let val = abs[2].clone();
-                    log::trace!("print: line {}: {}: {:?}", line, message, val);
+                    log::info!("print: line {}: {}: {:?}", line, message, val);
                     EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
