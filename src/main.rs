@@ -12,6 +12,8 @@ mod state;
 mod stats;
 mod value;
 
+const STUBS: &'static str = include_str!("../lib/weval-stubs.wat");
+
 #[derive(Clone, Debug, StructOpt)]
 pub struct Options {
     /// The input Wasm module.
@@ -21,6 +23,10 @@ pub struct Options {
     /// The output Wasm module.
     #[structopt(short = "o")]
     output_module: PathBuf,
+
+    /// Whether to Wizen the module first.
+    #[structopt(short = "w")]
+    wizen: bool,
 
     /// Run IR in interpreter differentially, before and after
     /// wevaling, comparing trace outputs.
@@ -36,11 +42,23 @@ fn main() -> anyhow::Result<()> {
     let _ = env_logger::try_init();
     let opts = Options::from_args();
 
+    let raw_bytes = std::fs::read(&opts.input_module)?;
+
+    // Optionally, Wizen the module first.
+    let module_bytes = if opts.wizen {
+        let mut w = wizer::Wizer::new();
+        w.allow_wasi(true)?;
+        w.preload_bytes(Some(("weval", STUBS.as_bytes().to_vec())))?;
+        w.func_rename("_start", "wizer.resume");
+        w.run(&raw_bytes[..])?
+    } else {
+        raw_bytes
+    };
+
     // Load module.
-    let bytes = std::fs::read(&opts.input_module)?;
     let mut frontend_opts = waffle::FrontendOptions::default();
     frontend_opts.debug = true;
-    let mut module = waffle::Module::from_wasm_bytes(&bytes[..], &frontend_opts)?;
+    let mut module = waffle::Module::from_wasm_bytes(&module_bytes[..], &frontend_opts)?;
 
     // If we're going to run the interpreter, we need to expand all
     // functions.
