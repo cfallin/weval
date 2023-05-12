@@ -22,7 +22,7 @@
 
   - make one mozconfig option imply the rest
 
-- weval: use imports for intrinsics, rather than dummy functions. Write
+- (x) weval: use imports for intrinsics, rather than dummy functions. Write
   implementations that wizer can provide.
   - how do we remove these in processed module? rewrite generic InterpretInner
     to elide; remove imports too; may force renumbering of all other functions?
