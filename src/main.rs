@@ -53,7 +53,10 @@ fn main() -> anyhow::Result<()> {
     let module_bytes = if opts.wizen {
         let mut w = wizer::Wizer::new();
         w.allow_wasi(true)?;
-        w.preload_bytes(Some(("weval", STUBS.as_bytes().to_vec())))?;
+        w.inherit_env(true);
+        w.dir(".");
+        w.wasm_bulk_memory(true);
+        w.preload_bytes("weval", STUBS.as_bytes().to_vec())?;
         w.func_rename("_start", "wizer.resume");
         w.run(&raw_bytes[..])?
     } else {
