@@ -6,6 +6,7 @@ use structopt::StructOpt;
 
 mod directive;
 mod eval;
+mod filter;
 mod image;
 mod intrinsics;
 mod state;
@@ -27,6 +28,10 @@ pub struct Options {
     /// Whether to Wizen the module first.
     #[structopt(short = "w")]
     wizen: bool,
+
+    /// Whether to run in a strip-intrinsics-only mode.
+    #[structopt(long = "strip-intrinsics")]
+    strip_intrinsics: bool,
 
     /// Run IR in interpreter differentially, before and after
     /// wevaling, comparing trace outputs.
@@ -54,6 +59,12 @@ fn main() -> anyhow::Result<()> {
     } else {
         raw_bytes
     };
+
+    if opts.strip_intrinsics {
+        let bytes = filter::filter(&module_bytes[..])?;
+        std::fs::write(&opts.output_module, &bytes[..])?;
+        return Ok(());
+    }
 
     // Load module.
     let mut frontend_opts = waffle::FrontendOptions::default();
@@ -111,6 +122,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     let bytes = result.module.to_wasm_bytes()?;
+
+    let bytes = if opts.wizen {
+        filter::filter(&bytes[..])?
+    } else {
+        bytes
+    };
+
     std::fs::write(&opts.output_module, &bytes[..])?;
 
     Ok(())
