@@ -16,8 +16,7 @@ env_logger = "0.9"
 fxhash = "0.2"
 rayon = "1.5"
 indicatif = "0.17"
-#wizer = "1.6"
-wizer = { path = "../wizer" }
+wizer = "2.0"
 
 [profile.release]
 debug = true
