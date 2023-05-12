@@ -1,6 +1,6 @@
 //! Discovery of intrinsics.
 
-use waffle::{ExportKind, Func, Module, Operator, Terminator, Type, ValueDef};
+use waffle::{ExportKind, Func, ImportKind, Module, Operator, Terminator, Type, ValueDef};
 
 #[derive(Clone, Debug)]
 pub struct Intrinsics {
@@ -24,63 +24,63 @@ pub struct Intrinsics {
 impl Intrinsics {
     pub fn find(module: &Module) -> Intrinsics {
         Intrinsics {
-            assume_const_memory: find_exported_func(
+            assume_const_memory: find_imported_intrinsic(
                 module,
-                "weval.assume.const.memory",
+                "assume.const.memory",
                 &[Type::I32],
                 &[Type::I32],
             ),
-            assume_const_memory_transitive: find_exported_func(
+            assume_const_memory_transitive: find_imported_intrinsic(
                 module,
-                "weval.assume.const.memory.transitive",
+                "assume.const.memory.transitive",
                 &[Type::I32],
                 &[Type::I32],
             ),
-            make_symbolic_ptr: find_exported_func(
+            make_symbolic_ptr: find_imported_intrinsic(
                 module,
-                "weval.make.symbolic.ptr",
+                "make.symbolic.ptr",
                 &[Type::I32],
                 &[Type::I32],
             ),
-            alias_with_symbolic_ptr: find_exported_func(
+            alias_with_symbolic_ptr: find_imported_intrinsic(
                 module,
-                "weval.alias.with.symbolic.ptr",
+                "alias.with.symbolic.ptr",
                 &[Type::I32, Type::I32],
                 &[Type::I32],
             ),
-            flush_to_mem: find_exported_func(module, "weval.flush.to.mem", &[], &[]),
-            push_context: find_exported_func(module, "weval.push.context", &[Type::I32], &[]),
-            pop_context: find_exported_func(module, "weval.pop.context", &[], &[]),
-            update_context: find_exported_func(module, "weval.update.context", &[Type::I32], &[]),
-            context_bucket: find_exported_func(module, "weval.context.bucket", &[Type::I32], &[]),
-            abort_specialization: find_exported_func(
+            flush_to_mem: find_imported_intrinsic(module, "flush.to.mem", &[], &[]),
+            push_context: find_imported_intrinsic(module, "push.context", &[Type::I32], &[]),
+            pop_context: find_imported_intrinsic(module, "pop.context", &[], &[]),
+            update_context: find_imported_intrinsic(module, "update.context", &[Type::I32], &[]),
+            context_bucket: find_imported_intrinsic(module, "context.bucket", &[Type::I32], &[]),
+            abort_specialization: find_imported_intrinsic(
                 module,
-                "weval.abort.specialization",
-                &[Type::I32, Type::I32],
-                &[],
-            ),
-            trace_line: find_exported_func(module, "weval.trace.line", &[Type::I32], &[]),
-            assert_const32: find_exported_func(
-                module,
-                "weval.assert.const32",
+                "abort.specialization",
                 &[Type::I32, Type::I32],
                 &[],
             ),
-            assert_const_memory: find_exported_func(
+            trace_line: find_imported_intrinsic(module, "trace.line", &[Type::I32], &[]),
+            assert_const32: find_imported_intrinsic(
                 module,
-                "weval.assert.const.memory",
+                "assert.const32",
                 &[Type::I32, Type::I32],
                 &[],
             ),
-            specialize_value: find_exported_func(
+            assert_const_memory: find_imported_intrinsic(
                 module,
-                "weval.specialize.value",
+                "assert.const.memory",
+                &[Type::I32, Type::I32],
+                &[],
+            ),
+            specialize_value: find_imported_intrinsic(
+                module,
+                "specialize.value",
                 &[Type::I32, Type::I32, Type::I32],
                 &[Type::I32],
             ),
-            print: find_exported_func(
+            print: find_imported_intrinsic(
                 module,
-                "weval.print",
+                "print",
                 &[Type::I32, Type::I32, Type::I32],
                 &[],
             ),
@@ -88,10 +88,26 @@ impl Intrinsics {
     }
 }
 
-fn export_sig_matches(module: &Module, f: Func, in_tys: &[Type], out_tys: &[Type]) -> bool {
+fn sig_matches(module: &Module, f: Func, in_tys: &[Type], out_tys: &[Type]) -> bool {
     let sig = module.funcs[f].sig();
     let sig = &module.signatures[sig];
     &sig.params[..] == in_tys && &sig.returns[..] == out_tys
+}
+
+pub fn find_imported_intrinsic(
+    module: &Module,
+    name: &str,
+    in_tys: &[Type],
+    out_tys: &[Type],
+) -> Option<Func> {
+    module
+        .imports
+        .iter()
+        .find(|im| im.module == "weval" && im.name == name)
+        .and_then(|im| match &im.kind {
+            &ImportKind::Func(f) if sig_matches(module, f, in_tys, out_tys) => Some(f),
+            _ => None,
+        })
 }
 
 pub fn find_exported_func(
@@ -103,9 +119,9 @@ pub fn find_exported_func(
     module
         .exports
         .iter()
-        .find(|ex| &ex.name == name)
+        .find(|ex| ex.name == name)
         .and_then(|ex| match &ex.kind {
-            &ExportKind::Func(f) if export_sig_matches(module, f, in_tys, out_tys) => Some(f),
+            &ExportKind::Func(f) if sig_matches(module, f, in_tys, out_tys) => Some(f),
             _ => None,
         })
 }
