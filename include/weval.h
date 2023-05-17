@@ -42,6 +42,13 @@ struct weval_req_arg_t {
 
 extern weval_req_t* weval_req_pending_head;
 
+#define WEVAL_DEFINE_REQ_LIST()                                    \
+  weval_req_t* weval_req_pending_head;                             \
+  __attribute__((export_name("weval.pending.head"))) weval_req_t** \
+  __weval_pending_head() {                                         \
+    return &weval_req_pending_head;                                \
+  }
+
 static inline void weval_request(weval_req_t* req) {
   req->next = weval_req_pending_head;
   req->prev = NULL;
@@ -74,30 +81,33 @@ static inline void weval_free(weval_req_t* req) {
 extern "C" {
 #endif
 
-__attribute__((noinline)) const void* weval_assume_const_memory(const void* p);
-__attribute__((noinline)) const void* weval_assume_const_memory_transitive(
-    const void* p);
-__attribute__((noinline)) void weval_push_context(uint32_t pc);
-__attribute__((noinline)) void weval_pop_context();
-__attribute__((noinline)) void weval_update_context(uint32_t pc);
-__attribute__((noinline)) void* weval_make_symbolic_ptr(void* p);
-__attribute__((noinline)) void* weval_alias_with_symbolic_ptr(void* p,
-                                                              void* symbolic);
-__attribute__((noinline)) void weval_flush_to_mem();
-__attribute__((noinline)) void weval_trace_line(uint32_t line_number);
-__attribute__((noinline)) void weval_abort_specialization(uint32_t line_number,
-                                                          uint32_t fatal);
-__attribute__((noinline)) void weval_assert_const32(uint32_t value,
-                                                    uint32_t line_no);
-__attribute__((noinline)) void weval_assert_const_memory(void* p,
-                                                         uint32_t line_no);
-__attribute__((noinline)) uint32_t weval_specialize_value(uint32_t value,
-                                                          uint32_t lo,
-                                                          uint32_t hi);
-__attribute__((noinline)) void weval_print(const char* message, uint32_t line,
-                                           uint32_t val);
+#define WEVAL_WASM_IMPORT(name) \
+  __attribute__((__import_module__("weval"), __import_name__(name)))
 
-__attribute__((noinline)) void weval_context_bucket(uint32_t bucket);
+const void* weval_assume_const_memory(const void* p)
+    WEVAL_WASM_IMPORT("assume.const.memory");
+const void* weval_assume_const_memory_transitive(const void* p)
+    WEVAL_WASM_IMPORT("assume.const.memory.transitive");
+void weval_push_context(uint32_t pc) WEVAL_WASM_IMPORT("push.context");
+void weval_pop_context() WEVAL_WASM_IMPORT("pop.context");
+void weval_update_context(uint32_t pc) WEVAL_WASM_IMPORT("update.context");
+void* weval_make_symbolic_ptr(void* p) WEVAL_WASM_IMPORT("make.symbolic.ptr");
+void weval_flush_to_mem() WEVAL_WASM_IMPORT("flush.to.mem");
+void weval_trace_line(uint32_t line_number) WEVAL_WASM_IMPORT("trace.line");
+void weval_abort_specialization(uint32_t line_number, uint32_t fatal)
+    WEVAL_WASM_IMPORT("abort.specialization");
+void weval_assert_const32(uint32_t value, uint32_t line_no)
+    WEVAL_WASM_IMPORT("assert.const32");
+void weval_assert_const_memory(void* p, uint32_t line_no)
+    WEVAL_WASM_IMPORT("assert.const.memory");
+uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi)
+    WEVAL_WASM_IMPORT("specialize.value");
+void weval_print(const char* message, uint32_t line, uint32_t val)
+    WEVAL_WASM_IMPORT("print");
+
+void weval_context_bucket(uint32_t bucket) WEVAL_WASM_IMPORT("context.bucket");
+
+#undef WEVAL_WASM_IMPORT
 
 #ifdef __cplusplus
 }  // extern "C"
