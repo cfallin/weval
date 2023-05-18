@@ -4,7 +4,7 @@ description = "The WebAssembly partial evaluator"
 repository = "https://github.com/cfallin/weval"
 version = "0.1.0"
 authors = ["Chris Fallin <chris@cfallin.org>"]
-license = "Apache-2.0 WITH LLVM-Exception"
+license = "Apache-2.0 WITH LLVM-exception"
 edition = "2021"
 
 [dependencies]
