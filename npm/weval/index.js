@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import decompress from 'decompress';
 import decompressUnzip from 'decompress-unzip';
 import decompressTar from 'decompress-tar';
-import plzma from 'plzmasdk';
+import xz from '@napi-rs/lzma/xz';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const knownPlatforms = {
@@ -65,19 +65,7 @@ if (!existsSync(exe)) {
     let buf = await data.arrayBuffer();
 
     if (releaseAsset.endsWith('.xz')) {
-        const archiveDataInStream = new plzma.InStream(buf);
-        const decoder = new plzma.Decoder(archiveDataInStream, plzma.FileType.xz);
-        decoder.open();
-
-        // We know the xz archive only contains 1 file, the tarball
-        // We extract the tarball in-memory, for later use in the `decompress` function
-        const selectedItemsToStreams = new Map();
-        selectedItemsToStreams.set(decoder.itemAt(0), plzma.OutStream());
-
-        decoder.extract(selectedItemsToStreams);
-        for (const value of selectedItemsToStreams.values()) {
-            buf = value.copyContent();
-        }
+        buf = await xz.decompress(new Uint8Array(buf));
     }
     await decompress(Buffer.from(buf), exeDir, {
         // Remove the leading directory from the extracted file.
