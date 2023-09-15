@@ -40,7 +40,7 @@ impl Intrinsics {
             make_symbolic_ptr: find_imported_intrinsic(
                 module,
                 "make.symbolic.ptr",
-                &[Type::I32],
+                &[Type::I32, Type::I32],
                 &[Type::I32],
             ),
             alias_with_symbolic_ptr: find_imported_intrinsic(

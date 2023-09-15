@@ -111,7 +111,28 @@ pub struct ProgPointState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SymbolicAddr(pub u32, pub i64);
+pub struct SymbolicAddr {
+    pub token: u32,
+    pub element_ty: Type,
+    pub offset: i64,
+}
+
+impl SymbolicAddr {
+    pub fn add_offset(self, off: i64) -> Self {
+        Self {
+            token: self.token,
+            element_ty: self.element_ty,
+            offset: self.offset.checked_add(off).unwrap(),
+        }
+    }
+    pub fn sub_offset(self, off: i64) -> Self {
+        Self {
+            token: self.token,
+            element_ty: self.element_ty,
+            offset: self.offset.checked_sub(off).unwrap(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemValue {

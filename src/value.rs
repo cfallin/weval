@@ -1,5 +1,7 @@
 //! Symbolic and concrete values.
 
+use crate::state::SymbolicAddr;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WasmVal {
     I32(u32),
@@ -58,9 +60,8 @@ pub enum AbstractValue {
     #[default]
     Top,
     /// A pointer value tracked symbolically. Usually used to allow
-    /// for "renamed memory". First arg is a unique label; second is
-    /// an offset.
-    SymbolicPtr(u32, i64),
+    /// for "renamed memory".
+    SymbolicPtr(SymbolicAddr),
     /// A value known at specialization time.
     ///
     /// May have special "tags" attached, to mark that e.g. derived
@@ -127,7 +128,7 @@ impl AbstractValue {
     pub fn tags(&self) -> ValueTags {
         match self {
             &AbstractValue::Top => ValueTags::default(),
-            &AbstractValue::SymbolicPtr(_, _) => ValueTags::default(),
+            &AbstractValue::SymbolicPtr(_) => ValueTags::default(),
             &AbstractValue::Concrete(_, t) => t,
             &AbstractValue::Runtime(_, t) => t,
         }
@@ -136,7 +137,7 @@ impl AbstractValue {
     pub fn with_tags(&self, new_tags: ValueTags) -> AbstractValue {
         match self {
             &AbstractValue::Top => AbstractValue::Top,
-            &AbstractValue::SymbolicPtr(l, off) => AbstractValue::SymbolicPtr(l, off),
+            &AbstractValue::SymbolicPtr(l) => AbstractValue::SymbolicPtr(l),
             &AbstractValue::Concrete(k, t) => AbstractValue::Concrete(k, t | new_tags),
             &AbstractValue::Runtime(v, t) => AbstractValue::Runtime(v, t | new_tags),
         }

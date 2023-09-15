@@ -1228,13 +1228,25 @@ impl<'a> Evaluator<'a> {
                     )
                 } else if Some(function_index) == self.intrinsics.make_symbolic_ptr {
                     let label_index = self.func.arg_pool[values][0].index() as u32;
+                    let ty_size: u32 = abs[1]
+                        .is_const_u32()
+                        .expect("Type size to make_symbolic_ptr should be a constant");
+                    let ty = match ty_size {
+                        4 => Type::I32,
+                        8 => Type::I64,
+                        x => panic!("Unexpected type size: {}", x),
+                    };
                     log::trace!(
                         "value {} is getting symbolic label {}",
                         self.func.arg_pool[values][0],
                         label_index
                     );
                     EvalResult::Alias(
-                        AbstractValue::SymbolicPtr(label_index, 0),
+                        AbstractValue::SymbolicPtr(SymbolicAddr {
+                            token: label_index,
+                            element_ty: ty,
+                            offset: 0,
+                        }),
                         self.func.arg_pool[values][0],
                     )
                 } else if Some(function_index) == self.intrinsics.push_context {
@@ -1451,22 +1463,31 @@ impl<'a> Evaluator<'a> {
         op: Operator,
         abs: &[AbstractValue],
         vals: ListRef<Value>,
-        tys: &[Type],
+        _tys: &[Type],
         state: &mut PointState,
     ) -> anyhow::Result<EvalResult> {
+        fn ty_align(ty: Type) -> i64 {
+            match ty {
+                Type::I32 => 4,
+                Type::I64 => 8,
+                ty => panic!("Unknown type for memory renaming: {:?}", ty),
+            }
+        }
+
         match (op, abs) {
             (
                 Operator::I32Load { memory } | Operator::I64Load { memory },
-                &[AbstractValue::SymbolicPtr(label, off)],
+                &[AbstractValue::SymbolicPtr(sym_addr)],
             ) if memory.memory.index() == 0 => {
-                let off = off + (memory.offset as i64);
+                let key = sym_addr.add_offset(memory.offset as i64);
+                assert!(key.offset % ty_align(key.element_ty) == 0);
                 let expected_ty = match op {
                     Operator::I32Load { .. } => Type::I32,
                     Operator::I64Load { .. } => Type::I64,
                     _ => anyhow::bail!("Bad load type to symbolic ptr"),
                 };
                 log::trace!("load from symbolic loc {:?}", abs[0]);
-                match state.flow.mem_overlay.get(&SymbolicAddr(label, off)) {
+                match state.flow.mem_overlay.get(&key) {
                     Some(MemValue::Value {
                         data,
                         ty,
@@ -1477,29 +1498,76 @@ impl<'a> Evaluator<'a> {
                         log::trace!(" -> have value {} with abs {:?}", data, abs);
                         return Ok(EvalResult::Alias(abs.clone(), *data));
                     }
+                    Some(MemValue::Value {
+                        data,
+                        ty: Type::I64,
+                        addr: _,
+                        dirty: _,
+                        abs,
+                    }) if expected_ty == Type::I32 => {
+                        // We've asserted that we're at the proper
+                        // alignment, and Wasm is little-endian, so we
+                        // can truncate.
+                        let args = self.func.arg_pool.single(*data);
+                        let tys = self.func.type_pool.single(Type::I32);
+                        let truncate = self.func.add_value(ValueDef::Operator(
+                            Operator::I32WrapI64,
+                            args,
+                            tys,
+                        ));
+                        self.func.append_to_block(new_block, truncate);
+                        log::trace!(" -> have value {} with abs {:?}", data, abs);
+                        return Ok(EvalResult::Alias(
+                            AbstractValue::Runtime(None, ValueTags::default()),
+                            truncate,
+                        ));
+                    }
                     None => {
                         // Create the original load, so we have access
                         // to its value; then insert it into the mem
                         // overlay.
                         let vals_list = self.func.arg_pool.deep_clone(vals);
-                        let tys_list = self.func.single_type_list(tys[0]);
-                        let l = self.func.add_value(ValueDef::Operator(
-                            op.clone(),
-                            vals_list,
-                            tys_list,
-                        ));
+                        let tys_list = self.func.single_type_list(key.element_ty);
+                        let op = match key.element_ty {
+                            Type::I32 => Operator::I32Load { memory },
+                            Type::I64 => Operator::I64Load { memory },
+                            _ => unreachable!(),
+                        };
+                        let l = self
+                            .func
+                            .add_value(ValueDef::Operator(op, vals_list, tys_list));
                         self.func.append_to_block(new_block, l);
+
                         state.flow.mem_overlay.insert(
-                            SymbolicAddr(label, off),
+                            key,
                             MemValue::Value {
                                 data: l,
-                                ty: tys[0],
+                                ty: key.element_ty,
                                 addr: self.func.arg_pool[vals][0],
                                 dirty: false,
-                                abs: abs[0].clone(),
+                                abs: AbstractValue::Runtime(None, ValueTags::default()),
                             },
                         );
-                        return Ok(EvalResult::Alias(abs[0].clone(), l));
+
+                        let final_value = if key.element_ty == Type::I64 && expected_ty == Type::I32
+                        {
+                            let args = self.func.arg_pool.single(l);
+                            let tys = self.func.type_pool.single(Type::I32);
+                            let truncate = self.func.add_value(ValueDef::Operator(
+                                Operator::I32WrapI64,
+                                args,
+                                tys,
+                            ));
+                            self.func.append_to_block(new_block, truncate);
+                            truncate
+                        } else {
+                            l
+                        };
+
+                        return Ok(EvalResult::Alias(
+                            AbstractValue::Runtime(None, ValueTags::default()),
+                            final_value,
+                        ));
                     }
                     Some(v) => {
                         anyhow::bail!("Bad MemValue: {:?}", v);
@@ -1508,9 +1576,9 @@ impl<'a> Evaluator<'a> {
             }
             (
                 Operator::I32Store { memory } | Operator::I64Store { memory },
-                &[AbstractValue::SymbolicPtr(label, off), _],
+                &[AbstractValue::SymbolicPtr(sym_addr), _],
             ) if memory.memory.index() == 0 => {
-                let off = off + (memory.offset as i64);
+                let key = sym_addr.add_offset(memory.offset as i64);
                 let data_ty = match op {
                     Operator::I32Store { .. } => Type::I32,
                     Operator::I64Store { .. } => Type::I64,
@@ -1521,9 +1589,9 @@ impl<'a> Evaluator<'a> {
                     abs[0],
                     self.func.arg_pool[vals][1]
                 );
-                // TODO: check for overlapping values
+                assert_eq!(data_ty, sym_addr.element_ty);
                 state.flow.mem_overlay.insert(
-                    SymbolicAddr(label, off),
+                    key,
                     MemValue::Value {
                         data: self.func.arg_pool[vals][1],
                         ty: data_ty,
@@ -1538,24 +1606,22 @@ impl<'a> Evaluator<'a> {
             }
             (
                 Operator::I32Add,
-                &[AbstractValue::SymbolicPtr(label, off), AbstractValue::Concrete(WasmVal::I32(k), _)]
-                | &[AbstractValue::Concrete(WasmVal::I32(k), _), AbstractValue::SymbolicPtr(label, off)],
+                &[AbstractValue::SymbolicPtr(addr), AbstractValue::Concrete(WasmVal::I32(k), _)]
+                | &[AbstractValue::Concrete(WasmVal::I32(k), _), AbstractValue::SymbolicPtr(addr)],
             ) => {
                 // TODO: check for wraparound
                 return Ok(EvalResult::Normal(AbstractValue::SymbolicPtr(
-                    label,
-                    off + (k as i32 as i64),
+                    addr.add_offset(k as i32 as i64),
                 )));
             }
             (
                 Operator::I32Sub,
-                &[AbstractValue::SymbolicPtr(label, off), AbstractValue::Concrete(WasmVal::I32(k), _)]
-                | &[AbstractValue::Concrete(WasmVal::I32(k), _), AbstractValue::SymbolicPtr(label, off)],
+                &[AbstractValue::SymbolicPtr(addr), AbstractValue::Concrete(WasmVal::I32(k), _)]
+                | &[AbstractValue::Concrete(WasmVal::I32(k), _), AbstractValue::SymbolicPtr(addr)],
             ) => {
                 // TODO: check for wraparound
                 return Ok(EvalResult::Normal(AbstractValue::SymbolicPtr(
-                    label,
-                    off - (k as i32 as i64),
+                    addr.sub_offset(k as i32 as i64),
                 )));
             }
             _ => {}
