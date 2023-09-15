@@ -425,6 +425,21 @@ fn store_operator(ty: Type) -> Option<Operator> {
     }
 }
 
+fn load_operator(ty: Type) -> Option<Operator> {
+    let memory = waffle::MemoryArg {
+        memory: waffle::Memory::new(0),
+        align: 0,
+        offset: 0,
+    };
+    match ty {
+        Type::I32 => Some(Operator::I32Load { memory }),
+        Type::I64 => Some(Operator::I64Load { memory }),
+        Type::F32 => Some(Operator::F32Load { memory }),
+        Type::F64 => Some(Operator::F64Load { memory }),
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 enum EvalResult {
     Unhandled,
@@ -1162,7 +1177,6 @@ impl<'a> Evaluator<'a> {
         }
 
         let ret = if op.is_call() {
-            self.flush_to_mem(state, new_block);
             log::debug!(" -> call");
             AbstractValue::Runtime(Some(orig_inst), ValueTags::default())
         } else {
@@ -1281,6 +1295,9 @@ impl<'a> Evaluator<'a> {
                 } else if Some(function_index) == self.intrinsics.flush_to_mem {
                     self.flush_to_mem(state, new_block);
                     EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.reload_from_mem {
+                    self.reload_from_mem(state, new_block);
+                    EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.abort_specialization {
                     let line_num = abs[0].is_const_u32().unwrap_or(0);
                     let fatal = abs[1].is_const_u32().unwrap_or(0);
@@ -1328,7 +1345,7 @@ impl<'a> Evaluator<'a> {
     }
 
     fn flush_to_mem(&mut self, state: &mut PointState, new_block: Block) {
-        for (_, value) in std::mem::take(&mut state.flow.mem_overlay) {
+        for (_, value) in &mut state.flow.mem_overlay {
             match value {
                 MemValue::Value {
                     data,
@@ -1336,14 +1353,43 @@ impl<'a> Evaluator<'a> {
                     addr,
                     dirty,
                     abs: _,
-                } if dirty => {
-                    let args = self.func.arg_pool.double(addr, data);
+                } if *dirty => {
+                    let args = self.func.arg_pool.double(*addr, *data);
                     let store = self.func.add_value(ValueDef::Operator(
-                        store_operator(ty).unwrap(),
+                        store_operator(*ty).unwrap(),
                         args,
                         ListRef::default(),
                     ));
                     self.func.append_to_block(new_block, store);
+                    *value = MemValue::Flushed {
+                        ty: *ty,
+                        addr: *addr,
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn reload_from_mem(&mut self, state: &mut PointState, new_block: Block) {
+        for (_, value) in &mut state.flow.mem_overlay {
+            match value {
+                MemValue::Flushed { ty, addr } => {
+                    let args = self.func.arg_pool.single(*addr);
+                    let results = self.func.type_pool.single(*ty);
+                    let load = self.func.add_value(ValueDef::Operator(
+                        load_operator(*ty).unwrap(),
+                        args,
+                        results,
+                    ));
+                    self.func.append_to_block(new_block, load);
+                    *value = MemValue::Value {
+                        data: load,
+                        ty: *ty,
+                        addr: *addr,
+                        dirty: false,
+                        abs: AbstractValue::Runtime(Some(load), ValueTags::default()),
+                    };
                 }
                 _ => {}
             }

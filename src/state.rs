@@ -123,6 +123,10 @@ pub enum MemValue {
         abs: AbstractValue,
     },
     TypedMerge(Type, AbstractValue),
+    Flushed {
+        ty: Type,
+        addr: Value,
+    },
     Conflict,
 }
 
@@ -325,6 +329,7 @@ impl ProgPointState {
                         dirty: true,
                     };
                 }
+                MemValue::Flushed { .. } => {}
                 MemValue::Conflict => {
                     remove_blockparam(ctx, addr);
                     to_remove.push(addr.clone());
