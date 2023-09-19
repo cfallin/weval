@@ -2152,9 +2152,10 @@ impl<'a> Evaluator<'a> {
             for (&addr, val) in &succ_state.mem_overlay {
                 let ty = val.to_type().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Inconsistent type on symbolic addr {:?} at block {}",
+                        "Inconsistent type on symbolic addr {:?} at block {} (val {:?})",
                         addr,
-                        orig_block
+                        orig_block,
+                        val,
                     )
                 })?;
                 let addr_blockparam = self.func.add_blockparam(block, Type::I32);

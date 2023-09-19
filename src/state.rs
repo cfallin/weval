@@ -163,6 +163,9 @@ impl MemValue {
                     ty: ty2, abs: abs2, ..
                 },
             ) if ty1 == ty2 => MemValue::TypedMerge(*ty1, AbstractValue::meet(abs1, abs2)),
+            (MemValue::TypedMerge(ty1, abs1), MemValue::TypedMerge(ty2, abs2)) if ty1 == ty2 => {
+                MemValue::TypedMerge(*ty1, AbstractValue::meet(abs1, abs2))
+            }
             (
                 MemValue::TypedMerge(ty, abs),
                 MemValue::Value {
@@ -193,6 +196,7 @@ impl MemValue {
         match self {
             MemValue::Value { ty, .. } => Some(*ty),
             MemValue::TypedMerge(ty, _) => Some(*ty),
+            MemValue::Flushed { ty, .. } => Some(*ty),
             _ => None,
         }
     }

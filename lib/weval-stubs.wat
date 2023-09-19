@@ -6,7 +6,7 @@
  (func (export "push.context") (param i32))
  (func (export "pop.context"))
  (func (export "update.context") (param i32))
- (func (export "make.symbolic.ptr") (param i32) (result i32)
+ (func (export "make.symbolic.ptr") (param i32 i32) (result i32)
        local.get 0)
   (func (export "flush.to.mem"))
   (func (export "trace.line") (param i32))
