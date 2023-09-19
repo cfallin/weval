@@ -322,6 +322,31 @@ impl Rewrite {
                     false
                 }
 
+                Payload::CustomSection(reader) if reader.name() == "name" => {
+                    let name_reader =
+                        wasmparser::NameSectionReader::new(reader.data(), reader.data_offset())?;
+                    let mut names = wasm_encoder::NameSection::new();
+                    let mut func_names = wasm_encoder::NameMap::new();
+                    for subsection in name_reader {
+                        let subsection = subsection?;
+                        match subsection {
+                            wasmparser::Name::Function(names) => {
+                                for name in names {
+                                    let name = name?;
+                                    if let Some(&FuncRemap::Index(new_index)) =
+                                        self.func_remap.get(&name.index)
+                                    {
+                                        func_names.append(new_index, name.name);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    names.functions(&func_names);
+                    out.section(&names);
+                    false
+                }
                 Payload::CustomSection(..) => false,
                 _ => true,
             };
