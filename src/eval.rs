@@ -47,9 +47,8 @@ struct Evaluator<'a> {
     /// Dependency map from a given value to any blocks (in
     /// specialized function) that must be re-evaluated if it changes.
     value_dep_blocks: HashMap<(Context, Value), BTreeSet<Block>>,
-    /// Map of (ctx, block, sym_addr) to blockparams for address and
-    /// mem-renmaed value.
-    mem_blockparam_map: HashMap<(Context, Block, SymbolicAddr), (Value, Value)>,
+    /// Map of (ctx, block, idx) to blockparams for specialization-register values.
+    reg_map: HashMap<(Context, Block, u64), Value>,
     /// Queue of blocks to (re)compute. List of (block_in_generic,
     /// ctx, block_in_func).
     queue: VecDeque<(Block, Context, Block)>,
@@ -243,7 +242,7 @@ fn partially_evaluate_func(
         block_rev_map: PerEntity::default(),
         value_map: HashMap::default(),
         value_dep_blocks: HashMap::default(),
-        mem_blockparam_map: HashMap::default(),
+        reg_map: HashMap::default(),
         queue: VecDeque::new(),
         queue_set: HashSet::default(),
     };
@@ -504,28 +503,25 @@ impl<'a> Evaluator<'a> {
         log::trace!(" -> state = {:?}", state);
 
         state.flow.update_at_block_entry(
-            &mut self.mem_blockparam_map,
-            &mut |mem_blockparam_map, sym_addr, ty| {
-                *mem_blockparam_map
-                    .entry((ctx, orig_block, sym_addr))
-                    .or_insert_with(|| {
-                        let param = self.func.add_placeholder(ty);
-                        let addr = self.func.add_placeholder(Type::I32);
-                        log::trace!(
-                            "new blockparams for data {} addr {:?} for symbolic-addr {:?} on block {} (ctx {} orig {})",
-                            param,
-                            addr,
-                            sym_addr,
-                            new_block,
-                            ctx,
-                            orig_block,
-                        );
-                        (addr, param)
-                    },)
+            &mut self.reg_map,
+            &mut |reg_map, idx, ty| {
+                *reg_map.entry((ctx, orig_block, idx)).or_insert_with(|| {
+                    let param = self.func.add_placeholder(ty);
+                    log::trace!(
+                        "new blockparam {} for reg idx {} on block {} (ctx {} orig {})",
+                        param,
+                        idx,
+                        new_block,
+                        ctx,
+                        orig_block,
+                    );
+                    param
+                })
             },
-            &mut |mem_blockparam_map, sym_addr| {
-                mem_blockparam_map.remove(&(ctx, orig_block, sym_addr));
-            })?;
+            &mut |mem_blockparam_map, idx| {
+                mem_blockparam_map.remove(&(ctx, orig_block, idx));
+            },
+        )?;
 
         // Do the actual constant-prop, carrying the state across the
         // block and updating flow-sensitive state, and updating SSA
@@ -1169,11 +1165,11 @@ impl<'a> Evaluator<'a> {
             return Ok(intrinsic_result);
         }
 
-        let mem_overlay_result =
-            self.abstract_eval_mem_overlay(orig_inst, new_block, op, abs, values, tys, state)?;
-        if mem_overlay_result.is_handled() {
-            log::debug!(" -> overlay: {:?}", intrinsic_result);
-            return Ok(mem_overlay_result);
+        let reg_result =
+            self.abstract_eval_regs(orig_inst, new_block, op, abs, values, tys, state)?;
+        if reg_result.is_handled() {
+            log::debug!(" -> specialization regs: {:?}", reg_result);
+            return Ok(reg_result);
         }
 
         let ret = if op.is_call() {
@@ -1203,7 +1199,7 @@ impl<'a> Evaluator<'a> {
     fn abstract_eval_intrinsic(
         &mut self,
         orig_block: Block,
-        new_block: Block,
+        _new_block: Block,
         orig_inst: Value,
         op: Operator,
         _loc: SourceLoc,
@@ -1224,29 +1220,6 @@ impl<'a> Evaluator<'a> {
                         abs[0].with_tags(
                             ValueTags::const_memory() | ValueTags::const_memory_transitive(),
                         ),
-                        self.func.arg_pool[values][0],
-                    )
-                } else if Some(function_index) == self.intrinsics.make_symbolic_ptr {
-                    let label_index = self.func.arg_pool[values][0].index() as u32;
-                    let ty_size: u32 = abs[1]
-                        .is_const_u32()
-                        .expect("Type size to make_symbolic_ptr should be a constant");
-                    let ty = match ty_size {
-                        4 => Type::I32,
-                        8 => Type::I64,
-                        x => panic!("Unexpected type size: {}", x),
-                    };
-                    log::trace!(
-                        "value {} is getting symbolic label {}",
-                        self.func.arg_pool[values][0],
-                        label_index
-                    );
-                    EvalResult::Alias(
-                        AbstractValue::SymbolicPtr(SymbolicAddr {
-                            token: label_index,
-                            element_ty: ty,
-                            offset: 0,
-                        }),
                         self.func.arg_pool[values][0],
                     )
                 } else if Some(function_index) == self.intrinsics.push_context {
@@ -1304,12 +1277,6 @@ impl<'a> Evaluator<'a> {
                     );
                     state.pending_context = Some(child);
                     EvalResult::Alias(abs[0].clone(), self.func.arg_pool[values][0])
-                } else if Some(function_index) == self.intrinsics.flush_to_mem {
-                    self.flush_to_mem(state, new_block);
-                    EvalResult::Elide
-                } else if Some(function_index) == self.intrinsics.reload_from_mem {
-                    self.reload_from_mem(state, new_block);
-                    EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.abort_specialization {
                     let line_num = abs[0].is_const_u32().unwrap_or(0);
                     let fatal = abs[1].is_const_u32().unwrap_or(0);
@@ -1356,247 +1323,55 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    fn flush_to_mem(&mut self, state: &mut PointState, new_block: Block) {
-        for (_, value) in &mut state.flow.mem_overlay {
-            match value {
-                MemValue::Value {
-                    data,
-                    ty,
-                    addr,
-                    dirty,
-                    abs: _,
-                } if *dirty => {
-                    let args = self.func.arg_pool.double(*addr, *data);
-                    let store = self.func.add_value(ValueDef::Operator(
-                        store_operator(*ty).unwrap(),
-                        args,
-                        ListRef::default(),
-                    ));
-                    self.func.append_to_block(new_block, store);
-                    *value = MemValue::Flushed {
-                        ty: *ty,
-                        addr: *addr,
-                    };
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn reload_from_mem(&mut self, state: &mut PointState, new_block: Block) {
-        for (_, value) in &mut state.flow.mem_overlay {
-            match value {
-                MemValue::Flushed { ty, addr } => {
-                    let args = self.func.arg_pool.single(*addr);
-                    let results = self.func.type_pool.single(*ty);
-                    let load = self.func.add_value(ValueDef::Operator(
-                        load_operator(*ty).unwrap(),
-                        args,
-                        results,
-                    ));
-                    self.func.append_to_block(new_block, load);
-                    *value = MemValue::Value {
-                        data: load,
-                        ty: *ty,
-                        addr: *addr,
-                        dirty: false,
-                        abs: AbstractValue::Runtime(Some(load), ValueTags::default()),
-                    };
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn flush_on_edge(&mut self, from: Block, to: Block, succ_idx: usize) {
-        let from_state = &self.state.block_exit[from];
-        let to_state = &self.state.block_exit[to];
-
-        let mut edge_block = None;
-        for (sym_addr, value) in &from_state.mem_overlay {
-            let succ_value = to_state.mem_overlay.get(sym_addr);
-            match (value, succ_value) {
-                (MemValue::Value { .. }, Some(MemValue::Value { .. })) => {
-                    // Nothing necessary: value will be passed as blockparam.
-                }
-                (MemValue::Value { .. }, Some(MemValue::TypedMerge(..))) => {
-                    // Nothing necessary: value will be passed as blockparam.
-                }
-                (
-                    MemValue::Value {
-                        data,
-                        ty,
-                        addr,
-                        dirty,
-                        abs: _,
-                    },
-                    other,
-                ) if *dirty => {
-                    // We need to flush the value back to memory, if
-                    // "dirty" (different from what is already in
-                    // memory).
-                    let vals = self.func.arg_pool.double(*addr, *data);
-                    let store = self.func.add_value(ValueDef::Operator(
-                        store_operator(*ty).unwrap(),
-                        vals,
-                        ListRef::default(),
-                    ));
-                    log::trace!("from block {} to block {}: symbolic addr {:?} had addr {} data {}, but not in succ: {:?}",
-                                from, to, sym_addr, addr, data, other);
-                    let block = *edge_block.get_or_insert_with(|| {
-                        let edge_block = self.func.split_edge(from, to, succ_idx);
-                        self.func.blocks[edge_block].desc = format!("Edge from {} to {}", from, to);
-                        edge_block
-                    });
-                    log::trace!(" -> appending store {} to edge block {}", store, block);
-                    self.func.append_to_block(block, store);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn abstract_eval_mem_overlay(
+    fn abstract_eval_regs(
         &mut self,
-        inst: Value,
-        new_block: Block,
+        _inst: Value,
+        _new_block: Block,
         op: Operator,
         abs: &[AbstractValue],
         vals: ListRef<Value>,
         _tys: &[Type],
         state: &mut PointState,
     ) -> anyhow::Result<EvalResult> {
-        fn ty_align(ty: Type) -> i64 {
-            match ty {
-                Type::I32 => 4,
-                Type::I64 => 8,
-                ty => panic!("Unknown type for memory renaming: {:?}", ty),
-            }
-        }
-
-        match (op, abs) {
-            (
-                Operator::I32Load { memory } | Operator::I64Load { memory },
-                &[AbstractValue::SymbolicPtr(sym_addr)],
-            ) if memory.memory.index() == 0 => {
-                let key = sym_addr.add_offset(memory.offset as i64);
-                assert!(key.offset % ty_align(key.element_ty) == 0);
-                let expected_ty = match op {
-                    Operator::I32Load { .. } => Type::I32,
-                    Operator::I64Load { .. } => Type::I64,
-                    _ => anyhow::bail!("Bad load type to symbolic ptr"),
-                };
-                log::trace!("load from symbolic loc {:?}", abs[0]);
-                match state.flow.mem_overlay.get(&key) {
-                    Some(MemValue::Value {
-                        data,
-                        ty,
-                        addr: _,
-                        dirty: _,
-                        abs,
-                    }) if *ty == expected_ty => {
+        match op {
+            Operator::Call { function_index }
+                if Some(function_index) == self.intrinsics.read_reg =>
+            {
+                let idx = abs[0].is_const_u64().expect("Non-constant register number");
+                log::trace!("load from specialization reg {}", idx);
+                match state.flow.regs.get(&idx) {
+                    Some(RegValue::Value { data, abs, .. }) => {
                         log::trace!(" -> have value {} with abs {:?}", data, abs);
                         return Ok(EvalResult::Alias(abs.clone(), *data));
                     }
-                    Some(MemValue::Value {
-                        data,
-                        ty: Type::I64,
-                        addr: _,
-                        dirty: _,
-                        abs,
-                    }) if expected_ty == Type::I32 => {
-                        // We've asserted that we're at the proper
-                        // alignment, and Wasm is little-endian, so we
-                        // can truncate.
-                        let args = self.func.arg_pool.single(*data);
-                        let tys = self.func.type_pool.single(Type::I32);
-                        let truncate = self.func.add_value(ValueDef::Operator(
-                            Operator::I32WrapI64,
-                            args,
-                            tys,
-                        ));
-                        self.func.append_to_block(new_block, truncate);
-                        log::trace!(" -> have value {} with abs {:?}", data, abs);
-                        return Ok(EvalResult::Alias(
-                            AbstractValue::Runtime(None, ValueTags::default()),
-                            truncate,
-                        ));
+                    Some(v) => {
+                        anyhow::bail!(
+                            "Specialization register {} in bad state {:?} at read",
+                            idx,
+                            v
+                        );
                     }
                     None => {
-                        // Create the original load, so we have access
-                        // to its value; then insert it into the mem
-                        // overlay.
-                        let vals_list = self.func.arg_pool.deep_clone(vals);
-                        let tys_list = self.func.single_type_list(key.element_ty);
-                        let op = match key.element_ty {
-                            Type::I32 => Operator::I32Load { memory },
-                            Type::I64 => Operator::I64Load { memory },
-                            _ => unreachable!(),
-                        };
-                        let l = self
-                            .func
-                            .add_value(ValueDef::Operator(op, vals_list, tys_list));
-                        self.func.append_to_block(new_block, l);
-
-                        state.flow.mem_overlay.insert(
-                            key,
-                            MemValue::Value {
-                                data: l,
-                                ty: key.element_ty,
-                                addr: self.func.arg_pool[vals][0],
-                                dirty: false,
-                                abs: AbstractValue::Runtime(None, ValueTags::default()),
-                            },
-                        );
-
-                        let final_value = if key.element_ty == Type::I64 && expected_ty == Type::I32
-                        {
-                            let args = self.func.arg_pool.single(l);
-                            let tys = self.func.type_pool.single(Type::I32);
-                            let truncate = self.func.add_value(ValueDef::Operator(
-                                Operator::I32WrapI64,
-                                args,
-                                tys,
-                            ));
-                            self.func.append_to_block(new_block, truncate);
-                            truncate
-                        } else {
-                            l
-                        };
-
-                        return Ok(EvalResult::Alias(
-                            AbstractValue::Runtime(None, ValueTags::default()),
-                            final_value,
-                        ));
-                    }
-                    Some(v) => {
-                        anyhow::bail!("Bad MemValue: {:?}", v);
+                        anyhow::bail!("Specialization register {} not set", idx);
                     }
                 }
             }
-            (
-                Operator::I32Store { memory } | Operator::I64Store { memory },
-                &[AbstractValue::SymbolicPtr(sym_addr), _],
-            ) if memory.memory.index() == 0 => {
-                let key = sym_addr.add_offset(memory.offset as i64);
-                let data_ty = match op {
-                    Operator::I32Store { .. } => Type::I32,
-                    Operator::I64Store { .. } => Type::I64,
-                    _ => anyhow::bail!("Bad store type to symbolic ptr"),
-                };
+            Operator::Call { function_index }
+                if Some(function_index) == self.intrinsics.write_reg =>
+            {
+                let idx = abs[0].is_const_u64().expect("Non-constant register number");
+                let data = self.func.arg_pool[vals][1];
                 log::trace!(
-                    "store to symbolic loc {:?}: value {}",
-                    abs[0],
-                    self.func.arg_pool[vals][1]
+                    "store to specialization reg {} value {} abs {:?}",
+                    idx,
+                    data,
+                    abs[1]
                 );
-                assert_eq!(data_ty, sym_addr.element_ty);
-                state.flow.mem_overlay.insert(
-                    key,
-                    MemValue::Value {
-                        data: self.func.arg_pool[vals][1],
-                        ty: data_ty,
-                        addr: self.func.arg_pool[vals][0],
-                        dirty: true,
+                state.flow.regs.insert(
+                    idx,
+                    RegValue::Value {
+                        data,
+                        ty: Type::I64,
                         abs: abs[1].clone(),
                     },
                 );
@@ -1604,51 +1379,7 @@ impl<'a> Evaluator<'a> {
                 // Elide the store.
                 return Ok(EvalResult::Elide);
             }
-            (
-                Operator::I32Add,
-                &[AbstractValue::SymbolicPtr(addr), AbstractValue::Concrete(WasmVal::I32(k), _)]
-                | &[AbstractValue::Concrete(WasmVal::I32(k), _), AbstractValue::SymbolicPtr(addr)],
-            ) => {
-                // TODO: check for wraparound
-                return Ok(EvalResult::Normal(AbstractValue::SymbolicPtr(
-                    addr.add_offset(k as i32 as i64),
-                )));
-            }
-            (
-                Operator::I32Sub,
-                &[AbstractValue::SymbolicPtr(addr), AbstractValue::Concrete(WasmVal::I32(k), _)]
-                | &[AbstractValue::Concrete(WasmVal::I32(k), _), AbstractValue::SymbolicPtr(addr)],
-            ) => {
-                // TODO: check for wraparound
-                return Ok(EvalResult::Normal(AbstractValue::SymbolicPtr(
-                    addr.sub_offset(k as i32 as i64),
-                )));
-            }
             _ => {}
-        }
-
-        // If a symbolic-pointer-tainted value (that has escaped and
-        // lost precision) reaches a load or store otherwise, we need
-        // to flag the error.
-        //
-        // We exclude calls, because we flush all memory-renamed
-        // values back to memory before every call.
-        if !op.is_call() && op.accesses_memory() {
-            for a in abs {
-                if a.tags().contains(ValueTags::symbolic_ptr_taint()) {
-                    log::trace!(
-                        "abs {:?} flowing into op {} (args {:?}) causes label escape",
-                        a,
-                        op,
-                        abs,
-                    );
-                    anyhow::bail!(
-                        "Escaped symbolic pointer! inst {} has inputs {:?}",
-                        inst,
-                        abs
-                    );
-                }
-            }
         }
 
         Ok(EvalResult::Unhandled)
@@ -2142,37 +1873,32 @@ impl<'a> Evaluator<'a> {
             .prop_sticky_tags(z)
     }
 
-    fn add_blockparam_mem_args(&mut self) -> anyhow::Result<()> {
-        // Examine mem_overlay in block input state of each
+    fn add_blockparam_reg_args(&mut self) -> anyhow::Result<()> {
+        // Examine regs in block input state of each
         // specialized block, and create blockparams for all values
         // that in the end were `BlockParam`.
         for (&(ctx, orig_block), &block) in &self.block_map {
             let succ_state = &self.state.block_entry[block];
 
-            for (&addr, val) in &succ_state.mem_overlay {
-                let ty = val.to_type().ok_or_else(|| {
+            for (&idx, val) in &succ_state.regs {
+                let ty = val.ty().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Inconsistent type on symbolic addr {:?} at block {} (val {:?})",
-                        addr,
+                        "Inconsistent type on reg idx {} at block {} (val {:?})",
+                        idx,
                         orig_block,
                         val,
                     )
                 })?;
-                let addr_blockparam = self.func.add_blockparam(block, Type::I32);
                 let val_blockparam = self.func.add_blockparam(block, ty);
-                let (orig_addr, orig_val) = *self
-                    .mem_blockparam_map
-                    .get(&(ctx, orig_block, addr))
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "placeholder val not found for addr {:?} at block {} (ctx {} orig {})",
-                            addr,
-                            block,
-                            ctx,
-                            orig_block,
-                        )
-                    })?;
-                self.func.set_alias(orig_addr, addr_blockparam);
+                let orig_val = *self.reg_map.get(&(ctx, orig_block, idx)).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "placeholder val not found for reg idx {} at block {} (ctx {} orig {})",
+                        idx,
+                        block,
+                        ctx,
+                        orig_block,
+                    )
+                })?;
                 self.func.set_alias(orig_val, val_blockparam);
             }
 
@@ -2181,13 +1907,11 @@ impl<'a> Evaluator<'a> {
                 let pred_state = &self.state.block_exit[pred];
                 let pred_succ_idx = self.func.blocks[block].pos_in_pred_succ[pred_idx];
 
-                for &addr in succ_state.mem_overlay.keys() {
-                    let pred_val = pred_state.mem_overlay.get(&addr).unwrap();
-                    let (pred_addr, pred_val) = pred_val.to_addr_and_value().unwrap();
+                for &idx in succ_state.regs.keys() {
+                    let pred_val = pred_state.regs.get(&idx).unwrap().value().unwrap();
                     self.func.blocks[pred]
                         .terminator
                         .update_target(pred_succ_idx, |target| {
-                            target.args.push(pred_addr);
                             target.args.push(pred_val);
                         });
                 }
@@ -2197,25 +1921,10 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
-    fn add_blockparam_mem_spills(&mut self) -> anyhow::Result<()> {
-        for block in self.func.blocks.iter() {
-            for succ_idx in 0..self.func.blocks[block].succs.len() {
-                let succ = self.func.blocks[block].succs[succ_idx];
-                self.flush_on_edge(block, succ, succ_idx);
-            }
-        }
-
-        Ok(())
-    }
-
     fn finalize(&mut self) -> anyhow::Result<()> {
         self.func.recompute_edges();
 
-        // Add blockparam args for symbolic addrs to each branch.
-        self.add_blockparam_mem_args()?;
-        // Add spills of symbolic addrs on edges as needed to get
-        // consistent (non-conflicting) state on inputs.
-        self.add_blockparam_mem_spills()?;
+        self.add_blockparam_reg_args()?;
 
         #[cfg(debug_assertions)]
         self.func.validate().unwrap();

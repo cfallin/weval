@@ -104,99 +104,82 @@ pub struct SSAState {}
 /// The flow-sensitive part of the state.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ProgPointState {
-    /// Memory overlay. We store only aligned u32s here.
-    pub mem_overlay: BTreeMap<SymbolicAddr, MemValue>,
+    /// Specialization registers.
+    pub regs: BTreeMap<u64, RegValue>,
     /// Global values.
     pub globals: BTreeMap<Global, AbstractValue>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SymbolicAddr {
-    pub token: u32,
-    pub element_ty: Type,
-    pub offset: i64,
-}
-
-impl SymbolicAddr {
-    pub fn add_offset(self, off: i64) -> Self {
-        Self {
-            token: self.token,
-            element_ty: self.element_ty,
-            offset: self.offset.checked_add(off).unwrap(),
-        }
-    }
-    pub fn sub_offset(self, off: i64) -> Self {
-        Self {
-            token: self.token,
-            element_ty: self.element_ty,
-            offset: self.offset.checked_sub(off).unwrap(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum MemValue {
+pub enum RegValue {
     Value {
         data: Value,
-        ty: Type,
-        addr: Value,
-        dirty: bool,
         abs: AbstractValue,
-    },
-    TypedMerge(Type, AbstractValue),
-    Flushed {
         ty: Type,
-        addr: Value,
+    },
+    Merge {
+        ty: Type,
+        abs: AbstractValue,
     },
     Conflict,
 }
 
-impl MemValue {
-    fn meet(a: &MemValue, b: &MemValue) -> MemValue {
+impl RegValue {
+    fn meet(a: &RegValue, b: &RegValue) -> RegValue {
         match (a, b) {
             (a, b) if a == b => a.clone(),
             (
-                MemValue::Value {
+                RegValue::Value {
                     ty: ty1, abs: abs1, ..
                 },
-                MemValue::Value {
+                RegValue::Value {
                     ty: ty2, abs: abs2, ..
                 },
-            ) if ty1 == ty2 => MemValue::TypedMerge(*ty1, AbstractValue::meet(abs1, abs2)),
-            (MemValue::TypedMerge(ty1, abs1), MemValue::TypedMerge(ty2, abs2)) if ty1 == ty2 => {
-                MemValue::TypedMerge(*ty1, AbstractValue::meet(abs1, abs2))
+            ) if ty1 == ty2 => RegValue::Merge {
+                ty: *ty1,
+                abs: AbstractValue::meet(abs1, abs2),
+            },
+            (RegValue::Merge { ty: ty1, abs: abs1 }, RegValue::Merge { ty: ty2, abs: abs2 })
+                if ty1 == ty2 =>
+            {
+                RegValue::Merge {
+                    ty: *ty1,
+                    abs: AbstractValue::meet(abs1, abs2),
+                }
             }
             (
-                MemValue::TypedMerge(ty, abs),
-                MemValue::Value {
+                RegValue::Merge { ty, abs },
+                RegValue::Value {
                     ty: ty1, abs: abs1, ..
                 },
             )
             | (
-                MemValue::Value {
+                RegValue::Value {
                     ty: ty1, abs: abs1, ..
                 },
-                MemValue::TypedMerge(ty, abs),
-            ) if ty == ty1 => MemValue::TypedMerge(*ty, AbstractValue::meet(abs, abs1)),
+                RegValue::Merge { ty, abs },
+            ) if ty == ty1 => RegValue::Merge {
+                ty: *ty,
+                abs: AbstractValue::meet(abs, abs1),
+            },
             _ => {
                 log::trace!("Values {:?} and {:?} meeting to Conflict", a, b);
-                MemValue::Conflict
+                RegValue::Conflict
             }
         }
     }
 
-    pub fn to_addr_and_value(&self) -> Option<(Value, Value)> {
+    pub fn value(&self) -> Option<Value> {
         match self {
-            MemValue::Value { addr, data, .. } => Some((*addr, *data)),
+            RegValue::Value { data, .. } => Some(*data),
             _ => None,
         }
     }
 
-    pub fn to_type(&self) -> Option<Type> {
+    pub fn ty(&self) -> Option<Type> {
         match self {
-            MemValue::Value { ty, .. } => Some(*ty),
-            MemValue::TypedMerge(ty, _) => Some(*ty),
-            MemValue::Flushed { ty, .. } => Some(*ty),
+            RegValue::Value { ty, .. } => Some(*ty),
+            RegValue::Merge { ty, .. } => Some(*ty),
             _ => None,
         }
     }
@@ -286,22 +269,14 @@ impl ProgPointState {
             .map(|global| (*global, AbstractValue::Runtime(None, ValueTags::default())))
             .collect();
         ProgPointState {
-            mem_overlay: BTreeMap::new(),
+            regs: BTreeMap::new(),
             globals,
         }
     }
 
     pub fn meet_with(&mut self, other: &ProgPointState) -> bool {
         let mut changed = false;
-        changed |= map_meet_with(
-            &mut self.mem_overlay,
-            &other.mem_overlay,
-            MemValue::meet,
-            None,
-        );
-
-        // TODO: check mem overlay for overlapping values of different
-        // types
+        changed |= map_meet_with(&mut self.regs, &other.regs, RegValue::meet, None);
 
         changed |= map_meet_with(
             &mut self.globals,
@@ -313,19 +288,22 @@ impl ProgPointState {
     }
 
     pub fn update_across_edge(&mut self) {
-        for value in self.mem_overlay.values_mut() {
-            if let MemValue::Value { ty, abs, .. } = value {
-                // Ensure all mem-overlay values become blockparams,
-                // even if only one pred.
-                *value = MemValue::TypedMerge(*ty, abs.clone());
+        for value in self.regs.values_mut() {
+            if let RegValue::Value { ty, abs, .. } = value {
+                // Ensure all specialization-register values become
+                // blockparams, even if only one pred.
+                *value = RegValue::Merge {
+                    ty: *ty,
+                    abs: abs.clone(),
+                };
             }
         }
     }
 
     pub fn update_at_block_entry<
         C,
-        GB: FnMut(&mut C, SymbolicAddr, Type) -> (Value, Value),
-        RB: FnMut(&mut C, SymbolicAddr),
+        GB: FnMut(&mut C, u64, Type) -> Value,
+        RB: FnMut(&mut C, u64),
     >(
         &mut self,
         ctx: &mut C,
@@ -333,36 +311,25 @@ impl ProgPointState {
         remove_blockparam: &mut RB,
     ) -> anyhow::Result<()> {
         let mut to_remove = vec![];
-        for (&addr, value) in &mut self.mem_overlay {
+        for (&idx, value) in &mut self.regs {
             match value {
-                MemValue::Value { .. } => {}
-                MemValue::TypedMerge(ty, abs) => {
-                    let (addr, param) = get_blockparam(ctx, addr, *ty);
-                    *value = MemValue::Value {
+                RegValue::Value { .. } => {}
+                RegValue::Merge { ty, abs } => {
+                    let param = get_blockparam(ctx, idx, *ty);
+                    *value = RegValue::Value {
                         data: param,
                         ty: *ty,
-                        addr,
                         abs: abs.clone(),
-                        // We could recover some notion of clean
-                        // values (same as in memory, just loads we've
-                        // already done) if we had a postpass to know
-                        // for certain all incoming edges had this
-                        // property, but right now this is a
-                        // placeholder inserted before we know all
-                        // preds' state so we conservatively assume
-                        // dirty (which is always safe).
-                        dirty: true,
                     };
                 }
-                MemValue::Flushed { .. } => {}
-                MemValue::Conflict => {
-                    remove_blockparam(ctx, addr);
-                    to_remove.push(addr.clone());
+                RegValue::Conflict => {
+                    remove_blockparam(ctx, idx);
+                    to_remove.push(idx);
                 }
             }
         }
         for to_remove in to_remove {
-            self.mem_overlay.remove(&to_remove);
+            self.regs.remove(&to_remove);
         }
         Ok(())
     }

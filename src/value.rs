@@ -1,7 +1,5 @@
 //! Symbolic and concrete values.
 
-use crate::state::SymbolicAddr;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WasmVal {
     I32(u32),
@@ -59,9 +57,6 @@ pub enum AbstractValue {
     /// "top" default value; undefined.
     #[default]
     Top,
-    /// A pointer value tracked symbolically. Usually used to allow
-    /// for "renamed memory".
-    SymbolicPtr(SymbolicAddr),
     /// A value known at specialization time.
     ///
     /// May have special "tags" attached, to mark that e.g. derived
@@ -91,15 +86,6 @@ impl ValueTags {
     pub const fn const_memory_transitive() -> Self {
         ValueTags(2)
     }
-
-    /// This value is tainted as derived from a symbolic pointer
-    /// involved in memory renaming. The program can manipulate and
-    /// observe the pointer value, but this pointer must never reach
-    /// any load or store (except via a call, before which we flush
-    /// all memory renaming state).
-    pub fn symbolic_ptr_taint() -> Self {
-        ValueTags(4)
-    }
 }
 
 /// Operators on value tags.
@@ -115,12 +101,11 @@ impl ValueTags {
     }
     pub fn meet(&self, other: ValueTags) -> ValueTags {
         // - const_memory and const_memory_transitive merge as intersection.
-        // - symbolic_ptr_taint merges as union.
-        ValueTags(((self.0 & 3) & (other.0 & 3)) | ((self.0 & 4) | (other.0 & 4)))
+        ValueTags((self.0 & 3) & (other.0 & 3))
     }
     /// Get the tags that are "sticky": propagate across all ops.
     pub fn sticky(&self) -> ValueTags {
-        ValueTags(self.0 & 4)
+        ValueTags(0)
     }
 }
 
@@ -128,7 +113,6 @@ impl AbstractValue {
     pub fn tags(&self) -> ValueTags {
         match self {
             &AbstractValue::Top => ValueTags::default(),
-            &AbstractValue::SymbolicPtr(_) => ValueTags::default(),
             &AbstractValue::Concrete(_, t) => t,
             &AbstractValue::Runtime(_, t) => t,
         }
@@ -137,7 +121,6 @@ impl AbstractValue {
     pub fn with_tags(&self, new_tags: ValueTags) -> AbstractValue {
         match self {
             &AbstractValue::Top => AbstractValue::Top,
-            &AbstractValue::SymbolicPtr(l) => AbstractValue::SymbolicPtr(l),
             &AbstractValue::Concrete(k, t) => AbstractValue::Concrete(k, t | new_tags),
             &AbstractValue::Runtime(v, t) => AbstractValue::Runtime(v, t | new_tags),
         }
