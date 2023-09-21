@@ -248,8 +248,8 @@ fn partially_evaluate_func(
     };
     let (ctx, entry_state) = evaluator.state.init(image);
     log::trace!("after init_args, state is {:?}", evaluator.state);
+
     let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
-    evaluator.func.entry = specialized_entry;
     evaluator
         .queue
         .push_back((evaluator.generic.entry, ctx, specialized_entry));
@@ -260,6 +260,10 @@ fn partially_evaluate_func(
         ctx,
         &evaluator.value_map,
     );
+
+    let pre_entry = evaluator.create_pre_entry(specialized_entry, &directive.const_params[..]);
+    evaluator.func.entry = pre_entry;
+
     let success = evaluator.evaluate()?;
     if !success {
         return Ok(None);
@@ -1919,6 +1923,59 @@ impl<'a> Evaluator<'a> {
         }
 
         Ok(())
+    }
+
+    fn create_pre_entry(&mut self, specialized_entry: Block, args: &[AbstractValue]) -> Block {
+        // Define a pre-entry block that ties supposedly
+        // specialized-on-constant params to actual constants. This "bakes
+        // in" the values so we don't need to provide them to the
+        // specialized function. (The signature remains the same, we just
+        // ignore the actual passed-in values.)
+        let pre_entry = self.func.add_block();
+        let mut pre_entry_args = vec![];
+        for (ty, _) in &self.generic.blocks[self.generic.entry].params {
+            let param = self.func.add_blockparam(pre_entry, *ty);
+            pre_entry_args.push(param);
+        }
+        for (i, abs) in args.iter().enumerate() {
+            let ty = self.generic.blocks[self.generic.entry].params[i].0;
+            match ty {
+                Type::I32 => {
+                    if let Some(value) = abs.is_const_u32() {
+                        let tys = self.func.type_pool.single(Type::I32);
+                        let const_op = self.func.add_value(ValueDef::Operator(
+                            Operator::I32Const { value },
+                            ListRef::default(),
+                            tys,
+                        ));
+                        self.func.append_to_block(pre_entry, const_op);
+                        pre_entry_args[i] = const_op;
+                    }
+                }
+                Type::I64 => {
+                    if let Some(value) = abs.is_const_u64() {
+                        let tys = self.func.type_pool.single(Type::I64);
+                        let const_op = self.func.add_value(ValueDef::Operator(
+                            Operator::I64Const { value },
+                            ListRef::default(),
+                            tys,
+                        ));
+                        self.func.append_to_block(pre_entry, const_op);
+                        pre_entry_args[i] = const_op;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        self.func.blocks[pre_entry].terminator = Terminator::Br {
+            target: BlockTarget {
+                block: specialized_entry,
+                args: pre_entry_args,
+            },
+        };
+
+        pre_entry
     }
 
     fn finalize(&mut self) -> anyhow::Result<()> {
