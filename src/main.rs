@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
-use structopt::StructOpt;
 
 mod directive;
 mod eval;
@@ -14,37 +13,29 @@ mod value;
 
 const STUBS: &str = include_str!("../lib/weval-stubs.wat");
 
-#[derive(Clone, Debug, StructOpt)]
-pub struct Options {
-    /// The input Wasm module.
-    #[structopt(short = "i")]
-    input_module: PathBuf,
-
-    /// The output Wasm module.
-    #[structopt(short = "o")]
-    output_module: PathBuf,
-
-    /// Whether to Wizen the module first.
-    #[structopt(short = "w")]
-    wizen: bool,
-
-    /// Whether to run in a strip-intrinsics-only mode.
-    #[structopt(long = "strip-intrinsics")]
-    strip_intrinsics: bool,
-
-    /// Run IR in interpreter differentially, before and after
-    /// wevaling, comparing trace outputs.
-    #[structopt(long = "run-diff")]
-    run_diff: bool,
-
-    /// Show stats on specialization code size.
-    #[structopt(long = "show-stats")]
-    show_stats: bool,
-}
-
 fn main() -> anyhow::Result<()> {
     let _ = env_logger::try_init();
-    let opts = Options::from_args();
+
+    let opts = xflags::parse_or_exit! {
+        /// The input Wasm module.
+        required -i,--input_module input_module: PathBuf
+
+        /// The output Wasm module.
+        required -o,--output_module output_module: PathBuf
+
+        /// Whether to Wizen the module first.
+        optional -w,--wizen
+
+        /// Whether to run in a strip-intrinsics-only mode.
+        optional --strip_intrinsics
+
+        /// Run IR in interpreter differentially, before and after
+        /// wevaling, comparing trace outputs.
+        optional --run_diff
+
+        /// Show stats on specialization code size.
+        optional --show_stats
+    };
 
     let raw_bytes = std::fs::read(&opts.input_module)?;
 
@@ -88,7 +79,7 @@ fn main() -> anyhow::Result<()> {
     // Partially evaluate.
     let progress = indicatif::ProgressBar::new(0);
     let mut result =
-        eval::partially_evaluate(module, &mut im, &directives[..], &opts, Some(progress))?;
+        eval::partially_evaluate(module, &mut im, &directives, opts.run_diff, Some(progress))?;
 
     // Update memories in module.
     image::update(&mut result.module, &im);

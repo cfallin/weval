@@ -11,7 +11,7 @@ exclude = ["/npm", "/ci"]
 [dependencies]
 waffle = "0.0.22"
 anyhow = "1.0"
-structopt = "0.3"
+xflags = "0.3.1"
 wasm-encoder = "0.41"
 wasmparser = "0.121"
 log = "0.4"

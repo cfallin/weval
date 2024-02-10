@@ -2404,11 +2404,11 @@ dependencies = [
  "indicatif",
  "log",
  "rayon",
- "structopt",
  "waffle",
  "wasm-encoder 0.41.1",
  "wasmparser 0.121.1",
  "wizer",
+ "xflags",
 ]
 
 [[package]]
@@ -2696,6 +2696,21 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
 ]
+
+[[package]]
+name = "xflags"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d9e15fbb3de55454b0106e314b28e671279009b363e6f1d8e39fdc3bf048944"
+dependencies = [
+ "xflags-macros",
+]
+
+[[package]]
+name = "xflags-macros"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "672423d4fea7ffa2f6c25ba60031ea13dc6258070556f125cc4d790007d4a155"
 
 [[package]]
 name = "zerocopy"

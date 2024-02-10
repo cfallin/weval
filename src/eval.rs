@@ -8,7 +8,6 @@ use crate::state::{
 };
 use crate::stats::SpecializationStats;
 use crate::value::{AbstractValue, ValueTags, WasmVal};
-use crate::Options;
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -70,7 +69,7 @@ pub fn partially_evaluate<'a>(
     mut module: Module<'a>,
     im: &mut Image,
     directives: &[Directive],
-    opts: &Options,
+    run_diff: bool,
     mut progress: Option<indicatif::ProgressBar>,
 ) -> anyhow::Result<PartialEvalResult<'a>> {
     let intrinsics = Intrinsics::find(&module);
@@ -97,7 +96,7 @@ pub fn partially_evaluate<'a>(
 
             f.convert_to_max_ssa(Some(cut_blocks));
 
-            if opts.run_diff {
+            if run_diff {
                 waffle::passes::trace::run(&mut f);
                 module.replace_body(directive.func, f.clone());
             }
@@ -105,11 +104,7 @@ pub fn partially_evaluate<'a>(
         }
     }
 
-    let mut orig_module = if opts.run_diff {
-        Some(module.clone())
-    } else {
-        None
-    };
+    let mut orig_module = if run_diff { Some(module.clone()) } else { None };
 
     if let Some(p) = progress.as_mut() {
         p.set_length(directives.len() as u64);
@@ -137,7 +132,7 @@ pub fn partially_evaluate<'a>(
                     .lock()
                     .unwrap()
                     .add_specialization(&body, &block_rev_map, &contexts);
-                let decl = if opts.run_diff {
+                let decl = if run_diff {
                     FuncDecl::Body(sig, name, body)
                 } else {
                     let body = match body.compile() {
@@ -173,7 +168,7 @@ pub fn partially_evaluate<'a>(
         // If we're doing differential testing, append to *original
         // module*'s function table too, but with the generic function
         // index.
-        if opts.run_diff {
+        if run_diff {
             let orig_func_table = &mut orig_module.as_mut().unwrap().tables[Table::from(0)];
             let orig_func_table_elts = orig_func_table.func_elements.as_mut().unwrap();
             assert_eq!(table_idx, orig_func_table_elts.len() as u32);
