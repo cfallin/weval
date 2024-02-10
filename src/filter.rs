@@ -14,7 +14,7 @@
 //!   - Otherwise, if any args, generate drops for all args.
 
 use fxhash::FxHashMap;
-use wasmparser::{ElementKind, ExternalKind, Parser, Payload, Type, TypeRef, ValType};
+use wasmparser::{ElementKind, ExternalKind, Parser, Payload, TypeRef, ValType};
 
 #[derive(Clone, Debug)]
 enum FuncRemap {
@@ -64,8 +64,13 @@ fn parser_to_encoder_ty(ty: wasmparser::ValType) -> wasm_encoder::ValType {
         wasmparser::ValType::F32 => wasm_encoder::ValType::F32,
         wasmparser::ValType::F64 => wasm_encoder::ValType::F64,
         wasmparser::ValType::V128 => wasm_encoder::ValType::V128,
-        wasmparser::ValType::FuncRef => wasm_encoder::ValType::FuncRef,
-        wasmparser::ValType::ExternRef => wasm_encoder::ValType::ExternRef,
+        wasmparser::ValType::Ref(wasmparser::RefType::FUNCREF) => {
+            wasm_encoder::ValType::Ref(wasm_encoder::RefType::FUNCREF)
+        }
+        wasmparser::ValType::Ref(wasmparser::RefType::EXTERNREF) => {
+            wasm_encoder::ValType::Ref(wasm_encoder::RefType::EXTERNREF)
+        }
+        ValType::Ref(_other) => todo!(),
     }
 }
 
@@ -89,11 +94,17 @@ impl Rewrite {
                 // Type section: copy all function types so we can refer to them later.
                 Payload::TypeSection(types) => {
                     for ty in types {
-                        let ty = ty?;
-                        let (args, results) = match ty {
-                            Type::Func(fty) => (fty.params().to_vec(), fty.results().to_vec()),
-                        };
-                        self.func_types.push((args, results));
+                        for t in ty?.into_types() {
+                            match t.composite_type {
+                                wasmparser::CompositeType::Func(f) => {
+                                    let args = f.params();
+                                    let results = f.results();
+                                    self.func_types.push((args.to_vec(), results.to_vec()));
+                                }
+                                wasmparser::CompositeType::Array(_) => {}
+                                wasmparser::CompositeType::Struct(_) => {}
+                            }
+                        }
                     }
                     true
                 }
@@ -178,28 +189,24 @@ impl Rewrite {
                     let mut out_elements = wasm_encoder::ElementSection::new();
                     for element in elements {
                         let element = element?;
-                        let mut out_items = vec![];
-                        for item in element.items.get_items_reader()? {
-                            let item = item?;
-                            match item {
-                                wasmparser::ElementItem::Func(f) => {
-                                    let new = self.func_remap.get(&f).unwrap().as_index()?;
-                                    out_items.push(new);
+                        // TODO unused?
+                        let out_items = [];
+                        match element.items {
+                            wasmparser::ElementItems::Functions(funcs) => {
+                                for func in funcs {
+                                    let func = func?;
+                                    self.func_remap.get(&func).unwrap().as_index()?;
                                 }
-                                _ => {}
                             }
+                            wasmparser::ElementItems::Expressions(_, _) => {}
                         }
-                        let ty = parser_to_encoder_ty(element.ty);
                         match element.kind {
                             ElementKind::Passive => {
-                                out_elements
-                                    .passive(ty, wasm_encoder::Elements::Functions(&out_items[..]));
+                                out_elements.passive(wasm_encoder::Elements::Functions(&out_items));
                             }
                             ElementKind::Declared => {
-                                out_elements.declared(
-                                    ty,
-                                    wasm_encoder::Elements::Functions(&out_items[..]),
-                                );
+                                out_elements
+                                    .declared(wasm_encoder::Elements::Functions(&out_items));
                             }
                             ElementKind::Active {
                                 table_index,
@@ -224,10 +231,9 @@ impl Rewrite {
                                     }
                                 }
                                 out_elements.active(
-                                    Some(table_index),
+                                    table_index,
                                     &const_expr.unwrap(),
-                                    ty,
-                                    wasm_encoder::Elements::Functions(&out_items[..]),
+                                    wasm_encoder::Elements::Functions(&out_items),
                                 );
                             }
                         }
@@ -324,23 +330,20 @@ impl Rewrite {
 
                 Payload::CustomSection(reader) if reader.name() == "name" => {
                     let name_reader =
-                        wasmparser::NameSectionReader::new(reader.data(), reader.data_offset())?;
+                        wasmparser::NameSectionReader::new(reader.data(), reader.data_offset());
                     let mut names = wasm_encoder::NameSection::new();
                     let mut func_names = wasm_encoder::NameMap::new();
                     for subsection in name_reader {
                         let subsection = subsection?;
-                        match subsection {
-                            wasmparser::Name::Function(names) => {
-                                for name in names {
-                                    let name = name?;
-                                    if let Some(&FuncRemap::Index(new_index)) =
-                                        self.func_remap.get(&name.index)
-                                    {
-                                        func_names.append(new_index, name.name);
-                                    }
+                        if let wasmparser::Name::Function(names) = subsection {
+                            for name in names {
+                                let name = name?;
+                                if let Some(&FuncRemap::Index(new_index)) =
+                                    self.func_remap.get(&name.index)
+                                {
+                                    func_names.append(new_index, name.name);
                                 }
                             }
-                            _ => {}
                         }
                     }
                     names.functions(&func_names);
