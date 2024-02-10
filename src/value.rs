@@ -21,7 +21,7 @@ impl WasmVal {
 
     pub fn integer_value(self) -> Option<u64> {
         match self {
-            WasmVal::I32(i) => Some(i as u64),
+            WasmVal::I32(i) => Some(i.into()),
             WasmVal::I64(i) => Some(i),
             _ => None,
         }
@@ -33,7 +33,7 @@ impl WasmVal {
             waffle::Type::I64 => Some(WasmVal::I64(bits)),
             waffle::Type::F32 => Some(WasmVal::F32(bits as u32)),
             waffle::Type::F64 => Some(WasmVal::F64(bits)),
-            waffle::Type::V128 => Some(WasmVal::V128(bits as u128)),
+            waffle::Type::V128 => Some(WasmVal::V128(u128::from(bits))),
             waffle::Type::FuncRef => None,
         }
     }
@@ -43,8 +43,8 @@ impl std::convert::TryFrom<waffle::Operator> for WasmVal {
     type Error = ();
     fn try_from(op: waffle::Operator) -> Result<Self, Self::Error> {
         match op {
-            waffle::Operator::I32Const { value } => Ok(WasmVal::I32(value as u32)),
-            waffle::Operator::I64Const { value } => Ok(WasmVal::I64(value as u64)),
+            waffle::Operator::I32Const { value } => Ok(WasmVal::I32(value)),
+            waffle::Operator::I64Const { value } => Ok(WasmVal::I64(value)),
             waffle::Operator::F32Const { value } => Ok(WasmVal::F32(value)),
             waffle::Operator::F64Const { value } => Ok(WasmVal::F64(value)),
             _ => Err(()),
@@ -96,33 +96,34 @@ impl std::ops::BitOr<ValueTags> for ValueTags {
     }
 }
 impl ValueTags {
-    pub fn contains(&self, tags: ValueTags) -> bool {
+    pub fn contains(self, tags: ValueTags) -> bool {
         (self.0 & tags.0) == tags.0
     }
-    pub fn meet(&self, other: ValueTags) -> ValueTags {
+    pub fn meet(self, other: ValueTags) -> ValueTags {
         // - const_memory and const_memory_transitive merge as intersection.
         ValueTags((self.0 & 3) & (other.0 & 3))
     }
     /// Get the tags that are "sticky": propagate across all ops.
     pub fn sticky(&self) -> ValueTags {
+        // TODO self is unused
         ValueTags(0)
     }
 }
 
 impl AbstractValue {
     pub fn tags(&self) -> ValueTags {
-        match self {
-            &AbstractValue::Top => ValueTags::default(),
-            &AbstractValue::Concrete(_, t) => t,
-            &AbstractValue::Runtime(_, t) => t,
+        match *self {
+            AbstractValue::Top => ValueTags::default(),
+            AbstractValue::Concrete(_, t) => t,
+            AbstractValue::Runtime(_, t) => t,
         }
     }
 
     pub fn with_tags(&self, new_tags: ValueTags) -> AbstractValue {
-        match self {
-            &AbstractValue::Top => AbstractValue::Top,
-            &AbstractValue::Concrete(k, t) => AbstractValue::Concrete(k, t | new_tags),
-            &AbstractValue::Runtime(v, t) => AbstractValue::Runtime(v, t | new_tags),
+        match *self {
+            AbstractValue::Top => AbstractValue::Top,
+            AbstractValue::Concrete(k, t) => AbstractValue::Concrete(k, t | new_tags),
+            AbstractValue::Runtime(v, t) => AbstractValue::Runtime(v, t | new_tags),
         }
     }
 
@@ -154,15 +155,15 @@ impl AbstractValue {
     }
 
     pub fn is_const_u32(&self) -> Option<u32> {
-        match self {
-            &AbstractValue::Concrete(WasmVal::I32(k), _) => Some(k),
+        match *self {
+            AbstractValue::Concrete(WasmVal::I32(k), _) => Some(k),
             _ => None,
         }
     }
 
     pub fn is_const_u64(&self) -> Option<u64> {
-        match self {
-            &AbstractValue::Concrete(WasmVal::I64(k), _) => Some(k),
+        match *self {
+            AbstractValue::Concrete(WasmVal::I64(k), _) => Some(k),
             _ => None,
         }
     }

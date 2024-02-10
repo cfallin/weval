@@ -79,7 +79,7 @@ impl Intrinsics {
 fn sig_matches(module: &Module, f: Func, in_tys: &[Type], out_tys: &[Type]) -> bool {
     let sig = module.funcs[f].sig();
     let sig = &module.signatures[sig];
-    &sig.params[..] == in_tys && &sig.returns[..] == out_tys
+    &sig.params == in_tys && &sig.returns == out_tys
 }
 
 pub fn find_imported_intrinsic(
@@ -125,14 +125,14 @@ pub fn find_global_data_by_exported_func(module: &Module, name: &str) -> Option<
         Terminator::Return { values } => {
             assert_eq!(values.len(), 1);
             match &body.values[values[0]] {
-                ValueDef::Operator(Operator::I32Const { value }, _, _) => Some(*value as u32),
+                ValueDef::Operator(Operator::I32Const { value }, _, _) => Some(*value),
                 _ => None,
             }
         }
         Terminator::Br { target } => {
             assert_eq!(target.args.len(), 1);
             let val = match &body.values[target.args[0]] {
-                ValueDef::Operator(Operator::I32Const { value }, _, _) => *value as u32,
+                ValueDef::Operator(Operator::I32Const { value }, _, _) => *value,
                 _ => return None,
             };
             match &body.blocks[target.block].terminator {

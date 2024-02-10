@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
@@ -13,7 +12,7 @@ mod state;
 mod stats;
 mod value;
 
-const STUBS: &'static str = include_str!("../lib/weval-stubs.wat");
+const STUBS: &str = include_str!("../lib/weval-stubs.wat");
 
 #[derive(Clone, Debug, StructOpt)]
 pub struct Options {
@@ -58,21 +57,20 @@ fn main() -> anyhow::Result<()> {
         w.wasm_bulk_memory(true);
         w.preload_bytes("weval", STUBS.as_bytes().to_vec())?;
         w.func_rename("_start", "wizer.resume");
-        w.run(&raw_bytes[..])?
+        w.run(&raw_bytes)?
     } else {
         raw_bytes
     };
 
     if opts.strip_intrinsics {
-        let bytes = filter::filter(&module_bytes[..])?;
-        std::fs::write(&opts.output_module, &bytes[..])?;
+        let bytes = filter::filter(&module_bytes)?;
+        std::fs::write(&opts.output_module, bytes)?;
         return Ok(());
     }
 
     // Load module.
-    let mut frontend_opts = waffle::FrontendOptions::default();
-    frontend_opts.debug = true;
-    let mut module = waffle::Module::from_wasm_bytes(&module_bytes[..], &frontend_opts)?;
+    let frontend_opts = waffle::FrontendOptions { debug: true };
+    let mut module = waffle::Module::from_wasm_bytes(&module_bytes, &frontend_opts)?;
 
     // If we're going to run the interpreter, we need to expand all
     // functions.
@@ -127,12 +125,12 @@ fn main() -> anyhow::Result<()> {
     let bytes = result.module.to_wasm_bytes()?;
 
     let bytes = if opts.wizen {
-        filter::filter(&bytes[..])?
+        filter::filter(&bytes)?
     } else {
         bytes
     };
 
-    std::fs::write(&opts.output_module, &bytes[..])?;
+    std::fs::write(&opts.output_module, bytes)?;
 
     Ok(())
 }
@@ -200,10 +198,10 @@ fn run_diff(orig_module: waffle::Module<'_>, wevaled_module: waffle::Module<'_>)
     let wevaled = TraceIter::new(wevaled_module.without_orig_bytes());
 
     let mut progress: u64 = 0;
-    let mut last_n = VecDeque::new();
+    let mut last_n = std::collections::VecDeque::new();
     for ((orig_id, orig_args), (wevaled_id, wevaled_args)) in orig.zip(wevaled) {
         progress += 1;
-        if progress % 100000 == 0 {
+        if progress % 100_000 == 0 {
             eprintln!("{} steps", progress);
         }
 

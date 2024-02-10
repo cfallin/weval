@@ -3,13 +3,15 @@
 use crate::directive::Directive;
 use crate::image::Image;
 use crate::intrinsics::Intrinsics;
-use crate::state::*;
+use crate::state::{
+    Context, ContextElem, Contexts, FunctionState, PointState, ProgPointState, RegValue,
+};
 use crate::stats::SpecializationStats;
 use crate::value::{AbstractValue, ValueTags, WasmVal};
 use crate::Options;
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
-use rayon::prelude::*;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::collections::{hash_map::Entry as HashEntry, BTreeSet, VecDeque};
 use std::sync::Mutex;
 use waffle::cfg::CFGInfo;
@@ -82,7 +84,7 @@ pub fn partially_evaluate<'a>(
 
     let mut funcs = HashMap::default();
     for directive in &directives {
-        if !funcs.contains_key(&directive.func) {
+        if let std::collections::hash_map::Entry::Vacant(e) = funcs.entry(directive.func) {
             let mut f = module.clone_and_expand_body(directive.func)?;
 
             let stats = Mutex::new(SpecializationStats::new(directive.func, &f));
@@ -99,7 +101,7 @@ pub fn partially_evaluate<'a>(
                 waffle::passes::trace::run(&mut f);
                 module.replace_body(directive.func, f.clone());
             }
-            funcs.insert(directive.func, (f, cfg, stats));
+            e.insert((f, cfg, stats));
         }
     }
 
@@ -115,9 +117,7 @@ pub fn partially_evaluate<'a>(
 
     let directives = directives
         .iter()
-        .zip(std::iter::from_fn(move || {
-            Some(progress.as_ref().map(|bar| bar.clone()))
-        }))
+        .zip(std::iter::from_fn(move || Some(progress.clone())))
         .collect::<Vec<_>>();
     let bodies = directives
         .par_iter()
@@ -256,12 +256,12 @@ fn partially_evaluate_func(
     evaluator.queue_set.insert((evaluator.generic.entry, ctx));
     evaluator.state.set_args(
         evaluator.generic,
-        &directive.const_params[..],
+        &directive.const_params,
         ctx,
         &evaluator.value_map,
     );
 
-    let pre_entry = evaluator.create_pre_entry(specialized_entry, &directive.const_params[..]);
+    let pre_entry = evaluator.create_pre_entry(specialized_entry, &directive.const_params);
     evaluator.func.entry = pre_entry;
 
     let success = evaluator.evaluate()?;
@@ -380,10 +380,8 @@ fn find_cut_blocks(
             let changed = new != current;
             highest_same_ctx_ancestor[succ] = new;
             log::trace!("highest same-context ancestor for {}: {}", succ, new);
-            if changed {
-                if queue_set.insert(succ) {
-                    queue.push(succ);
-                }
+            if changed && queue_set.insert(succ) {
+                queue.push(succ);
             }
         });
     }
@@ -452,10 +450,7 @@ enum EvalResult {
 }
 impl EvalResult {
     fn is_handled(&self) -> bool {
-        match self {
-            &EvalResult::Unhandled => false,
-            _ => true,
-        }
+        !matches!(self, &EvalResult::Unhandled)
     }
 }
 
@@ -525,7 +520,7 @@ impl<'a> Evaluator<'a> {
             &mut |mem_blockparam_map, idx| {
                 mem_blockparam_map.remove(&(ctx, orig_block, idx));
             },
-        )?;
+        );
 
         // Do the actual constant-prop, carrying the state across the
         // block and updating flow-sensitive state, and updating SSA
@@ -691,7 +686,7 @@ impl<'a> Evaluator<'a> {
                         inst,
                         *op,
                         loc,
-                        /* abstract values = */ &arg_abs_values[..],
+                        /* abstract values = */ &arg_abs_values,
                         /* new values = */ arg_values,
                         /* orig_values = */ args_slice,
                         tys_slice,
@@ -703,7 +698,7 @@ impl<'a> Evaluator<'a> {
                     let specialized_tys = self
                         .func
                         .type_pool
-                        .from_iter(self.generic.type_pool[*tys].iter().cloned());
+                        .from_iter(self.generic.type_pool[*tys].iter().copied());
                     match result {
                         EvalResult::Unhandled => unreachable!(),
                         EvalResult::Alias(av, val) => Some((ValueDef::Alias(val), av)),
@@ -1020,7 +1015,7 @@ impl<'a> Evaluator<'a> {
                     },
                 }
             }
-            &Terminator::Br { ref target } => {
+            Terminator::Br { target } => {
                 if let ContextElem::PendingSpecialize(index, lo, hi) =
                     self.state.contexts.leaf_element(new_context)
                 {
@@ -1112,7 +1107,7 @@ impl<'a> Evaluator<'a> {
                     }
                 }
             }
-            &Terminator::Return { ref values } => {
+            Terminator::Return { values } => {
                 let values = values
                     .iter()
                     .map(|&value| {
@@ -1189,7 +1184,7 @@ impl<'a> Evaluator<'a> {
                     let tags = abs
                         .iter()
                         .map(|av| av.tags().sticky())
-                        .reduce(|a, b| a.meet(b))
+                        .reduce(super::value::ValueTags::meet)
                         .unwrap();
                     AbstractValue::Runtime(Some(orig_inst), tags)
                 }
@@ -1285,9 +1280,10 @@ impl<'a> Evaluator<'a> {
                     let line_num = abs[0].is_const_u32().unwrap_or(0);
                     let fatal = abs[1].is_const_u32().unwrap_or(0);
                     log::trace!("abort-specialization point: line {}", line_num);
-                    if fatal != 0 {
-                        panic!("Specialization reached a point it shouldn't have!");
-                    }
+                    assert!(
+                        fatal == 0,
+                        "Specialization reached a point it shouldn't have!"
+                    );
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.trace_line {
                     let line_num = abs[0].is_const_u32().unwrap_or(0);
@@ -1296,18 +1292,20 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_const32 {
                     log::trace!("assert_const32: abs {:?} line {:?}", abs[0], abs[1]);
-                    if abs[0].is_const_u32().is_none() {
-                        panic!(
-                            "weval_assert_const32() failed: {:?}: line {:?}",
-                            abs[0], abs[1]
-                        );
-                    }
+                    assert!(
+                        abs[0].is_const_u32().is_some(),
+                        "weval_assert_const32() failed: {:?}: line {:?}",
+                        abs[0],
+                        abs[1]
+                    );
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_const_memory {
                     log::trace!("assert_const_memory: abs {:?} line {:?}", abs[0], abs[1]);
-                    if !abs[0].tags().contains(ValueTags::const_memory()) {
-                        panic!("weval_assert_const_memory() failed: line {:?}", abs[1]);
-                    }
+                    assert!(
+                        abs[0].tags().contains(ValueTags::const_memory()),
+                        "weval_assert_const_memory() failed: line {:?}",
+                        abs[1]
+                    );
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.print {
                     let message_ptr = abs[0].is_const_u32().unwrap();
@@ -1349,14 +1347,10 @@ impl<'a> Evaluator<'a> {
                         return Ok(EvalResult::Alias(abs.clone(), *data));
                     }
                     Some(v) => {
-                        anyhow::bail!(
-                            "Specialization register {} in bad state {:?} at read",
-                            idx,
-                            v
-                        );
+                        anyhow::bail!("Specialization register {idx} in bad state {v:?} at read",);
                     }
                     None => {
-                        anyhow::bail!("Specialization register {} not set", idx);
+                        anyhow::bail!("Specialization register {idx} not set");
                     }
                 }
             }
@@ -1456,19 +1450,19 @@ impl<'a> Evaluator<'a> {
                 Ok(AbstractValue::Concrete(WasmVal::I32(k.leading_zeros()), *t))
             }
             (Operator::I64Clz, AbstractValue::Concrete(WasmVal::I64(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k.leading_zeros() as u64), *t),
+                AbstractValue::Concrete(WasmVal::I64(u64::from(k.leading_zeros())), *t),
             ),
             (Operator::I32Ctz, AbstractValue::Concrete(WasmVal::I32(k), t)) => Ok(
                 AbstractValue::Concrete(WasmVal::I32(k.trailing_zeros()), *t),
             ),
             (Operator::I64Ctz, AbstractValue::Concrete(WasmVal::I64(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k.trailing_zeros() as u64), *t),
+                AbstractValue::Concrete(WasmVal::I64(u64::from(k.trailing_zeros())), *t),
             ),
             (Operator::I32Popcnt, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
                 Ok(AbstractValue::Concrete(WasmVal::I32(k.count_ones()), *t))
             }
             (Operator::I64Popcnt, AbstractValue::Concrete(WasmVal::I64(k), t)) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k.count_ones() as u64), *t),
+                AbstractValue::Concrete(WasmVal::I64(u64::from(k.count_ones())), *t),
             ),
             (Operator::I32WrapI64, AbstractValue::Concrete(WasmVal::I64(k), t)) => {
                 Ok(AbstractValue::Concrete(WasmVal::I32(*k as u32), *t))
@@ -1477,16 +1471,17 @@ impl<'a> Evaluator<'a> {
                 AbstractValue::Concrete(WasmVal::I64(*k as i32 as i64 as u64), *t),
             ),
             (Operator::I64ExtendI32U, AbstractValue::Concrete(WasmVal::I32(k), t)) => {
-                Ok(AbstractValue::Concrete(WasmVal::I64(*k as u64), *t))
+                Ok(AbstractValue::Concrete(WasmVal::I64(u64::from(*k)), *t))
             }
 
-            (Operator::I32Load { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-            | (Operator::I32Load8U { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-            | (Operator::I32Load8S { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-            | (Operator::I32Load16U { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-            | (Operator::I32Load16S { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-                if t.contains(ValueTags::const_memory()) =>
-            {
+            (
+                Operator::I32Load { memory }
+                | Operator::I32Load8U { memory }
+                | Operator::I32Load8S { memory }
+                | Operator::I32Load16U { memory }
+                | Operator::I32Load16S { memory },
+                AbstractValue::Concrete(WasmVal::I32(k), t),
+            ) if t.contains(ValueTags::const_memory()) => {
                 use anyhow::Context;
 
                 log::trace!(
@@ -1505,16 +1500,16 @@ impl<'a> Evaluator<'a> {
                 };
                 let conv = |x: u64| match op {
                     Operator::I32Load { .. } => x as u32,
-                    Operator::I32Load8U { .. } => x as u8 as u32,
-                    Operator::I32Load8S { .. } => x as i8 as i32 as u32,
-                    Operator::I32Load16U { .. } => x as u16 as u32,
-                    Operator::I32Load16S { .. } => x as i16 as i32 as u32,
+                    Operator::I32Load8U { .. } => u32::from(x as u8),
+                    Operator::I32Load8S { .. } => i32::from(x as i8) as u32,
+                    Operator::I32Load16U { .. } => u32::from(x as u16),
+                    Operator::I32Load16S { .. } => i32::from(x as i16) as u32,
                     _ => unreachable!(),
                 };
 
                 let val = self
                     .image
-                    .read_size(memory.memory, k + memory.offset as u32, size)
+                    .read_size(memory.memory, k + memory.offset, size)
                     .with_context(|| {
                         format!("Out-of-bounds constant load: value {} is {}", orig_x_val, k)
                     })?;
@@ -1531,15 +1526,16 @@ impl<'a> Evaluator<'a> {
                 Ok(val)
             }
 
-            (Operator::I64Load { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-            | (Operator::I64Load8U { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-            | (Operator::I64Load8S { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-            | (Operator::I64Load16U { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-            | (Operator::I64Load16S { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-            | (Operator::I64Load32U { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-            | (Operator::I64Load32S { memory }, AbstractValue::Concrete(WasmVal::I32(k), t))
-                if t.contains(ValueTags::const_memory()) =>
-            {
+            (
+                Operator::I64Load { memory }
+                | Operator::I64Load8U { memory }
+                | Operator::I64Load8S { memory }
+                | Operator::I64Load16U { memory }
+                | Operator::I64Load16S { memory }
+                | Operator::I64Load32U { memory }
+                | Operator::I64Load32S { memory },
+                AbstractValue::Concrete(WasmVal::I32(k), t),
+            ) if t.contains(ValueTags::const_memory()) => {
                 let size = match op {
                     Operator::I64Load { .. } => 8,
                     Operator::I64Load8U { .. } => 1,
@@ -1552,18 +1548,18 @@ impl<'a> Evaluator<'a> {
                 };
                 let conv = |x: u64| match op {
                     Operator::I64Load { .. } => x,
-                    Operator::I64Load8U { .. } => x as u8 as u64,
-                    Operator::I64Load8S { .. } => x as i8 as i64 as u64,
-                    Operator::I64Load16U { .. } => x as u16 as u64,
-                    Operator::I64Load16S { .. } => x as i16 as i64 as u64,
-                    Operator::I64Load32U { .. } => x as u32 as u64,
-                    Operator::I64Load32S { .. } => x as i32 as i64 as u64,
+                    Operator::I64Load8U { .. } => u64::from(x as u8),
+                    Operator::I64Load8S { .. } => i64::from(x as i8) as u64,
+                    Operator::I64Load16U { .. } => u64::from(x as u16),
+                    Operator::I64Load16S { .. } => i64::from(x as i16) as u64,
+                    Operator::I64Load32U { .. } => u64::from(x as u32),
+                    Operator::I64Load32S { .. } => i64::from(x as i32) as u64,
                     _ => unreachable!(),
                 };
 
                 let val = self
                     .image
-                    .read_size(memory.memory, k + memory.offset as u32, size)?;
+                    .read_size(memory.memory, k + memory.offset, size)?;
                 // N.B.: memory const-ness is *not* transitive unless
                 // specified as such!  The user needs to opt in at
                 // each level of indirection.
@@ -1860,8 +1856,7 @@ impl<'a> Evaluator<'a> {
         z: &AbstractValue,
     ) -> AbstractValue {
         let result = match (op, z) {
-            (Operator::Select, AbstractValue::Concrete(v, _t))
-            | (Operator::TypedSelect { .. }, AbstractValue::Concrete(v, _t)) => {
+            (Operator::Select | Operator::TypedSelect { .. }, AbstractValue::Concrete(v, _t)) => {
                 if v.is_truthy() {
                     x.clone()
                 } else {

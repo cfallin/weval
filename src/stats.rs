@@ -1,10 +1,7 @@
 //! Post-specialization stats.
 
 use crate::state::{Context, Contexts};
-use fxhash::FxHashSet;
-use std::collections::BTreeMap;
-use waffle::entity::PerEntity;
-use waffle::{Block, Func, FunctionBody};
+use waffle::{entity::PerEntity, Block, Func, FunctionBody};
 
 #[derive(Clone, Debug, Default)]
 pub struct SpecializationStats {
@@ -14,17 +11,13 @@ pub struct SpecializationStats {
     pub specializations: usize,
     pub specialized_blocks: usize,
     pub specialized_insts: usize,
-    pub blocks_and_insts_by_bucket: BTreeMap<Option<u32>, (usize, usize)>,
+    pub blocks_and_insts_by_bucket: std::collections::BTreeMap<Option<u32>, (usize, usize)>,
 }
 
 impl SpecializationStats {
     pub fn new(generic: Func, body: &FunctionBody) -> Self {
-        let mut ret = Self::default();
-        ret.generic = generic;
-        let (blocks, insts) = count_reachable_blocks_and_insts(body, |_, _| ());
-        ret.generic_blocks = blocks;
-        ret.generic_insts = insts;
-        ret
+        let (generic_blocks, generic_insts) = count_reachable_blocks_and_insts(body, |_, _| ());
+        Self { generic, generic_blocks, generic_insts, ..Default::default() }
     }
 
     pub fn add_specialization(
@@ -54,7 +47,7 @@ fn count_reachable_blocks_and_insts<F: FnMut(Block, usize)>(
     mut visit: F,
 ) -> (usize, usize) {
     let mut queue = vec![body.entry];
-    let mut visited = queue.iter().cloned().collect::<FxHashSet<_>>();
+    let mut visited = queue.iter().copied().collect::<fxhash::FxHashSet<_>>();
     let mut insts = 0;
     while let Some(block) = queue.pop() {
         let block_insts = body.blocks[block].insts.len();

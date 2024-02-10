@@ -25,12 +25,12 @@ pub fn build_image(module: &Module) -> anyhow::Result<Image> {
         memories: module
             .memories
             .entries()
-            .flat_map(|(id, mem)| maybe_mem_image(mem).map(|image| (id, image)))
+            .filter_map(|(id, mem)| maybe_mem_image(mem).map(|image| (id, image)))
             .collect(),
         globals: module
             .globals
             .entries()
-            .flat_map(|(global_id, data)| match data.value {
+            .filter_map(|(global_id, data)| match data.value {
                 Some(bits) => Some((global_id, WasmVal::from_bits(data.ty, bits)?)),
                 _ => None,
             })
@@ -55,8 +55,7 @@ fn maybe_mem_image(mem: &MemoryData) -> Option<MemImage> {
     let mut image = vec![0; len];
 
     for segment in &mem.segments {
-        image[segment.offset..(segment.offset + segment.data.len())]
-            .copy_from_slice(&segment.data[..]);
+        image[segment.offset..(segment.offset + segment.data.len())].copy_from_slice(&segment.data);
     }
 
     Some(MemImage { image, len })
@@ -95,7 +94,7 @@ impl Image {
         image
             .image
             .get(addr as usize)
-            .cloned()
+            .copied()
             .ok_or_else(|| anyhow::anyhow!("Out of bounds"))
     }
 
@@ -122,20 +121,20 @@ impl Image {
     pub fn read_u64(&self, id: Memory, addr: u32) -> anyhow::Result<u64> {
         let low = self.read_u32(id, addr)?;
         let high = self.read_u32(id, addr + 4)?;
-        Ok((high as u64) << 32 | (low as u64))
+        Ok(u64::from(high) << 32 | u64::from(low))
     }
 
     pub fn read_u128(&self, id: Memory, addr: u32) -> anyhow::Result<u128> {
         let low = self.read_u64(id, addr)?;
         let high = self.read_u64(id, addr + 8)?;
-        Ok((high as u128) << 64 | (low as u128))
+        Ok(u128::from(high) << 64 | u128::from(low))
     }
 
     pub fn read_size(&self, id: Memory, addr: u32, size: u8) -> anyhow::Result<u64> {
         match size {
-            1 => self.read_u8(id, addr).map(|x| x as u64),
-            2 => self.read_u16(id, addr).map(|x| x as u64),
-            4 => self.read_u32(id, addr).map(|x| x as u64),
+            1 => self.read_u8(id, addr).map(u64::from),
+            2 => self.read_u16(id, addr).map(u64::from),
+            4 => self.read_u32(id, addr).map(u64::from),
             8 => self.read_u64(id, addr),
             _ => panic!("bad size"),
         }
@@ -151,7 +150,7 @@ impl Image {
             bytes.push(byte);
             addr += 1;
         }
-        Ok(std::str::from_utf8(&bytes[..])?.to_owned())
+        Ok(std::str::from_utf8(&bytes)?.to_owned())
     }
 
     pub fn write_u8(&mut self, id: Memory, addr: u32, value: u8) -> anyhow::Result<()> {
@@ -170,7 +169,7 @@ impl Image {
             anyhow::bail!("Out of bounds");
         }
         let slice = &mut image.image[addr..(addr + 4)];
-        slice.copy_from_slice(&value.to_le_bytes()[..]);
+        slice.copy_from_slice(&value.to_le_bytes());
         Ok(())
     }
 
@@ -178,12 +177,11 @@ impl Image {
         let table = self
             .main_table
             .ok_or_else(|| anyhow::anyhow!("no main table"))?;
-        Ok(self
-            .tables
+        self.tables
             .get(&table)
             .unwrap()
             .get(idx as usize)
             .copied()
-            .ok_or_else(|| anyhow::anyhow!("func ptr out of bounds"))?)
+            .ok_or_else(|| anyhow::anyhow!("func ptr out of bounds"))
     }
 }

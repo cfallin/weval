@@ -73,7 +73,7 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
                 1 => AbstractValue::Concrete(WasmVal::I64(im.read_u64(heap, arg_ptr + 8)?), tags),
                 2 => AbstractValue::Concrete(WasmVal::F32(im.read_u32(heap, arg_ptr + 8)?), tags),
                 3 => AbstractValue::Concrete(WasmVal::F64(im.read_u64(heap, arg_ptr + 8)?), tags),
-                _ => anyhow::bail!("Invalid type: {}", ty),
+                _ => anyhow::bail!("Invalid type: {ty}"),
             }
         } else {
             AbstractValue::Runtime(None, tags)

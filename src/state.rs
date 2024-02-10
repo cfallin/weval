@@ -214,7 +214,7 @@ fn map_meet_with<
     this: &mut BTreeMap<K, V>,
     other: &BTreeMap<K, V>,
     meet: Meet,
-    bot: Option<V>,
+    bot: &Option<V>,
 ) -> bool {
     let mut changed = false;
     let mut to_remove = vec![];
@@ -229,7 +229,7 @@ fn map_meet_with<
                 *val = bot.clone();
                 changed |= old != *val;
             } else {
-                to_remove.push(k.clone());
+                to_remove.push(*k);
                 changed = true;
             }
         }
@@ -276,13 +276,13 @@ impl ProgPointState {
 
     pub fn meet_with(&mut self, other: &ProgPointState) -> bool {
         let mut changed = false;
-        changed |= map_meet_with(&mut self.regs, &other.regs, RegValue::meet, None);
+        changed |= map_meet_with(&mut self.regs, &other.regs, RegValue::meet, &None);
 
         changed |= map_meet_with(
             &mut self.globals,
             &other.globals,
             AbstractValue::meet,
-            Some(AbstractValue::Runtime(None, ValueTags::default())),
+            &Some(AbstractValue::Runtime(None, ValueTags::default())),
         );
         changed
     }
@@ -309,7 +309,7 @@ impl ProgPointState {
         ctx: &mut C,
         get_blockparam: &mut GB,
         remove_blockparam: &mut RB,
-    ) -> anyhow::Result<()> {
+    ) {
         let mut to_remove = vec![];
         for (&idx, value) in &mut self.regs {
             match value {
@@ -331,7 +331,6 @@ impl ProgPointState {
         for to_remove in to_remove {
             self.regs.remove(&to_remove);
         }
-        Ok(())
     }
 }
 

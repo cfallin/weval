@@ -43,7 +43,7 @@ fn gen_replacement_bytecode(
 ) -> anyhow::Result<Vec<wasm_encoder::Instruction<'static>>> {
     anyhow::ensure!(results.len() <= 1);
     anyhow::ensure!(results.len() <= args.len());
-    if args.len() > 0 && results.len() > 0 {
+    if !args.is_empty() && !results.is_empty() {
         anyhow::ensure!(
             args[0] == results[0],
             "Intrinsic's first arg is different type than result"
@@ -88,8 +88,7 @@ impl Rewrite {
             let payload = payload?;
             let raw_section = payload.as_section();
             let transcribe = match payload {
-                Payload::Version { .. } => false,
-                Payload::End(..) => false,
+                Payload::Version { .. } | Payload::End(..) => false,
 
                 // Type section: copy all function types so we can refer to them later.
                 Payload::TypeSection(types) => {
@@ -115,7 +114,7 @@ impl Rewrite {
                 Payload::ImportSection(imports) => {
                     let mut out_imports = wasm_encoder::ImportSection::new();
 
-                    for import in imports.into_iter() {
+                    for import in imports {
                         let import = import?;
                         match import.ty {
                             TypeRef::Func(fty) => {
@@ -140,7 +139,7 @@ impl Rewrite {
                                     out_func_idx += 1;
                                 }
                             }
-                            ty => anyhow::bail!("import type {:?} not supported", ty),
+                            ty => anyhow::bail!("import type {ty:?} not supported"),
                         }
                     }
 
@@ -267,7 +266,7 @@ impl Rewrite {
                     for entry in code.get_operators_reader()?.into_iter_with_offsets() {
                         let (op, offset) = entry?;
                         if !skip {
-                            func.raw(module[last_offset..offset].iter().cloned());
+                            func.raw(module[last_offset..offset].iter().copied());
                         }
                         last_offset = offset;
 
@@ -315,7 +314,7 @@ impl Rewrite {
                         };
                     }
                     if !skip {
-                        func.raw(module[last_offset..code.range().end].iter().cloned());
+                        func.raw(module[last_offset..code.range().end].iter().copied());
                     }
 
                     out_code_section.function(&func);
