@@ -14,7 +14,7 @@
 //!   - Otherwise, if any args, generate drops for all args.
 
 use fxhash::FxHashMap;
-use wasmparser::{ElementKind, ExternalKind, Parser, Payload, Type, TypeRef, ValType};
+use wasmparser::{ElementItems, ElementKind, ExternalKind, Parser, Payload, TypeRef, ValType};
 
 #[derive(Clone, Debug)]
 enum FuncRemap {
@@ -64,8 +64,13 @@ fn parser_to_encoder_ty(ty: wasmparser::ValType) -> wasm_encoder::ValType {
         wasmparser::ValType::F32 => wasm_encoder::ValType::F32,
         wasmparser::ValType::F64 => wasm_encoder::ValType::F64,
         wasmparser::ValType::V128 => wasm_encoder::ValType::V128,
-        wasmparser::ValType::FuncRef => wasm_encoder::ValType::FuncRef,
-        wasmparser::ValType::ExternRef => wasm_encoder::ValType::ExternRef,
+        wasmparser::ValType::Ref(wasmparser::RefType::FUNCREF) => {
+            wasm_encoder::ValType::Ref(wasm_encoder::RefType::FUNCREF)
+        }
+        wasmparser::ValType::Ref(wasmparser::RefType::EXTERNREF) => {
+            wasm_encoder::ValType::Ref(wasm_encoder::RefType::EXTERNREF)
+        }
+        _ => panic!("Unknown type: {ty:?}"),
     }
 }
 
@@ -88,11 +93,9 @@ impl Rewrite {
 
                 // Type section: copy all function types so we can refer to them later.
                 Payload::TypeSection(types) => {
-                    for ty in types {
-                        let ty = ty?;
-                        let (args, results) = match ty {
-                            Type::Func(fty) => (fty.params().to_vec(), fty.results().to_vec()),
-                        };
+                    for fty in types.into_iter_err_on_gc_types() {
+                        let fty = fty?;
+                        let (args, results) = (fty.params().to_vec(), fty.results().to_vec());
                         self.func_types.push((args, results));
                     }
                     true
@@ -179,27 +182,22 @@ impl Rewrite {
                     for element in elements {
                         let element = element?;
                         let mut out_items = vec![];
-                        for item in element.items.get_items_reader()? {
-                            let item = item?;
-                            match item {
-                                wasmparser::ElementItem::Func(f) => {
-                                    let new = self.func_remap.get(&f).unwrap().as_index()?;
-                                    out_items.push(new);
-                                }
-                                _ => {}
-                            }
+                        let ElementItems::Functions(funcs) = element.items else {
+                            continue;
+                        };
+                        for f in funcs {
+                            let f = f?;
+                            let new = self.func_remap.get(&f).unwrap().as_index()?;
+                            out_items.push(new);
                         }
-                        let ty = parser_to_encoder_ty(element.ty);
                         match element.kind {
                             ElementKind::Passive => {
                                 out_elements
-                                    .passive(ty, wasm_encoder::Elements::Functions(&out_items[..]));
+                                    .passive(wasm_encoder::Elements::Functions(&out_items[..]));
                             }
                             ElementKind::Declared => {
-                                out_elements.declared(
-                                    ty,
-                                    wasm_encoder::Elements::Functions(&out_items[..]),
-                                );
+                                out_elements
+                                    .declared(wasm_encoder::Elements::Functions(&out_items[..]));
                             }
                             ElementKind::Active {
                                 table_index,
@@ -224,9 +222,8 @@ impl Rewrite {
                                     }
                                 }
                                 out_elements.active(
-                                    Some(table_index),
+                                    table_index,
                                     &const_expr.unwrap(),
-                                    ty,
                                     wasm_encoder::Elements::Functions(&out_items[..]),
                                 );
                             }
@@ -324,7 +321,7 @@ impl Rewrite {
 
                 Payload::CustomSection(reader) if reader.name() == "name" => {
                     let name_reader =
-                        wasmparser::NameSectionReader::new(reader.data(), reader.data_offset())?;
+                        wasmparser::NameSectionReader::new(reader.data(), reader.data_offset());
                     let mut names = wasm_encoder::NameSection::new();
                     let mut func_names = wasm_encoder::NameMap::new();
                     for subsection in name_reader {
