@@ -4,8 +4,6 @@ use waffle::{ExportKind, Func, ImportKind, Module, Operator, Terminator, Type, V
 
 #[derive(Clone, Debug)]
 pub struct Intrinsics {
-    pub assume_const_memory: Option<Func>,
-    pub assume_const_memory_transitive: Option<Func>,
     pub read_reg: Option<Func>,
     pub write_reg: Option<Func>,
     pub push_context: Option<Func>,
@@ -15,7 +13,6 @@ pub struct Intrinsics {
     pub abort_specialization: Option<Func>,
     pub trace_line: Option<Func>,
     pub assert_const32: Option<Func>,
-    pub assert_const_memory: Option<Func>,
     pub specialize_value: Option<Func>,
     pub print: Option<Func>,
 }
@@ -23,18 +20,6 @@ pub struct Intrinsics {
 impl Intrinsics {
     pub fn find(module: &Module) -> Intrinsics {
         Intrinsics {
-            assume_const_memory: find_imported_intrinsic(
-                module,
-                "assume.const.memory",
-                &[Type::I32],
-                &[Type::I32],
-            ),
-            assume_const_memory_transitive: find_imported_intrinsic(
-                module,
-                "assume.const.memory.transitive",
-                &[Type::I32],
-                &[Type::I32],
-            ),
             read_reg: find_imported_intrinsic(module, "read.reg", &[Type::I64], &[Type::I64]),
             write_reg: find_imported_intrinsic(module, "write.reg", &[Type::I64, Type::I64], &[]),
             push_context: find_imported_intrinsic(module, "push.context", &[Type::I32], &[]),
@@ -51,12 +36,6 @@ impl Intrinsics {
             assert_const32: find_imported_intrinsic(
                 module,
                 "assert.const32",
-                &[Type::I32, Type::I32],
-                &[],
-            ),
-            assert_const_memory: find_imported_intrinsic(
-                module,
-                "assert.const.memory",
                 &[Type::I32, Type::I32],
                 &[],
             ),

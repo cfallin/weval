@@ -27,6 +27,7 @@ typedef enum {
   weval_req_arg_i64 = 1,
   weval_req_arg_f32 = 2,
   weval_req_arg_f64 = 3,
+  weval_req_arg_buffer = 4,
 } weval_req_arg_type;
 
 struct weval_req_arg_t {
@@ -37,6 +38,10 @@ struct weval_req_arg_t {
     uint64_t i64;
     float f32;
     double f64;
+    struct {
+      void* ptr;
+      uint32_t len;
+    } buffer;
   } u;
 };
 
@@ -99,8 +104,6 @@ void weval_abort_specialization(uint32_t line_number, uint32_t fatal)
     WEVAL_WASM_IMPORT("abort.specialization");
 void weval_assert_const32(uint32_t value, uint32_t line_no)
     WEVAL_WASM_IMPORT("assert.const32");
-void weval_assert_const_memory(void* p, uint32_t line_no)
-    WEVAL_WASM_IMPORT("assert.const.memory");
 uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi)
     WEVAL_WASM_IMPORT("specialize.value");
 void weval_print(const char* message, uint32_t line, uint32_t val)
@@ -116,29 +119,9 @@ void weval_context_bucket(uint32_t bucket) WEVAL_WASM_IMPORT("context.bucket");
 
 #ifdef __cplusplus
 namespace weval {
-template <typename T>
-const T* assume_const_memory(const T* t) {
-  return (const T*)weval_assume_const_memory((const void*)t);
-}
-template <typename T>
-T* assume_const_memory(T* t) {
-  return (T*)weval_assume_const_memory((void*)t);
-}
-template <typename T>
-const T* assume_const_memory_transitive(const T* t) {
-  return (const T*)weval_assume_const_memory_transitive((const void*)t);
-}
-template <typename T>
-T* assume_const_memory_transitive(T* t) {
-  return (T*)weval_assume_const_memory_transitive((void*)t);
-}
-
 static inline void push_context(uint32_t pc) { weval_push_context(pc); }
-
 static inline void pop_context() { weval_pop_context(); }
-
 static inline void update_context(uint32_t pc) { weval_update_context(pc); }
-
 }  // namespace weval
 #endif  // __cplusplus
 
@@ -164,6 +147,13 @@ template <typename T>
 struct Specialize : ArgSpec<T> {
   T value;
   explicit Specialize(T value_) : value(value_) {}
+};
+
+template<typename T>
+struct SpecializeMemory : ArgSpec<T*> {
+  T* ptr;
+  uint32_t len;
+  SpecializeMemory(T* ptr_, uint32_t len_) : ptr(ptr_), len(len_) {}
 };
 
 namespace impl {
@@ -248,6 +238,17 @@ template <typename T, typename... Rest>
 struct StoreArgs<Specialize<T>, Rest...> {
   void operator()(weval_req_arg_t* args, Specialize<T> arg0, Rest... rest) {
     StoreArg<T>()(args, arg0.value);
+    StoreArgs<Rest...>()(args + 1, rest...);
+  }
+};
+
+template <typename T, typename... Rest>
+struct StoreArgs<SpecializeMemory<T>, Rest...> {
+  void operator()(weval_req_arg_t* args, SpecializeMemory<T> arg0, Rest... rest) {
+    args->specialize = 1;
+    args->ty = weval_req_arg_buffer;
+    args->u.buffer.ptr = arg0.ptr;
+    args->u.buffer.len = arg0.len;
     StoreArgs<Rest...>()(args + 1, rest...);
   }
 };

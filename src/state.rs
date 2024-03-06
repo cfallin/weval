@@ -35,7 +35,7 @@
 //! context implies leaving the current loop.
 
 use crate::image::Image;
-use crate::value::{AbstractValue, ValueTags};
+use crate::value::AbstractValue;
 use fxhash::FxHashMap as HashMap;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -266,7 +266,7 @@ impl ProgPointState {
         let globals = im
             .globals
             .keys()
-            .map(|global| (*global, AbstractValue::Runtime(None, ValueTags::default())))
+            .map(|global| (*global, AbstractValue::Runtime(None)))
             .collect();
         ProgPointState {
             regs: BTreeMap::new(),
@@ -282,7 +282,7 @@ impl ProgPointState {
             &mut self.globals,
             &other.globals,
             AbstractValue::meet,
-            Some(AbstractValue::Runtime(None, ValueTags::default())),
+            Some(AbstractValue::Runtime(None)),
         );
         changed
     }

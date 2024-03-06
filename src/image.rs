@@ -90,6 +90,16 @@ impl Image {
             .ok_or_else(|| anyhow::anyhow!("no main heap"))
     }
 
+    pub fn read_slice(&self, id: Memory, addr: u32, len: u32) -> anyhow::Result<&[u8]> {
+        let image = self.memories.get(&id).unwrap();
+        let addr = usize::try_from(addr).unwrap();
+        let len = usize::try_from(len).unwrap();
+        if addr + len >= image.image.len() {
+            anyhow::bail!("Out of bounds");
+        }
+        Ok(&image.image[addr..(addr + len)])
+    }
+
     pub fn read_u8(&self, id: Memory, addr: u32) -> anyhow::Result<u8> {
         let image = self.memories.get(&id).unwrap();
         image
