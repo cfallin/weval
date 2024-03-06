@@ -91,8 +91,9 @@ const void* weval_assume_const_memory_transitive(const void* p)
 void weval_push_context(uint32_t pc) WEVAL_WASM_IMPORT("push.context");
 void weval_pop_context() WEVAL_WASM_IMPORT("pop.context");
 void weval_update_context(uint32_t pc) WEVAL_WASM_IMPORT("update.context");
-void* weval_make_symbolic_ptr(void* p) WEVAL_WASM_IMPORT("make.symbolic.ptr");
-void weval_flush_to_mem() WEVAL_WASM_IMPORT("flush.to.mem");
+uint64_t weval_read_reg(uint64_t idx) WEVAL_WASM_IMPORT("read.reg");
+void weval_write_reg(uint64_t idx, uint64_t value)
+    WEVAL_WASM_IMPORT("write.reg");
 void weval_trace_line(uint32_t line_number) WEVAL_WASM_IMPORT("trace.line");
 void weval_abort_specialization(uint32_t line_number, uint32_t fatal)
     WEVAL_WASM_IMPORT("abort.specialization");
@@ -137,14 +138,6 @@ static inline void push_context(uint32_t pc) { weval_push_context(pc); }
 static inline void pop_context() { weval_pop_context(); }
 
 static inline void update_context(uint32_t pc) { weval_update_context(pc); }
-template <typename T>
-static T* make_symbolic_ptr(T* t) {
-  return (T*)weval_make_symbolic_ptr((void*)t);
-}
-template <typename T>
-void flush_to_mem() {
-  weval_flush_to_mem();
-}
 
 }  // namespace weval
 #endif  // __cplusplus
