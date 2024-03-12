@@ -150,7 +150,7 @@ pub fn partially_evaluate<'a>(
                 };
                 Some(Ok((directive, decl)))
             } else {
-                log::info!("Failed to weval for directive {:?}", directive);
+                log::warn!("Failed to weval for directive {:?}", directive);
                 None
             }
         })
