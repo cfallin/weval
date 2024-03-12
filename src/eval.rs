@@ -1820,6 +1820,9 @@ impl<'a> Evaluator<'a> {
                     y.clone()
                 }
             }
+            // Concrete-memory symbolic pointers are always truthy.
+            (Operator::Select, AbstractValue::ConcreteMemory(..))
+            | (Operator::TypedSelect { .. }, AbstractValue::ConcreteMemory(..)) => x.clone(),
             _ => AbstractValue::Runtime(Some(orig_inst)),
         }
     }
