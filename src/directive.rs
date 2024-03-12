@@ -33,7 +33,7 @@ impl MemoryBuffer {
     pub fn read_size(&self, offset: u32, size: u32) -> anyhow::Result<u64> {
         let offset = usize::try_from(offset).unwrap();
         let size = usize::try_from(size).unwrap();
-        if offset + size >= self.data.len() {
+        if offset + size > self.data.len() {
             anyhow::bail!("Out of bounds");
         }
         let slice = &self.data[offset..(offset + size)];
