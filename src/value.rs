@@ -96,21 +96,29 @@ impl AbstractValue {
         }
     }
 
-    pub fn is_const_u32(&self) -> Option<u32> {
+    pub fn as_const_u32(&self) -> Option<u32> {
         match self {
             &AbstractValue::Concrete(WasmVal::I32(k)) => Some(k),
             _ => None,
         }
     }
 
-    pub fn is_const_u64(&self) -> Option<u64> {
+    pub fn as_const_u32_or_mem_offset(&self) -> Option<u32> {
+        match self {
+            &AbstractValue::Concrete(WasmVal::I32(k)) => Some(k),
+            &AbstractValue::ConcreteMemory(_, off) => Some(off),
+            _ => None,
+        }
+    }
+
+    pub fn as_const_u64(&self) -> Option<u64> {
         match self {
             &AbstractValue::Concrete(WasmVal::I64(k)) => Some(k),
             _ => None,
         }
     }
 
-    pub fn is_const_truthy(&self) -> Option<bool> {
-        self.is_const_u32().map(|k| k != 0)
+    pub fn as_const_truthy(&self) -> Option<bool> {
+        self.as_const_u32().map(|k| k != 0)
     }
 }

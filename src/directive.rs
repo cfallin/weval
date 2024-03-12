@@ -2,7 +2,7 @@
 
 use crate::image::Image;
 use crate::intrinsics::find_global_data_by_exported_func;
-use crate::value::{AbstractValue, WasmVal};
+use crate::value::{AbstractValue, MemoryBufferIndex, WasmVal};
 use std::sync::Arc;
 use waffle::{Func, Memory, Module};
 
@@ -71,7 +71,7 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
     let mut head = im.read_u32(heap, pending_head_addr)?;
     let mut directives = vec![];
     while head != 0 {
-        log::info!("direct at {:#x}", head);
+        log::info!("directive at {:#x}", head);
         directives.push(decode_weval_req(im, heap, head)?);
         let next = im.read_u32(heap, head)?;
         let prev = im.read_u32(heap, head + 4)?;
@@ -101,6 +101,7 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
     let mut const_params = vec![];
     let mut const_memory = vec![];
     let mut arg = argbuf;
+    let mut i = 0;
     while arg < argbuf_end {
         let is_specialized = im.read_u32(heap, arg)?;
         let ty = im.read_u32(heap, arg + 4)?;
@@ -132,7 +133,11 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
                     let data = MemoryBuffer {
                         data: Arc::new(im.read_slice(heap, arg + 16, len)?.to_vec()),
                     };
-                    (AbstractValue::Runtime(None), Some(data), 16 + padded_len)
+                    (
+                        AbstractValue::ConcreteMemory(MemoryBufferIndex(i), 0),
+                        Some(data),
+                        16 + padded_len,
+                    )
                 }
                 _ => anyhow::bail!("Invalid type: {}", ty),
             }
@@ -142,15 +147,8 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
         const_params.push(value);
         const_memory.push(mem);
         arg += arglen;
+        i += 1;
     }
-
-    println!(
-        "decode_weval_req: func {} with value-params {:?} memory-params {:?} -> ptr at {:#x}",
-        func,
-        const_params,
-        const_memory,
-        func_index_out_addr
-    );
 
     Ok(Directive {
         func,

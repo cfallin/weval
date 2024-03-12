@@ -985,7 +985,7 @@ impl<'a> Evaluator<'a> {
                 ref if_false,
             } => {
                 let (cond, abs_cond) = self.use_value(state.context, orig_block, new_block, cond);
-                match abs_cond.is_const_truthy() {
+                match abs_cond.as_const_truthy() {
                     Some(true) => Terminator::Br {
                         target: self.evaluate_block_target(
                             orig_block,
@@ -1072,7 +1072,7 @@ impl<'a> Evaluator<'a> {
             } => {
                 let (value, abs_value) =
                     self.use_value(state.context, orig_block, new_block, value);
-                if let Some(selector) = abs_value.is_const_u32() {
+                if let Some(selector) = abs_value.as_const_u32() {
                     let selector = selector as usize;
                     let target = if selector < targets.len() {
                         &targets[selector]
@@ -1212,7 +1212,7 @@ impl<'a> Evaluator<'a> {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.push_context {
                     let pc = abs[0]
-                        .is_const_u32()
+                        .as_const_u32_or_mem_offset()
                         .expect("PC should not be a runtime value");
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
                     let child = self
@@ -1232,7 +1232,7 @@ impl<'a> Evaluator<'a> {
                     log::trace!("update context at {}: PC is {:?}", orig_values[0], abs[0]);
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
                     let parent = self.state.contexts.pop_one_loop(instantaneous_context);
-                    let pending_context = if let Some(pc) = abs[0].is_const_u32() {
+                    let pending_context = if let Some(pc) = abs[0].as_const_u32_or_mem_offset() {
                         Some(
                             self.state
                                 .contexts
@@ -1246,13 +1246,13 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.context_bucket {
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
-                    let bucket = abs[0].is_const_u32().unwrap();
+                    let bucket = abs[0].as_const_u32().unwrap();
                     self.state.contexts.context_bucket[instantaneous_context] = Some(bucket);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.specialize_value {
                     let instantaneous_context = state.pending_context.unwrap_or(state.context);
-                    let lo = abs[1].is_const_u32().unwrap();
-                    let hi = abs[2].is_const_u32().unwrap();
+                    let lo = abs[1].as_const_u32().unwrap();
+                    let hi = abs[2].as_const_u32().unwrap();
                     let child = self.state.contexts.create(
                         Some(instantaneous_context),
                         ContextElem::PendingSpecialize(orig_inst, lo, hi),
@@ -1266,21 +1266,21 @@ impl<'a> Evaluator<'a> {
                     state.pending_context = Some(child);
                     EvalResult::Alias(abs[0].clone(), self.func.arg_pool[values][0])
                 } else if Some(function_index) == self.intrinsics.abort_specialization {
-                    let line_num = abs[0].is_const_u32().unwrap_or(0);
-                    let fatal = abs[1].is_const_u32().unwrap_or(0);
+                    let line_num = abs[0].as_const_u32().unwrap_or(0);
+                    let fatal = abs[1].as_const_u32().unwrap_or(0);
                     log::trace!("abort-specialization point: line {}", line_num);
                     if fatal != 0 {
                         panic!("Specialization reached a point it shouldn't have!");
                     }
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.trace_line {
-                    let line_num = abs[0].is_const_u32().unwrap_or(0);
+                    let line_num = abs[0].as_const_u32().unwrap_or(0);
                     log::debug!("trace: line number {}: current context {} at block {}, pending context {:?}",
                                 line_num, state.context, orig_block, state.pending_context);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_const32 {
                     log::trace!("assert_const32: abs {:?} line {:?}", abs[0], abs[1]);
-                    if abs[0].is_const_u32().is_none() {
+                    if abs[0].as_const_u32().is_none() {
                         panic!(
                             "weval_assert_const32() failed: {:?}: line {:?}",
                             abs[0], abs[1]
@@ -1288,12 +1288,12 @@ impl<'a> Evaluator<'a> {
                     }
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.print {
-                    let message_ptr = abs[0].is_const_u32().unwrap();
+                    let message_ptr = abs[0].as_const_u32().unwrap();
                     let message = self
                         .image
                         .read_str(self.image.main_heap.unwrap(), message_ptr)
                         .unwrap();
-                    let line = abs[1].is_const_u32().unwrap();
+                    let line = abs[1].as_const_u32().unwrap();
                     let val = abs[2].clone();
                     log::info!("print: line {}: {}: {:?}", line, message, val);
                     EvalResult::Elide
@@ -1319,7 +1319,7 @@ impl<'a> Evaluator<'a> {
             Operator::Call { function_index }
                 if Some(function_index) == self.intrinsics.read_reg =>
             {
-                let idx = abs[0].is_const_u64().expect("Non-constant register number");
+                let idx = abs[0].as_const_u64().expect("Non-constant register number");
                 log::trace!("load from specialization reg {}", idx);
                 match state.flow.regs.get(&idx) {
                     Some(RegValue::Value { data, abs, .. }) => {
@@ -1341,7 +1341,7 @@ impl<'a> Evaluator<'a> {
             Operator::Call { function_index }
                 if Some(function_index) == self.intrinsics.write_reg =>
             {
-                let idx = abs[0].is_const_u64().expect("Non-constant register number");
+                let idx = abs[0].as_const_u64().expect("Non-constant register number");
                 let data = self.func.arg_pool[vals][1];
                 log::trace!(
                     "store to specialization reg {} value {} abs {:?}",
@@ -1888,7 +1888,7 @@ impl<'a> Evaluator<'a> {
             let ty = self.generic.blocks[self.generic.entry].params[i].0;
             match ty {
                 Type::I32 => {
-                    if let Some(value) = abs.is_const_u32() {
+                    if let Some(value) = abs.as_const_u32() {
                         let tys = self.func.type_pool.single(Type::I32);
                         let const_op = self.func.add_value(ValueDef::Operator(
                             Operator::I32Const { value },
@@ -1900,7 +1900,7 @@ impl<'a> Evaluator<'a> {
                     }
                 }
                 Type::I64 => {
-                    if let Some(value) = abs.is_const_u64() {
+                    if let Some(value) = abs.as_const_u64() {
                         let tys = self.func.type_pool.single(Type::I64);
                         let const_op = self.func.add_value(ValueDef::Operator(
                             Operator::I64Const { value },
