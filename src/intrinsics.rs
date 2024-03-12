@@ -99,21 +99,35 @@ pub fn find_global_data_by_exported_func(module: &Module, name: &str) -> Option<
     body.parse(module).unwrap();
     let body = body.body()?;
 
-    // Find the `return`; its value should be an I32Const.
-    match &body.blocks[body.entry].terminator {
-        Terminator::Return { values } => {
-            assert_eq!(values.len(), 1);
-            match &body.values[values[0]] {
-                ValueDef::Operator(Operator::I32Const { value }, _, _) => Some(*value as u32),
+    // Find the `return`; its value should be an I32Const or maybe an
+    // I32ADd of a global (the GOT memory base) and an I32Const.
+
+    let extract_const_value = |value| match &body.values[value] {
+        ValueDef::Operator(Operator::I32Const { value }, _, _) => Some(*value as u32),
+        ValueDef::Operator(Operator::I32Add, args, _) => {
+            let args = &body.arg_pool[*args];
+            match (&body.values[args[0]], &body.values[args[1]]) {
+                (
+                    ValueDef::Operator(Operator::GlobalGet { global_index }, _, _),
+                    ValueDef::Operator(Operator::I32Const { value }, _, _),
+                ) => match module.globals[*global_index].value {
+                    Some(global_value) => Some((global_value as u32) + *value),
+                    _ => None,
+                },
                 _ => None,
             }
         }
+        _ => None,
+    };
+
+    match &body.blocks[body.entry].terminator {
+        Terminator::Return { values } => {
+            assert_eq!(values.len(), 1);
+            extract_const_value(values[0])
+        }
         Terminator::Br { target } => {
             assert_eq!(target.args.len(), 1);
-            let val = match &body.values[target.args[0]] {
-                ValueDef::Operator(Operator::I32Const { value }, _, _) => *value as u32,
-                _ => return None,
-            };
+            let val = extract_const_value(target.args[0])?;
             match &body.blocks[target.block].terminator {
                 Terminator::Return { values }
                     if values.len() == 1 && values[0] == body.blocks[target.block].params[0].1 =>

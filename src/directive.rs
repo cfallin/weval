@@ -61,6 +61,8 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
         }
     };
 
+    log::info!("weval request list head at {:#x}", pending_head_addr);
+
     let heap = match im.main_heap {
         Some(heap) => heap,
         None => return Ok(vec![]),
@@ -69,6 +71,7 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
     let mut head = im.read_u32(heap, pending_head_addr)?;
     let mut directives = vec![];
     while head != 0 {
+        log::info!("direct at {:#x}", head);
         directives.push(decode_weval_req(im, heap, head)?);
         let next = im.read_u32(heap, head)?;
         let prev = im.read_u32(heap, head + 4)?;
@@ -91,50 +94,63 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
 fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Directive> {
     let func_table_index = im.read_u32(heap, head + 8)?;
     let func = im.func_ptr(func_table_index)?;
-    let mut arg_ptr = im.read_u32(heap, head + 12)?;
-    let nargs = im.read_u32(heap, head + 16)?;
+    let argbuf = im.read_u32(heap, head + 12)?;
+    let argbuf_end = argbuf + im.read_u32(heap, head + 16)?;
     let func_index_out_addr = im.read_u32(heap, head + 20)?;
 
     let mut const_params = vec![];
     let mut const_memory = vec![];
-    for _ in 0..nargs {
-        let is_specialized = im.read_u32(heap, arg_ptr)?;
-        let ty = im.read_u32(heap, arg_ptr + 4)?;
-        let (value, mem) = if is_specialized != 0 {
+    let mut arg = argbuf;
+    while arg < argbuf_end {
+        let is_specialized = im.read_u32(heap, arg)?;
+        let ty = im.read_u32(heap, arg + 4)?;
+        let (value, mem, arglen) = if is_specialized != 0 {
             match ty {
                 0 => (
-                    AbstractValue::Concrete(WasmVal::I32(im.read_u32(heap, arg_ptr + 8)?)),
+                    AbstractValue::Concrete(WasmVal::I32(im.read_u32(heap, arg + 8)?)),
                     None,
+                    16,
                 ),
                 1 => (
-                    AbstractValue::Concrete(WasmVal::I64(im.read_u64(heap, arg_ptr + 8)?)),
+                    AbstractValue::Concrete(WasmVal::I64(im.read_u64(heap, arg + 8)?)),
                     None,
+                    16,
                 ),
                 2 => (
-                    AbstractValue::Concrete(WasmVal::F32(im.read_u32(heap, arg_ptr + 8)?)),
+                    AbstractValue::Concrete(WasmVal::F32(im.read_u32(heap, arg + 8)?)),
                     None,
+                    16,
                 ),
                 3 => (
-                    AbstractValue::Concrete(WasmVal::F64(im.read_u64(heap, arg_ptr + 8)?)),
+                    AbstractValue::Concrete(WasmVal::F64(im.read_u64(heap, arg + 8)?)),
                     None,
+                    16,
                 ),
                 4 => {
-                    let ptr = im.read_u32(heap, arg_ptr + 8)?;
-                    let len = im.read_u32(heap, arg_ptr + 12)?;
+                    let len = im.read_u32(heap, arg + 8)?;
+                    let padded_len = im.read_u32(heap, arg + 12)?;
                     let data = MemoryBuffer {
-                        data: Arc::new(im.read_slice(heap, ptr, len)?.to_vec()),
+                        data: Arc::new(im.read_slice(heap, arg + 16, len)?.to_vec()),
                     };
-                    (AbstractValue::Runtime(None), Some(data))
+                    (AbstractValue::Runtime(None), Some(data), 16 + padded_len)
                 }
                 _ => anyhow::bail!("Invalid type: {}", ty),
             }
         } else {
-            (AbstractValue::Runtime(None), None)
+            (AbstractValue::Runtime(None), None, 16)
         };
         const_params.push(value);
         const_memory.push(mem);
-        arg_ptr += 16;
+        arg += arglen;
     }
+
+    println!(
+        "decode_weval_req: func {} with value-params {:?} memory-params {:?} -> ptr at {:#x}",
+        func,
+        const_params,
+        const_memory,
+        func_index_out_addr
+    );
 
     Ok(Directive {
         func,
