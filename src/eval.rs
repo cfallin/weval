@@ -1799,6 +1799,14 @@ impl<'a> Evaluator<'a> {
                 AbstractValue::ConcreteMemory(buf.clone(), offset.wrapping_sub(*k))
             }
 
+            // ptr OP ptr
+            (
+                AbstractValue::ConcreteMemory(buf1, offset1),
+                AbstractValue::ConcreteMemory(buf2, offset2),
+            ) if op == Operator::I32Sub && buf1 == buf2 => {
+                AbstractValue::Concrete(WasmVal::I32(offset1.wrapping_sub(*offset2)))
+            }
+
             _ => AbstractValue::Runtime(Some(orig_inst)),
         }
     }
