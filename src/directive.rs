@@ -3,22 +3,31 @@
 use crate::image::Image;
 use crate::intrinsics::find_global_data_by_exported_func;
 use crate::value::{AbstractValue, WasmVal};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use waffle::{Func, Memory, Module};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Directive {
     /// User-given ID for the weval'd function.
     pub user_id: u32,
     /// Evaluate the given function.
+    #[serde(skip)]
     pub func: Func,
+    /// Evaluate with the given arguments, encoded as a bytestring.
+    pub args: Vec<u8>,
+    /// Place the ID of the resulting specialized function at the
+    /// given address in memory.
+    #[serde(skip)]
+    pub func_index_out_addr: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct DirectiveArgs {
     /// Evaluate with the given parameter values fixed.
     pub const_params: Vec<AbstractValue>,
     /// Evaluate with the given symbolic memory buffers.
     pub const_memory: Vec<Option<MemoryBuffer>>,
-    /// Place the ID of the resulting specialized function at the
-    /// given address in memory.
-    pub func_index_out_addr: u32,
 }
 
 /// A "symbolic pointer" backing buffer: if we are specializing a
@@ -29,6 +38,15 @@ pub struct Directive {
 pub struct MemoryBuffer {
     /// The bytes in memory at this pointer.
     data: Arc<Vec<u8>>,
+}
+
+/// Saved directive, able to be reinjected later in a new context.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SavedDirective {
+    /// User-defined weval site.
+    pub user_id: u32,
+    /// Serialized argument request string.
+    pub args: Vec<u8>,
 }
 
 impl MemoryBuffer {
@@ -94,57 +112,94 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
     let user_id = im.read_u32(heap, head + 8)?;
     let func_table_index = im.read_u32(heap, head + 12)?;
     let func = im.func_ptr(func_table_index)?;
-    let mut arg_ptr = im.read_u32(heap, head + 16)?;
-    let arglen = im.read_u32(heap, head + 20)?;
-    let arg_end = arg_ptr + arglen;
+    let arg_ptr = im.read_u32(heap, head + 16)?;
+    let arg_len = im.read_u32(heap, head + 20)?;
     let func_index_out_addr = im.read_u32(heap, head + 24)?;
-
-    let mut const_params = vec![];
-    let mut const_memory = vec![];
-    while arg_ptr < arg_end {
-        let is_specialized = im.read_u32(heap, arg_ptr)?;
-        let ty = im.read_u32(heap, arg_ptr + 4)?;
-        let (value, mem) = if is_specialized != 0 {
-            match ty {
-                0 => (
-                    AbstractValue::Concrete(WasmVal::I32(im.read_u32(heap, arg_ptr + 8)?)),
-                    None,
-                ),
-                1 => (
-                    AbstractValue::Concrete(WasmVal::I64(im.read_u64(heap, arg_ptr + 8)?)),
-                    None,
-                ),
-                2 => (
-                    AbstractValue::Concrete(WasmVal::F32(im.read_u32(heap, arg_ptr + 8)?)),
-                    None,
-                ),
-                3 => (
-                    AbstractValue::Concrete(WasmVal::F64(im.read_u64(heap, arg_ptr + 8)?)),
-                    None,
-                ),
-                4 => {
-                    let ptr = im.read_u32(heap, arg_ptr + 8)?;
-                    let len = im.read_u32(heap, arg_ptr + 12)?;
-                    let data = MemoryBuffer {
-                        data: Arc::new(im.read_slice(heap, ptr, len)?.to_vec()),
-                    };
-                    (AbstractValue::Runtime(None), Some(data))
-                }
-                _ => anyhow::bail!("Invalid type: {}", ty),
-            }
-        } else {
-            (AbstractValue::Runtime(None), None)
-        };
-        const_params.push(value);
-        const_memory.push(mem);
-        arg_ptr += 16;
-    }
-
+    let args = im.read_slice(heap, arg_ptr, arg_len)?.to_vec();
     Ok(Directive {
         user_id,
         func,
-        const_params,
-        const_memory,
+        args,
         func_index_out_addr,
     })
+}
+
+impl DirectiveArgs {
+    /// Decode an argument-request bytestring.
+    pub fn decode(bytes: &[u8]) -> anyhow::Result<DirectiveArgs> {
+        let mut const_params = vec![];
+        let mut const_memory = vec![];
+        let mut arg_ptr = 0;
+
+        let read_u32 = |addr| {
+            u32::from_le_bytes([
+                bytes[addr],
+                bytes[addr + 1],
+                bytes[addr + 2],
+                bytes[addr + 3],
+            ])
+        };
+        let read_u64 = |addr| {
+            u64::from_le_bytes([
+                bytes[addr],
+                bytes[addr + 1],
+                bytes[addr + 2],
+                bytes[addr + 3],
+                bytes[addr + 4],
+                bytes[addr + 5],
+                bytes[addr + 6],
+                bytes[addr + 7],
+            ])
+        };
+
+        while arg_ptr < bytes.len() {
+            let is_specialized = read_u32(arg_ptr);
+            let ty = read_u32(arg_ptr + 4);
+            let (value, mem, arg_len) = if is_specialized != 0 {
+                match ty {
+                    0 => (
+                        AbstractValue::Concrete(WasmVal::I32(read_u32(arg_ptr + 8))),
+                        None,
+                        16,
+                    ),
+                    1 => (
+                        AbstractValue::Concrete(WasmVal::I64(read_u64(arg_ptr + 8))),
+                        None,
+                        16,
+                    ),
+                    2 => (
+                        AbstractValue::Concrete(WasmVal::F32(read_u32(arg_ptr + 8))),
+                        None,
+                        16,
+                    ),
+                    3 => (
+                        AbstractValue::Concrete(WasmVal::F64(read_u64(arg_ptr + 8))),
+                        None,
+                        16,
+                    ),
+                    4 => {
+                        let len = read_u32(arg_ptr + 8);
+                        let padded_len = read_u32(arg_ptr + 12);
+                        let data = MemoryBuffer {
+                            data: Arc::new(
+                                bytes[arg_ptr..(arg_ptr + usize::try_from(len).unwrap())].to_vec(),
+                            ),
+                        };
+                        (AbstractValue::Runtime(None), Some(data), 16 + padded_len)
+                    }
+                    _ => anyhow::bail!("Invalid type: {}", ty),
+                }
+            } else {
+                (AbstractValue::Runtime(None), None, 16)
+            };
+            const_params.push(value);
+            const_memory.push(mem);
+            arg_ptr += usize::try_from(arg_len).unwrap();
+        }
+
+        Ok(DirectiveArgs {
+            const_params,
+            const_memory,
+        })
+    }
 }

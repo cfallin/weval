@@ -56,12 +56,20 @@ struct weval_req_arg_t {
 };
 
 extern weval_req_t* weval_req_pending_head;
+extern bool weval_is_wevaled;
 
 #define WEVAL_DEFINE_REQ_LIST()                                    \
   weval_req_t* weval_req_pending_head;                             \
   __attribute__((export_name("weval.pending.head"))) weval_req_t** \
   __weval_pending_head() {                                         \
     return &weval_req_pending_head;                                \
+  }
+
+#define WEVAL_DEFINE_WEVALED_FLAG()                      \
+  bool weval_is_wevaled;                                 \
+  __attribute__((export_name("weval.is.wevaled"))) bool* \
+  __weval_is_wevaled() {                                 \
+    return &weval_is_wevaled;                            \
   }
 
 static inline void weval_request(weval_req_t* req) {

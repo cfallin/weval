@@ -1,12 +1,11 @@
 //! Partial evaluation.
 
-use crate::directive::Directive;
+use crate::directive::{Directive, DirectiveArgs};
 use crate::image::Image;
 use crate::intrinsics::Intrinsics;
 use crate::state::*;
 use crate::stats::SpecializationStats;
 use crate::value::{AbstractValue, WasmVal};
-use crate::Options;
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
@@ -27,6 +26,8 @@ struct Evaluator<'a> {
     generic: &'a FunctionBody,
     /// The specialization directive.
     directive: &'a Directive,
+    /// The argument string from the directive, parsed.
+    directive_args: DirectiveArgs,
     /// Intrinsic function indices.
     intrinsics: &'a Intrinsics,
     /// Memory image.
@@ -59,7 +60,6 @@ struct Evaluator<'a> {
 }
 
 pub struct PartialEvalResult<'a> {
-    pub orig_module: Option<Module<'a>>,
     pub module: Module<'a>,
     pub stats: Vec<SpecializationStats>,
 }
@@ -70,7 +70,6 @@ pub fn partially_evaluate<'a>(
     mut module: Module<'a>,
     im: &mut Image,
     directives: &[Directive],
-    opts: &Options,
     mut progress: Option<indicatif::ProgressBar>,
 ) -> anyhow::Result<PartialEvalResult<'a>> {
     let intrinsics = Intrinsics::find(&module);
@@ -97,19 +96,9 @@ pub fn partially_evaluate<'a>(
 
             f.convert_to_max_ssa(Some(cut_blocks));
 
-            if opts.run_diff {
-                waffle::passes::trace::run(&mut f);
-                module.replace_body(directive.func, f.clone());
-            }
             funcs.insert(directive.func, (f, cfg, stats));
         }
     }
-
-    let mut orig_module = if opts.run_diff {
-        Some(module.clone())
-    } else {
-        None
-    };
 
     if let Some(p) = progress.as_mut() {
         p.set_length(directives.len() as u64);
@@ -139,9 +128,7 @@ pub fn partially_evaluate<'a>(
                     .lock()
                     .unwrap()
                     .add_specialization(&body, &block_rev_map, &contexts);
-                let decl = if opts.run_diff {
-                    FuncDecl::Body(sig, name, body)
-                } else {
+                let decl = {
                     let body = match body.compile() {
                         Ok(body) => body,
                         Err(e) => return Some(Err(e)),
@@ -172,19 +159,6 @@ pub fn partially_evaluate<'a>(
         log::info!("New func index {} -> table index {}", func, table_idx);
         log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
 
-        // If we're doing differential testing, append to *original
-        // module*'s function table too, but with the generic function
-        // index.
-        if opts.run_diff {
-            let orig_func_table = &mut orig_module.as_mut().unwrap().tables[Table::from(0)];
-            let orig_func_table_elts = orig_func_table.func_elements.as_mut().unwrap();
-            assert_eq!(table_idx, orig_func_table_elts.len() as u32);
-            orig_func_table_elts.push(directive.func);
-            if orig_func_table.max.is_some() && table_idx >= orig_func_table.max.unwrap() {
-                orig_func_table.max = Some(table_idx + 1);
-            }
-        }
-
         // Update memory image.
         mem_updates.insert(directive.func_index_out_addr, table_idx);
     }
@@ -201,11 +175,7 @@ pub fn partially_evaluate<'a>(
         .collect::<Vec<_>>();
     stats.sort_by_key(|stats| stats.generic);
 
-    Ok(PartialEvalResult {
-        orig_module,
-        module,
-        stats,
-    })
+    Ok(PartialEvalResult { module, stats })
 }
 
 fn partially_evaluate_func(
@@ -224,6 +194,7 @@ fn partially_evaluate_func(
         Contexts,
     )>,
 > {
+    let directive_args = DirectiveArgs::decode(&directive.args[..])?;
     let orig_name = module.funcs[directive.func].name();
     let sig = module.funcs[directive.func].sig();
 
@@ -236,6 +207,7 @@ fn partially_evaluate_func(
         module,
         generic,
         directive,
+        directive_args,
         intrinsics,
         image,
         cfg,
@@ -259,12 +231,12 @@ fn partially_evaluate_func(
     evaluator.queue_set.insert((evaluator.generic.entry, ctx));
     evaluator.state.set_args(
         evaluator.generic,
-        &directive.const_params[..],
+        &evaluator.directive_args.const_params[..],
         ctx,
         &evaluator.value_map,
     );
 
-    let pre_entry = evaluator.create_pre_entry(specialized_entry, &directive.const_params[..]);
+    let pre_entry = evaluator.create_pre_entry(specialized_entry);
     evaluator.func.entry = pre_entry;
 
     let success = evaluator.evaluate()?;
@@ -1489,7 +1461,7 @@ impl<'a> Evaluator<'a> {
                 let offset = offset
                     .checked_add(memory.offset)
                     .ok_or_else(|| anyhow::anyhow!("Invalid offset"))?;
-                let mem = self.directive.const_memory[buf.0 as usize]
+                let mem = self.directive_args.const_memory[buf.0 as usize]
                     .as_ref()
                     .unwrap();
                 let val = mem.read_size(offset, size)?;
@@ -1530,7 +1502,7 @@ impl<'a> Evaluator<'a> {
                     .checked_add(memory.offset)
                     .ok_or_else(|| anyhow::anyhow!("Invalid offset"))?;
 
-                let mem = self.directive.const_memory[buf.0 as usize]
+                let mem = self.directive_args.const_memory[buf.0 as usize]
                     .as_ref()
                     .unwrap();
                 let val = mem.read_size(offset, size)?;
@@ -1872,7 +1844,7 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
-    fn create_pre_entry(&mut self, specialized_entry: Block, args: &[AbstractValue]) -> Block {
+    fn create_pre_entry(&mut self, specialized_entry: Block) -> Block {
         // Define a pre-entry block that ties supposedly
         // specialized-on-constant params to actual constants. This "bakes
         // in" the values so we don't need to provide them to the
@@ -1884,7 +1856,7 @@ impl<'a> Evaluator<'a> {
             let param = self.func.add_blockparam(pre_entry, *ty);
             pre_entry_args.push(param);
         }
-        for (i, abs) in args.iter().enumerate() {
+        for (i, abs) in self.directive_args.const_params.iter().enumerate() {
             let ty = self.generic.blocks[self.generic.entry].params[i].0;
             match ty {
                 Type::I32 => {

@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
@@ -16,69 +15,108 @@ mod value;
 const STUBS: &'static str = include_str!("../lib/weval-stubs.wat");
 
 #[derive(Clone, Debug, StructOpt)]
-pub struct Options {
-    /// The input Wasm module.
-    #[structopt(short = "i")]
-    input_module: PathBuf,
+pub enum Command {
+    /// Partially evaluate a Wasm module, optionally wizening first.
+    Weval {
+        /// The input Wasm module.
+        #[structopt(short = "i")]
+        input_module: PathBuf,
 
-    /// The output Wasm module.
-    #[structopt(short = "o")]
-    output_module: PathBuf,
+        /// The output Wasm module.
+        #[structopt(short = "o")]
+        output_module: PathBuf,
 
-    /// Whether to Wizen the module first.
-    #[structopt(short = "w")]
-    wizen: bool,
+        /// Whether to Wizen the module first.
+        #[structopt(short = "w")]
+        wizen: bool,
 
-    /// Whether to run in a strip-intrinsics-only mode.
-    #[structopt(long = "strip-intrinsics")]
-    strip_intrinsics: bool,
+        /// Show stats on specialization code size.
+        #[structopt(long = "show-stats")]
+        show_stats: bool,
+    },
 
-    /// Run IR in interpreter differentially, before and after
-    /// wevaling, comparing trace outputs.
-    #[structopt(long = "run-diff")]
-    run_diff: bool,
+    /// Run a Wasm module normally, collecting all weval requests at
+    /// the end.
+    Collect {
+        /// The input Wasm module.
+        #[structopt(short = "i")]
+        input_module: PathBuf,
 
-    /// Show stats on specialization code size.
-    #[structopt(long = "show-stats")]
-    show_stats: bool,
+        /// The output weval request collection.
+        #[structopt(short = "o")]
+        output_requests: PathBuf,
+
+        /// Which weval sites to collect requests from, as a list of
+        /// integers.
+        #[structopt(short = "s")]
+        site: Vec<u32>,
+    },
+
+    /// Strip weval intrinsics without performing any other processing.
+    Strip {
+        /// The input Wasm module.
+        #[structopt(short = "i")]
+        input_module: PathBuf,
+
+        /// The output Wasm module.
+        #[structopt(short = "o")]
+        output_module: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let _ = env_logger::try_init();
-    let opts = Options::from_args();
+    let cmd = Command::from_args();
 
-    let raw_bytes = std::fs::read(&opts.input_module)?;
+    match cmd {
+        Command::Weval {
+            input_module,
+            output_module,
+            wizen,
+            show_stats,
+        } => weval(input_module, output_module, wizen, show_stats),
+        Command::Collect {
+            input_module,
+            output_requests,
+            site,
+        } => collect(input_module, output_requests, site),
+        Command::Strip {
+            input_module,
+            output_module,
+        } => strip(input_module, output_module),
+    }
+}
+
+fn wizen(raw_bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    let mut w = wizer::Wizer::new();
+    w.allow_wasi(true)?;
+    w.inherit_env(true);
+    w.dir(".");
+    w.wasm_bulk_memory(true);
+    w.preload_bytes("weval", STUBS.as_bytes().to_vec())?;
+    w.func_rename("_start", "wizer.resume");
+    w.run(&raw_bytes[..])
+}
+
+fn weval(
+    input_module: PathBuf,
+    output_module: PathBuf,
+    do_wizen: bool,
+    show_stats: bool,
+) -> anyhow::Result<()> {
+    let raw_bytes = std::fs::read(&input_module)?;
 
     // Optionally, Wizen the module first.
-    let module_bytes = if opts.wizen {
-        let mut w = wizer::Wizer::new();
-        w.allow_wasi(true)?;
-        w.inherit_env(true);
-        w.dir(".");
-        w.wasm_bulk_memory(true);
-        w.preload_bytes("weval", STUBS.as_bytes().to_vec())?;
-        w.func_rename("_start", "wizer.resume");
-        w.run(&raw_bytes[..])?
+    let module_bytes = if do_wizen {
+        wizen(raw_bytes)?
     } else {
         raw_bytes
     };
 
-    if opts.strip_intrinsics {
-        let bytes = filter::filter(&module_bytes[..])?;
-        std::fs::write(&opts.output_module, &bytes[..])?;
-        return Ok(());
-    }
-
     // Load module.
     let mut frontend_opts = waffle::FrontendOptions::default();
     frontend_opts.debug = true;
-    let mut module = waffle::Module::from_wasm_bytes(&module_bytes[..], &frontend_opts)?;
-
-    // If we're going to run the interpreter, we need to expand all
-    // functions.
-    if opts.run_diff {
-        module.expand_all_funcs()?;
-    }
+    let module = waffle::Module::from_wasm_bytes(&module_bytes[..], &frontend_opts)?;
 
     // Build module image.
     let mut im = image::build_image(&module)?;
@@ -89,21 +127,14 @@ fn main() -> anyhow::Result<()> {
 
     // Partially evaluate.
     let progress = indicatif::ProgressBar::new(0);
-    let mut result =
-        eval::partially_evaluate(module, &mut im, &directives[..], &opts, Some(progress))?;
+    let mut result = eval::partially_evaluate(module, &mut im, &directives[..], Some(progress))?;
 
     // Update memories in module.
     image::update(&mut result.module, &im);
 
     log::debug!("Final module:\n{}", result.module.display());
 
-    if opts.run_diff {
-        image::update(result.orig_module.as_mut().unwrap(), &im);
-        run_diff(result.orig_module.unwrap(), result.module);
-        return Ok(());
-    }
-
-    if opts.show_stats {
+    if show_stats {
         for stats in result.stats {
             eprintln!(
                 "Function {}: {} blocks, {} insts)",
@@ -126,103 +157,43 @@ fn main() -> anyhow::Result<()> {
 
     let bytes = result.module.to_wasm_bytes()?;
 
-    let bytes = if opts.wizen {
-        filter::filter(&bytes[..])?
-    } else {
-        bytes
-    };
+    let bytes = filter::filter(&bytes[..])?;
 
-    std::fs::write(&opts.output_module, &bytes[..])?;
+    std::fs::write(&output_module, &bytes[..])?;
 
     Ok(())
 }
 
-struct TraceIter {
-    thread: std::thread::JoinHandle<()>,
-    channel: std::sync::mpsc::Receiver<(usize, Vec<waffle::ConstVal>)>,
+fn collect(input_module: PathBuf, output_requests: PathBuf, site: Vec<u32>) -> anyhow::Result<()> {
+    let raw_bytes = std::fs::read(&input_module)?;
+    let module_bytes = wizen(raw_bytes)?;
+    let mut frontend_opts = waffle::FrontendOptions::default();
+    frontend_opts.debug = true;
+    let module = waffle::Module::from_wasm_bytes(&module_bytes[..], &frontend_opts)?;
+    let mut im = image::build_image(&module)?;
+    let mut directives = directive::collect(&module, &mut im)?;
+    log::debug!("Directives: {:?}", directives);
+
+    // Keep only directives that correspond to one of the requested
+    // collection sites.
+    directives.retain(|d| site.contains(&d.user_id));
+    // Zero out pointer-to-specialize and original function pointer --
+    // these will be filled in when the collection is later used.
+    for d in &mut directives {
+        d.func = waffle::Func::default();
+        d.func_index_out_addr = 0;
+    }
+
+    // Bincode the result and dump it to a file.
+    let dump = bincode::serialize(&directives)?;
+    std::fs::write(&output_requests, dump)?;
+
+    Ok(())
 }
 
-impl TraceIter {
-    fn new(module: waffle::Module<'static>) -> TraceIter {
-        let mut ctx = waffle::InterpContext::new(&module).unwrap();
-        if let Some(start) = module.start_func {
-            ctx.call(&module, start, &[]).ok().unwrap();
-        }
-
-        let entry = if let Some(waffle::Export {
-            kind: waffle::ExportKind::Func(func),
-            ..
-        }) = module.exports.iter().find(|e| &e.name == "_start")
-        {
-            *func
-        } else {
-            panic!("No _start entrypoint");
-        };
-
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1000);
-        let thread = std::thread::spawn(move || {
-            let count = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let count_cloned = count.clone();
-            ctx.trace_handler = Some(Box::new(move |id, args| {
-                count_cloned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                sender.send((id, args)).is_ok()
-            }));
-            let result = ctx.call(&module, entry, &[]);
-            if let Err(e) = result.ok() {
-                eprintln!(
-                    "Panic after {} steps: {:?}",
-                    count.load(std::sync::atomic::Ordering::Relaxed),
-                    e
-                );
-                let handler = ctx.trace_handler.unwrap();
-                handler(0, vec![]);
-            }
-        });
-
-        TraceIter {
-            thread,
-            channel: receiver,
-        }
-    }
-}
-
-impl Iterator for TraceIter {
-    type Item = (usize, Vec<waffle::ConstVal>);
-    fn next(&mut self) -> Option<Self::Item> {
-        self.channel.recv().ok()
-    }
-}
-
-fn run_diff(orig_module: waffle::Module<'_>, wevaled_module: waffle::Module<'_>) {
-    let orig_text = format!("{}", orig_module.display());
-    let wevaled_text = format!("{}", wevaled_module.display());
-    let orig = TraceIter::new(orig_module.without_orig_bytes());
-    let wevaled = TraceIter::new(wevaled_module.without_orig_bytes());
-
-    let mut progress: u64 = 0;
-    let mut last_n = VecDeque::new();
-    for ((orig_id, orig_args), (wevaled_id, wevaled_args)) in orig.zip(wevaled) {
-        progress += 1;
-        if progress % 100000 == 0 {
-            eprintln!("{} steps", progress);
-        }
-
-        last_n.push_back((orig_id, orig_args.clone()));
-        if last_n.len() > 10 {
-            last_n.pop_front();
-        }
-
-        if orig_id != wevaled_id || orig_args != wevaled_args {
-            eprintln!("Original:\n{}\n", orig_text);
-            eprintln!("wevaled:\n{}\n", wevaled_text);
-            eprintln!("Recent tracepoints:");
-            for (id, args) in last_n {
-                eprintln!("* {}, {:?}", id, args);
-            }
-            panic!(
-                "Mismatch: orig ({}, {:?}), wevaled ({}, {:?})",
-                orig_id, orig_args, wevaled_id, wevaled_args
-            );
-        }
-    }
+fn strip(input_module: PathBuf, output_module: PathBuf) -> anyhow::Result<()> {
+    let raw_bytes = std::fs::read(&input_module)?;
+    let bytes = filter::filter(&raw_bytes[..])?;
+    std::fs::write(&output_module, &bytes[..])?;
+    Ok(())
 }
