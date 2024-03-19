@@ -88,6 +88,7 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
 
     let mut head = im.read_u32(heap, pending_head_addr)?;
     let mut directives = vec![];
+    log::trace!("head = {:#x}", head);
     while head != 0 {
         directives.push(decode_weval_req(im, heap, head)?);
         let next = im.read_u32(heap, head)?;
@@ -103,6 +104,7 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
         im.write_u32(heap, head, 0)?;
         im.write_u32(heap, head + 4, 0)?;
         head = next;
+        log::trace!("head = {:#x}", head);
     }
 
     Ok(directives)

@@ -176,7 +176,9 @@ fn collect(input_module: PathBuf, output_requests: PathBuf, site: Vec<u32>) -> a
 
     // Keep only directives that correspond to one of the requested
     // collection sites.
-    directives.retain(|d| site.contains(&d.user_id));
+    if site.len() > 0 {
+        directives.retain(|d| site.contains(&d.user_id));
+    }
     // Zero out pointer-to-specialize and original function pointer --
     // these will be filled in when the collection is later used.
     for d in &mut directives {
