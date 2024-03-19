@@ -16,9 +16,12 @@ typedef struct weval_req_arg_t weval_req_arg_t;
 struct weval_req_t {
   weval_req_t* next;
   weval_req_t* prev;
+  /* A user-provided ID of the weval'd function, for stability of
+   * collected request bodies across relinkings: */
+  uint64_t func_id;
   weval_func_t func;
-  weval_req_arg_t* args;
-  uint32_t nargs;
+  uint8_t* argbuf;
+  size_t arglen;
   weval_func_t* specialized;
 };
 
@@ -28,19 +31,26 @@ typedef enum {
   weval_req_arg_f32 = 2,
   weval_req_arg_f64 = 3,
   weval_req_arg_buffer = 4,
+  weval_req_arg_none = 255,
 } weval_req_arg_type;
 
 struct weval_req_arg_t {
-  uint32_t specialize;
-  uint32_t ty;
+  uint32_t specialize; /* is this argument specialized? */
+  uint32_t
+      ty; /* type of specialization value (`weval_req_arg_type` enum value). */
+  /* The value to specialize on: */
   union {
+    uint64_t raw;
     uint32_t i32;
     uint64_t i64;
     float f32;
     double f64;
     struct {
-      void* ptr;
+      /* A pointer to arbitrary memory with constant contents of the
+       * given length; data follows. */
       uint32_t len;
+      /* Size of buffer in data stream; next arg follows inline data. */
+      uint32_t padded_len;
     } buffer;
   } u;
 };
@@ -72,8 +82,8 @@ static inline void weval_free(weval_req_t* req) {
   if (req->next) {
     req->next->prev = req->prev;
   }
-  if (req->args) {
-    free(req->args);
+  if (req->argbuf) {
+    free(req->argbuf);
   }
   free(req);
 }
@@ -132,6 +142,54 @@ static inline void update_context(uint32_t pc) { weval_update_context(pc); }
 #ifdef __cplusplus
 namespace weval {
 
+struct ArgWriter {
+  static const size_t MAX = 1024 * 1024;
+
+  uint8_t* buffer;
+  size_t len;
+  size_t cap;
+
+  ArgWriter() : buffer(nullptr), len(0), cap(0) {}
+
+  uint8_t* alloc(size_t bytes) {
+    if (bytes + len > MAX) {
+      return nullptr;
+    }
+    if (bytes + len > cap) {
+      size_t desired_cap = (cap == 0) ? 1024 : cap;
+      while (desired_cap < (len + bytes)) {
+        desired_cap *= 2;
+      }
+      buffer = reinterpret_cast<uint8_t*>(realloc(buffer, desired_cap));
+      if (!buffer) {
+        return nullptr;
+      }
+      cap = desired_cap;
+    }
+    uint8_t* ret = buffer + len;
+    len += bytes;
+    return ret;
+  }
+
+  template <typename T>
+  bool write(T t) {
+    uint8_t* mem = alloc(sizeof(T));
+    if (!mem) {
+      return false;
+    }
+    memcpy(mem, reinterpret_cast<uint8_t*>(&t), sizeof(T));
+    return true;
+  }
+
+  uint8_t* take() {
+    uint8_t* ret = buffer;
+    buffer = nullptr;
+    len = 0;
+    cap = 0;
+    return ret;
+  }
+};
+
 template <typename T>
 struct ArgSpec {};
 
@@ -149,11 +207,12 @@ struct Specialize : ArgSpec<T> {
   explicit Specialize(T value_) : value(value_) {}
 };
 
-template<typename T>
-struct SpecializeMemory : ArgSpec<T*> {
-  T* ptr;
+template <typename T>
+struct SpecializeMemory : ArgSpec<T> {
+  T ptr;
   uint32_t len;
-  SpecializeMemory(T* ptr_, uint32_t len_) : ptr(ptr_), len(len_) {}
+  SpecializeMemory(T ptr_, uint32_t len_) : ptr(ptr_), len(len_) {}
+  SpecializeMemory(const SpecializeMemory& other) = default;
 };
 
 namespace impl {
@@ -165,64 +224,87 @@ struct StoreArg;
 
 template <>
 struct StoreArg<uint32_t> {
-  void operator()(weval_req_arg_t* arg, uint32_t value) {
-    arg->specialize = 1;
-    arg->ty = weval_req_arg_i32;
-    arg->u.i32 = value;
+  bool operator()(ArgWriter& args, uint32_t value) {
+    weval_req_arg_t arg;
+    arg.specialize = 1;
+    arg.ty = weval_req_arg_i32;
+    arg.u.raw = 0;
+    arg.u.i32 = value;
+    return args.write(arg);
   }
 };
 template <>
 struct StoreArg<bool> {
-  void operator()(weval_req_arg_t* arg, bool value) {
-    arg->specialize = 1;
-    arg->ty = weval_req_arg_i32;
-    arg->u.i32 = value ? 1 : 0;
+  bool operator()(ArgWriter& args, bool value) {
+    weval_req_arg_t arg;
+    arg.specialize = 1;
+    arg.ty = weval_req_arg_i32;
+    arg.u.raw = 0;
+    arg.u.i32 = value ? 1 : 0;
+    return args.write(arg);
   }
 };
 template <>
 struct StoreArg<uint64_t> {
-  void operator()(weval_req_arg_t* arg, uint64_t value) {
-    arg->specialize = 1;
-    arg->ty = weval_req_arg_i64;
-    arg->u.i64 = value;
+  bool operator()(ArgWriter& args, uint64_t value) {
+    weval_req_arg_t arg;
+    arg.specialize = 1;
+    arg.ty = weval_req_arg_i64;
+    arg.u.raw = 0;
+    arg.u.i64 = value;
+    return args.write(arg);
   }
 };
 template <>
 struct StoreArg<float> {
-  void operator()(weval_req_arg_t* arg, float value) {
-    arg->specialize = 1;
-    arg->ty = weval_req_arg_f32;
-    arg->u.f32 = value;
+  bool operator()(ArgWriter& args, float value) {
+    weval_req_arg_t arg;
+    arg.specialize = 1;
+    arg.ty = weval_req_arg_f32;
+    arg.u.raw = 0;
+    arg.u.f32 = value;
+    return args.write(arg);
   }
 };
 template <>
 struct StoreArg<double> {
-  void operator()(weval_req_arg_t* arg, double value) {
-    arg->specialize = 1;
-    arg->ty = weval_req_arg_f64;
-    arg->u.f64 = value;
+  bool operator()(ArgWriter& args, double value) {
+    weval_req_arg_t arg;
+    arg.specialize = 1;
+    arg.ty = weval_req_arg_f64;
+    arg.u.raw = 0;
+    arg.u.f64 = value;
+    return args.write(arg);
   }
 };
 template <typename T>
 struct StoreArg<T*> {
-  void operator()(weval_req_arg_t* arg, T* value) {
+  bool operator()(ArgWriter& args, T* value) {
     static_assert(sizeof(T*) == 4, "Only 32-bit Wasm supported");
-    arg->specialize = 1;
-    arg->ty = weval_req_arg_i32;
-    arg->u.i32 = reinterpret_cast<uint32_t>(value);
+    weval_req_arg_t arg;
+    arg.specialize = 1;
+    arg.ty = weval_req_arg_i32;
+    arg.u.raw = 0;
+    arg.u.i32 = reinterpret_cast<uint32_t>(value);
+    return args.write(arg);
   }
 };
 template <typename T>
 struct StoreArg<T&> {
-  void operator()(weval_req_arg_t* arg, T& value) { StoreArg<T*>(arg, &value); }
+  bool operator()(ArgWriter& args, T& value) {
+    return StoreArg<T*>(args, &value);
+  }
 };
 template <typename T>
 struct StoreArg<const T*> {
-  void operator()(weval_req_arg_t* arg, const T* value) {
+  bool operator()(ArgWriter& args, const T* value) {
     static_assert(sizeof(const T*) == 4, "Only 32-bit Wasm supported");
-    arg->specialize = 1;
-    arg->ty = weval_req_arg_i32;
-    arg->u.i32 = reinterpret_cast<uint32_t>(value);
+    weval_req_arg_t arg;
+    arg.specialize = 1;
+    arg.ty = weval_req_arg_i32;
+    arg.u.raw = 0;
+    arg.u.i32 = reinterpret_cast<uint32_t>(value);
+    return args.write(arg);
   }
 };
 
@@ -231,33 +313,57 @@ struct StoreArgs {};
 
 template <>
 struct StoreArgs<> {
-  void operator()(weval_req_arg_t* args) {}
+  bool operator()(ArgWriter& args) { return true; }
 };
 
 template <typename T, typename... Rest>
 struct StoreArgs<Specialize<T>, Rest...> {
-  void operator()(weval_req_arg_t* args, Specialize<T> arg0, Rest... rest) {
-    StoreArg<T>()(args, arg0.value);
-    StoreArgs<Rest...>()(args + 1, rest...);
+  bool operator()(ArgWriter& args, Specialize<T> arg0, Rest... rest) {
+    if (!StoreArg<T>()(args, arg0.value)) {
+      return false;
+    }
+    return StoreArgs<Rest...>()(args, rest...);
   }
 };
 
 template <typename T, typename... Rest>
 struct StoreArgs<SpecializeMemory<T>, Rest...> {
-  void operator()(weval_req_arg_t* args, SpecializeMemory<T> arg0, Rest... rest) {
-    args->specialize = 1;
-    args->ty = weval_req_arg_buffer;
-    args->u.buffer.ptr = arg0.ptr;
-    args->u.buffer.len = arg0.len;
-    StoreArgs<Rest...>()(args + 1, rest...);
+  bool operator()(ArgWriter& args, SpecializeMemory<T> arg0, Rest... rest) {
+    weval_req_arg_t arg;
+    arg.specialize = 1;
+    arg.ty = weval_req_arg_buffer;
+    arg.u.raw = 0;
+    arg.u.buffer.len = arg0.len;
+    arg.u.buffer.padded_len = (arg0.len + 7) & ~7;  // Align to 8-byte boundary.
+    if (!args.write(arg)) {
+      return false;
+    }
+    const uint8_t* src = reinterpret_cast<const uint8_t*>(arg0.ptr);
+    uint8_t* dst = args.alloc(arg.u.buffer.padded_len);
+    if (!dst) {
+      return false;
+    }
+    memcpy(dst, src, arg0.len);
+    if (arg.u.buffer.padded_len > arg.u.buffer.len) {
+      // Ensure deterministic (zeroed) padding bytes.
+      memset(dst + arg.u.buffer.len, 0,
+             arg.u.buffer.padded_len - arg.u.buffer.len);
+    }
+    return StoreArgs<Rest...>()(args, rest...);
   }
 };
 
 template <typename T, typename... Rest>
 struct StoreArgs<RuntimeArg<T>, Rest...> {
-  void operator()(weval_req_arg_t* args, RuntimeArg<T> arg0, Rest... rest) {
-    args[0].specialize = 0;
-    StoreArgs<Rest...>()(args + 1, rest...);
+  bool operator()(ArgWriter& args, RuntimeArg<T> arg0, Rest... rest) {
+    weval_req_arg_t arg;
+    arg.specialize = 0;
+    arg.ty = weval_req_arg_none;
+    arg.u.raw = 0;
+    if (!args.write(arg)) {
+      return false;
+    }
+    return StoreArgs<Rest...>()(args, rest...);
   }
 };
 
@@ -265,22 +371,21 @@ struct StoreArgs<RuntimeArg<T>, Rest...> {
 
 template <typename Ret, typename... Args, typename... WrappedArgs>
 weval_req_t* weval(impl::FuncPtr<Ret, Args...>* dest,
-                   impl::FuncPtr<Ret, Args...> generic, WrappedArgs... args) {
+                   impl::FuncPtr<Ret, Args...> generic, uint64_t func_id,
+                   WrappedArgs... args) {
   weval_req_t* req = (weval_req_t*)malloc(sizeof(weval_req_t));
   if (!req) {
     return nullptr;
   }
-  uint32_t nargs = sizeof...(Args);
-  weval_req_arg_t* arg_storage =
-      (weval_req_arg_t*)malloc(sizeof(weval_req_arg_t) * nargs);
-  if (!arg_storage) {
+  ArgWriter writer;
+  if (!impl::StoreArgs<WrappedArgs...>()(writer, args...)) {
     return nullptr;
   }
-  impl::StoreArgs<WrappedArgs...>()(arg_storage, args...);
 
+  req->func_id = func_id;
   req->func = (weval_func_t)generic;
-  req->args = arg_storage;
-  req->nargs = nargs;
+  req->arglen = writer.len;
+  req->argbuf = writer.take();
   req->specialized = (weval_func_t*)dest;
 
   weval_request(req);

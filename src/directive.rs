@@ -8,6 +8,8 @@ use waffle::{Func, Memory, Module};
 
 #[derive(Clone, Debug)]
 pub struct Directive {
+    /// User-given ID for the weval'd function.
+    pub user_id: u32,
     /// Evaluate the given function.
     pub func: Func,
     /// Evaluate with the given parameter values fixed.
@@ -89,15 +91,17 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
 }
 
 fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Directive> {
-    let func_table_index = im.read_u32(heap, head + 8)?;
+    let user_id = im.read_u32(heap, head + 8)?;
+    let func_table_index = im.read_u32(heap, head + 12)?;
     let func = im.func_ptr(func_table_index)?;
-    let mut arg_ptr = im.read_u32(heap, head + 12)?;
-    let nargs = im.read_u32(heap, head + 16)?;
-    let func_index_out_addr = im.read_u32(heap, head + 20)?;
+    let mut arg_ptr = im.read_u32(heap, head + 16)?;
+    let arglen = im.read_u32(heap, head + 20)?;
+    let arg_end = arg_ptr + arglen;
+    let func_index_out_addr = im.read_u32(heap, head + 24)?;
 
     let mut const_params = vec![];
     let mut const_memory = vec![];
-    for _ in 0..nargs {
+    while arg_ptr < arg_end {
         let is_specialized = im.read_u32(heap, arg_ptr)?;
         let ty = im.read_u32(heap, arg_ptr + 4)?;
         let (value, mem) = if is_specialized != 0 {
@@ -137,6 +141,7 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
     }
 
     Ok(Directive {
+        user_id,
         func,
         const_params,
         const_memory,
