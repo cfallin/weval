@@ -2,7 +2,7 @@
 
 use crate::image::Image;
 use crate::intrinsics::find_global_data_by_exported_func;
-use crate::value::{AbstractValue, WasmVal};
+use crate::value::{AbstractValue, MemoryBufferIndex, WasmVal};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use waffle::{Func, Memory, Module};
@@ -53,7 +53,7 @@ impl MemoryBuffer {
     pub fn read_size(&self, offset: u32, size: u32) -> anyhow::Result<u64> {
         let offset = usize::try_from(offset).unwrap();
         let size = usize::try_from(size).unwrap();
-        if offset + size >= self.data.len() {
+        if offset + size > self.data.len() {
             anyhow::bail!("Out of bounds");
         }
         let slice = &self.data[offset..(offset + size)];
@@ -81,6 +81,8 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
         }
     };
 
+    log::info!("weval request list head at {:#x}", pending_head_addr);
+
     let heap = match im.main_heap {
         Some(heap) => heap,
         None => return Ok(vec![]),
@@ -90,6 +92,7 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
     let mut directives = vec![];
     log::trace!("head = {:#x}", head);
     while head != 0 {
+        log::info!("directive at {:#x}", head);
         directives.push(decode_weval_req(im, heap, head)?);
         let next = im.read_u32(heap, head)?;
         let prev = im.read_u32(heap, head + 4)?;
@@ -118,6 +121,7 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
     let arg_len = im.read_u32(heap, head + 20)?;
     let func_index_out_addr = im.read_u32(heap, head + 24)?;
     let args = im.read_slice(heap, arg_ptr, arg_len)?.to_vec();
+
     Ok(Directive {
         user_id,
         func,
@@ -154,6 +158,7 @@ impl DirectiveArgs {
             ])
         };
 
+        let mut i = 0;
         while arg_ptr < bytes.len() {
             let is_specialized = read_u32(arg_ptr);
             let ty = read_u32(arg_ptr + 4);
@@ -187,7 +192,11 @@ impl DirectiveArgs {
                                 bytes[arg_ptr..(arg_ptr + usize::try_from(len).unwrap())].to_vec(),
                             ),
                         };
-                        (AbstractValue::Runtime(None), Some(data), 16 + padded_len)
+                        (
+                            AbstractValue::ConcreteMemory(MemoryBufferIndex(i), 0),
+                            Some(data),
+                            16 + padded_len,
+                        )
                     }
                     _ => anyhow::bail!("Invalid type: {}", ty),
                 }
@@ -197,6 +206,7 @@ impl DirectiveArgs {
             const_params.push(value);
             const_memory.push(mem);
             arg_ptr += usize::try_from(arg_len).unwrap();
+            i += 1;
         }
 
         Ok(DirectiveArgs {
