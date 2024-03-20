@@ -90,9 +90,7 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
 
     let mut head = im.read_u32(heap, pending_head_addr)?;
     let mut directives = vec![];
-    log::trace!("head = {:#x}", head);
     while head != 0 {
-        log::info!("directive at {:#x}", head);
         directives.push(decode_weval_req(im, heap, head)?);
         let next = im.read_u32(heap, head)?;
         let prev = im.read_u32(heap, head + 4)?;
@@ -107,7 +105,6 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
         im.write_u32(heap, head, 0)?;
         im.write_u32(heap, head + 4, 0)?;
         head = next;
-        log::trace!("head = {:#x}", head);
     }
 
     Ok(directives)
@@ -121,6 +118,8 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
     let arg_len = im.read_u32(heap, head + 20)?;
     let func_index_out_addr = im.read_u32(heap, head + 24)?;
     let args = im.read_slice(heap, arg_ptr, arg_len)?.to_vec();
+
+    log::trace!("directive: args {:#x} len {:#x}", arg_ptr, arg_len);
 
     Ok(Directive {
         user_id,
@@ -189,7 +188,8 @@ impl DirectiveArgs {
                         let padded_len = read_u32(arg_ptr + 12);
                         let data = MemoryBuffer {
                             data: Arc::new(
-                                bytes[arg_ptr..(arg_ptr + usize::try_from(len).unwrap())].to_vec(),
+                                bytes[arg_ptr + 16..(arg_ptr + 16 + usize::try_from(len).unwrap())]
+                                    .to_vec(),
                             ),
                         };
                         (
