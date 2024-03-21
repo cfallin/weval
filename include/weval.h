@@ -93,6 +93,12 @@ extern weval_lookup_t weval_lookup_table;
     return &weval_lookup_table;                                         \
   }
 
+#define WEVAL_DEFINE_TARGET(index, func)             \
+  __attribute__((export_name("weval.func." #index))) \
+      weval_func_t __weval_func_##index() {          \
+    return (weval_func_t) & (func);                  \
+  }
+
 /* Compare entry to req; return -1 for less than, 1 for greater than,
  * 0 for equal. */
 static inline int __weval_binsearch_cmp(weval_req_t* req, uint32_t idx) {
@@ -133,7 +139,7 @@ static inline weval_lookup_entry_t* __weval_find(weval_req_t* req) {
     } else if (cmp < 0) {
       lo = mid + 1;
     } else if (cmp > 0) {
-      hi = mid - 1;
+      hi = mid;
     }
   }
 

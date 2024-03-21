@@ -81,9 +81,33 @@ pub fn partially_evaluate<'a>(
     directives.sort_by_key(|d| d.func_index_out_addr);
     directives.dedup_by_key(|d| d.func_index_out_addr);
 
+    // Translate the corpus of pre-collected directives: fill in the
+    // function from the user ID of the weval site.
+    let mut weval_id_to_func = HashMap::default();
+    let mut get_func = |user_id: u32| match weval_id_to_func.entry(user_id) {
+        HashEntry::Occupied(o) => *o.get(),
+        HashEntry::Vacant(v) => {
+            match find_global_data_by_exported_func(&module, &format!("weval.func.{}", user_id)) {
+                Some(func_ptr) => {
+                    let func_table = &mut module.tables[Table::from(0)];
+                    let func = func_table.func_elements.as_ref().unwrap()[func_ptr as usize];
+                    *v.insert(func)
+                }
+                None => {
+                    panic!("Function not found for weval.func.{}", user_id);
+                }
+            }
+        }
+    };
+
+    directives.extend(corpus.iter().map(|d| {
+        let mut d = d.clone();
+        d.func = get_func(d.user_id);
+        d
+    }));
+
     // Expand function bodies of any function named in a directive.
     let mut funcs = HashMap::default();
-    let mut user_id_to_func = HashMap::default();
     for directive in &directives {
         if !funcs.contains_key(&directive.func) {
             let mut f = module.clone_and_expand_body(directive.func)?;
@@ -99,20 +123,8 @@ pub fn partially_evaluate<'a>(
             f.convert_to_max_ssa(Some(cut_blocks));
 
             funcs.insert(directive.func, (f, cfg, stats));
-
-            user_id_to_func.insert(directive.user_id, directive.func);
         }
     }
-
-    // Translate the corpus of pre-collected directives: fill in the
-    // function from the user ID of the weval site.
-    directives.extend(corpus.iter().filter_map(|d| {
-        user_id_to_func.get(&d.user_id).map(|func| {
-            let mut d = d.clone();
-            d.func = *func;
-            d
-        })
-    }));
 
     if let Some(p) = progress.as_mut() {
         p.set_length(directives.len() as u64);
