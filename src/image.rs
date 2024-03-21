@@ -17,7 +17,12 @@ pub struct Image {
 #[derive(Clone, Debug)]
 pub struct MemImage {
     pub image: Vec<u8>,
-    pub len: usize,
+}
+
+impl MemImage {
+    pub fn len(&self) -> usize {
+        self.image.len()
+    }
 }
 
 pub fn build_image(module: &Module) -> anyhow::Result<Image> {
@@ -49,8 +54,9 @@ pub fn build_image(module: &Module) -> anyhow::Result<Image> {
     })
 }
 
+const WASM_PAGE: usize = 1 << 16;
+
 fn maybe_mem_image(mem: &MemoryData) -> Option<MemImage> {
-    const WASM_PAGE: usize = 1 << 16;
     let len = mem.initial_pages * WASM_PAGE;
     let mut image = vec![0; len];
 
@@ -59,7 +65,7 @@ fn maybe_mem_image(mem: &MemoryData) -> Option<MemImage> {
             .copy_from_slice(&segment.data[..]);
     }
 
-    Some(MemImage { image, len })
+    Some(MemImage { image })
 }
 
 pub fn update(module: &mut Module, im: &Image) {
@@ -69,6 +75,9 @@ pub fn update(module: &mut Module, im: &Image) {
             offset: 0,
             data: mem.image.clone(),
         });
+        let image_pages = mem.image.len() / WASM_PAGE;
+        module.memories[mem_id].initial_pages =
+            std::cmp::max(module.memories[mem_id].initial_pages, image_pages);
     }
 }
 
@@ -82,7 +91,7 @@ impl Image {
             Some(image) => image,
             None => return false,
         };
-        (end as usize) <= image.len
+        (end as usize) <= image.len()
     }
 
     pub fn main_heap(&self) -> anyhow::Result<Memory> {
@@ -94,7 +103,7 @@ impl Image {
         let image = self.memories.get(&id).unwrap();
         let addr = usize::try_from(addr).unwrap();
         let len = usize::try_from(len).unwrap();
-        if addr + len >= image.image.len() {
+        if addr + len >= image.len() {
             anyhow::bail!("Out of bounds");
         }
         Ok(&image.image[addr..(addr + len)])
@@ -112,7 +121,7 @@ impl Image {
     pub fn read_u16(&self, id: Memory, addr: u32) -> anyhow::Result<u16> {
         let image = self.memories.get(&id).unwrap();
         let addr = addr as usize;
-        if (addr + 2) > image.len {
+        if (addr + 2) > image.len() {
             anyhow::bail!("Out of bounds");
         }
         let slice = &image.image[addr..(addr + 2)];
@@ -122,7 +131,7 @@ impl Image {
     pub fn read_u32(&self, id: Memory, addr: u32) -> anyhow::Result<u32> {
         let image = self.memories.get(&id).unwrap();
         let addr = addr as usize;
-        if (addr + 4) > image.len {
+        if (addr + 4) > image.len() {
             anyhow::bail!("Out of bounds");
         }
         let slice = &image.image[addr..(addr + 4)];
@@ -176,7 +185,7 @@ impl Image {
     pub fn write_u32(&mut self, id: Memory, addr: u32, value: u32) -> anyhow::Result<()> {
         let image = self.memories.get_mut(&id).unwrap();
         let addr = addr as usize;
-        if (addr + 4) > image.len {
+        if (addr + 4) > image.len() {
             anyhow::bail!("Out of bounds");
         }
         let slice = &mut image.image[addr..(addr + 4)];
@@ -195,5 +204,23 @@ impl Image {
             .get(idx as usize)
             .copied()
             .ok_or_else(|| anyhow::anyhow!("func ptr out of bounds"))?)
+    }
+
+    pub fn append_data(&mut self, id: Memory, data: Vec<u8>) {
+        let image = self.memories.get_mut(&id).unwrap();
+        let orig_len = image.len();
+        let data_len = data.len();
+        let padded_len = (data_len + WASM_PAGE - 1) & !(WASM_PAGE - 1);
+        let padding = padded_len - data_len;
+        image
+            .image
+            .extend(data.into_iter().chain(std::iter::repeat(0).take(padding)));
+        log::debug!(
+            "Appending data ({} bytes, {} padding): went from {} bytes to {} bytes",
+            data_len,
+            padding,
+            orig_len,
+            image.len()
+        );
     }
 }

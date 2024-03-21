@@ -30,6 +30,11 @@ pub enum Command {
         #[structopt(short = "w")]
         wizen: bool,
 
+        /// A collection of pre-collected weval requests, if any, to
+        /// add to the weval'ing and resulting lookup table.
+        #[structopt(short = "c")]
+        corpus: Option<PathBuf>,
+
         /// Show stats on specialization code size.
         #[structopt(long = "show-stats")]
         show_stats: bool,
@@ -73,8 +78,9 @@ fn main() -> anyhow::Result<()> {
             input_module,
             output_module,
             wizen,
+            corpus,
             show_stats,
-        } => weval(input_module, output_module, wizen, show_stats),
+        } => weval(input_module, output_module, wizen, corpus, show_stats),
         Command::Collect {
             input_module,
             output_requests,
@@ -102,6 +108,7 @@ fn weval(
     input_module: PathBuf,
     output_module: PathBuf,
     do_wizen: bool,
+    corpus: Option<PathBuf>,
     show_stats: bool,
 ) -> anyhow::Result<()> {
     let raw_bytes = std::fs::read(&input_module)?;
@@ -125,9 +132,27 @@ fn weval(
     let directives = directive::collect(&module, &mut im)?;
     log::debug!("Directives: {:?}", directives);
 
+    // Get any corpus of pre-collected directives as well.
+    let corpus = match corpus {
+        Some(path) => {
+            let bytes = std::fs::read(&path)?;
+            let directives: Vec<directive::Directive> = bincode::deserialize(&bytes[..])?;
+            directives
+        }
+        None => {
+            vec![]
+        }
+    };
+
     // Partially evaluate.
     let progress = indicatif::ProgressBar::new(0);
-    let mut result = eval::partially_evaluate(module, &mut im, &directives[..], Some(progress))?;
+    let mut result = eval::partially_evaluate(
+        module,
+        &mut im,
+        &directives[..],
+        &corpus[..],
+        Some(progress),
+    )?;
 
     // Update memories in module.
     image::update(&mut result.module, &im);

@@ -12,16 +12,18 @@ typedef void (*weval_func_t)();
 
 typedef struct weval_req_t weval_req_t;
 typedef struct weval_req_arg_t weval_req_arg_t;
+typedef struct weval_lookup_entry_t weval_lookup_entry_t;
+typedef struct weval_lookup_t weval_lookup_t;
 
 struct weval_req_t {
   weval_req_t* next;
   weval_req_t* prev;
   /* A user-provided ID of the weval'd function, for stability of
    * collected request bodies across relinkings: */
-  uint64_t func_id;
+  uint32_t func_id;
   weval_func_t func;
   uint8_t* argbuf;
-  size_t arglen;
+  uint32_t arglen;
   weval_func_t* specialized;
 };
 
@@ -55,30 +57,103 @@ struct weval_req_arg_t {
   } u;
 };
 
+/* Lookup table created by weval for pre-inserted wevaled function bodies */
+struct weval_lookup_t {
+  weval_lookup_entry_t* entries;
+  uint32_t nentries;
+};
+
+struct weval_lookup_entry_t {
+  uint32_t func_id;
+  const uint8_t* argbuf;
+  uint32_t arglen;
+  weval_func_t specialized;
+};
+
 extern weval_req_t* weval_req_pending_head;
 extern bool weval_is_wevaled;
+extern weval_lookup_t weval_lookup_table;
 
-#define WEVAL_DEFINE_REQ_LIST()                                    \
-  weval_req_t* weval_req_pending_head;                             \
-  __attribute__((export_name("weval.pending.head"))) weval_req_t** \
-  __weval_pending_head() {                                         \
-    return &weval_req_pending_head;                                \
+#define WEVAL_DEFINE_GLOBALS()                                          \
+  weval_req_t* weval_req_pending_head;                                  \
+  __attribute__((export_name("weval.pending.head"))) weval_req_t**      \
+  __weval_pending_head() {                                              \
+    return &weval_req_pending_head;                                     \
+  }                                                                     \
+                                                                        \
+  bool weval_is_wevaled;                                                \
+  __attribute__((export_name("weval.is.wevaled"))) bool*                \
+  __weval_is_wevaled() {                                                \
+    return &weval_is_wevaled;                                           \
+  }                                                                     \
+                                                                        \
+  weval_lookup_t weval_lookup_table = {.entries = NULL, .nentries = 0}; \
+  __attribute__((export_name("weval.lookup.table"))) weval_lookup_t*    \
+  __weval_lookup_table() {                                              \
+    return &weval_lookup_table;                                         \
   }
 
-#define WEVAL_DEFINE_WEVALED_FLAG()                      \
-  bool weval_is_wevaled;                                 \
-  __attribute__((export_name("weval.is.wevaled"))) bool* \
-  __weval_is_wevaled() {                                 \
-    return &weval_is_wevaled;                            \
+/* Compare entry to req; return -1 for less than, 1 for greater than,
+ * 0 for equal. */
+static inline int __weval_binsearch_cmp(weval_req_t* req, uint32_t idx) {
+  weval_lookup_entry_t* entry = &weval_lookup_table.entries[idx];
+  if (entry->func_id < req->func_id) {
+    return -1;
+  } else if (entry->func_id > req->func_id) {
+    return 1;
+  } else {
+    uint32_t min_len =
+        req->arglen < entry->arglen ? req->arglen : entry->arglen;
+    int cmp = memcmp(entry->argbuf, req->argbuf, min_len);
+    if (cmp != 0) {
+      return cmp;
+    } else if (entry->arglen < req->arglen) {
+      return -1;
+    } else if (entry->arglen > req->arglen) {
+      return 1;
+    } else {
+      return 0;
+    }
   }
+}
+
+static inline weval_lookup_entry_t* __weval_find(weval_req_t* req) {
+  if (weval_lookup_table.nentries == 0) {
+    return NULL;
+  }
+
+  uint32_t lo = 0;
+  uint32_t hi = weval_lookup_table.nentries;
+
+  while (hi > lo) {
+    uint32_t mid = lo + (hi - lo) / 2;
+    int cmp = __weval_binsearch_cmp(req, mid);
+    if (cmp == 0) {
+      return &weval_lookup_table.entries[mid];
+    } else if (cmp < 0) {
+      lo = mid + 1;
+    } else if (cmp > 0) {
+      hi = mid - 1;
+    }
+  }
+
+  return NULL;
+}
 
 static inline void weval_request(weval_req_t* req) {
-  req->next = weval_req_pending_head;
-  req->prev = NULL;
-  if (weval_req_pending_head) {
-    weval_req_pending_head->prev = req;
+  if (weval_is_wevaled) {
+    weval_lookup_entry_t* entry = __weval_find(req);
+    if (entry) {
+      *req->specialized = entry->specialized;
+    }
+  } else {
+    req->next = weval_req_pending_head;
+    req->prev = NULL;
+    if (weval_req_pending_head) {
+      weval_req_pending_head->prev = req;
+    }
+    weval_req_pending_head = req;
   }
-  weval_req_pending_head = req;
 }
 
 static inline void weval_free(weval_req_t* req) {
@@ -379,7 +454,7 @@ struct StoreArgs<RuntimeArg<T>, Rest...> {
 
 template <typename Ret, typename... Args, typename... WrappedArgs>
 weval_req_t* weval(impl::FuncPtr<Ret, Args...>* dest,
-                   impl::FuncPtr<Ret, Args...> generic, uint64_t func_id,
+                   impl::FuncPtr<Ret, Args...> generic, uint32_t func_id,
                    WrappedArgs... args) {
   weval_req_t* req = (weval_req_t*)malloc(sizeof(weval_req_t));
   if (!req) {

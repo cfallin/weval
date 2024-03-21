@@ -2,7 +2,7 @@
 
 use crate::directive::{Directive, DirectiveArgs};
 use crate::image::Image;
-use crate::intrinsics::Intrinsics;
+use crate::intrinsics::{find_global_data_by_exported_func, Intrinsics};
 use crate::state::*;
 use crate::stats::SpecializationStats;
 use crate::value::{AbstractValue, WasmVal};
@@ -70,18 +70,20 @@ pub fn partially_evaluate<'a>(
     mut module: Module<'a>,
     im: &mut Image,
     directives: &[Directive],
+    corpus: &[Directive],
     mut progress: Option<indicatif::ProgressBar>,
 ) -> anyhow::Result<PartialEvalResult<'a>> {
     let intrinsics = Intrinsics::find(&module);
     log::trace!("intrinsics: {:?}", intrinsics);
-    let mut mem_updates = HashMap::default();
 
     // Sort directives by out-address, and remove duplicates.
     let mut directives = directives.to_vec();
     directives.sort_by_key(|d| d.func_index_out_addr);
     directives.dedup_by_key(|d| d.func_index_out_addr);
 
+    // Expand function bodies of any function named in a directive.
     let mut funcs = HashMap::default();
+    let mut user_id_to_func = HashMap::default();
     for directive in &directives {
         if !funcs.contains_key(&directive.func) {
             let mut f = module.clone_and_expand_body(directive.func)?;
@@ -97,22 +99,29 @@ pub fn partially_evaluate<'a>(
             f.convert_to_max_ssa(Some(cut_blocks));
 
             funcs.insert(directive.func, (f, cfg, stats));
+
+            user_id_to_func.insert(directive.user_id, directive.func);
         }
     }
+
+    // Translate the corpus of pre-collected directives: fill in the
+    // function from the user ID of the weval site.
+    directives.extend(corpus.iter().filter_map(|d| {
+        user_id_to_func.get(&d.user_id).map(|func| {
+            let mut d = d.clone();
+            d.func = *func;
+            d
+        })
+    }));
 
     if let Some(p) = progress.as_mut() {
         p.set_length(directives.len() as u64);
     }
 
-    let directives = directives
-        .iter()
-        .zip(std::iter::from_fn(move || {
-            Some(progress.as_ref().map(|bar| bar.clone()))
-        }))
-        .collect::<Vec<_>>();
+    let progress_ref = progress.as_ref();
     let bodies = directives
         .par_iter()
-        .flat_map(|(directive, progress)| {
+        .flat_map(|directive| {
             let (generic, cfg, stats) = funcs.get(&directive.func).unwrap();
             let result =
                 match partially_evaluate_func(&module, generic, cfg, im, &intrinsics, directive) {
@@ -120,7 +129,7 @@ pub fn partially_evaluate<'a>(
                     Err(e) => return Some(Err(e)),
                 };
 
-            if let Some(p) = progress {
+            if let Some(p) = progress_ref {
                 p.inc(1);
             }
             if let Some((body, sig, name, block_rev_map, contexts)) = result {
@@ -142,6 +151,10 @@ pub fn partially_evaluate<'a>(
             }
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // Compute memory updates and the pre-weval lookup table.
+    let mut mem_updates = HashMap::default();
+    let mut lookup_table = vec![];
     for (directive, decl) in bodies {
         // Add function to module.
         let func = module.funcs.push(decl);
@@ -157,16 +170,77 @@ pub fn partially_evaluate<'a>(
             func_table.max = Some(table_idx + 1);
         }
         log::info!("New func index {} -> table index {}", func, table_idx);
-        log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
 
-        // Update memory image.
-        mem_updates.insert(directive.func_index_out_addr, table_idx);
+        // Update memory image if this request is a live one with an
+        // output function index, otherwise add to pre-weval lookup
+        // table if it came from corpus.
+        if directive.func_index_out_addr != 0 {
+            log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
+            mem_updates.insert(directive.func_index_out_addr, table_idx);
+        } else {
+            log::info!(" -> adding to lookup table");
+            lookup_table.push((directive.user_id, &directive.args[..], table_idx));
+        }
     }
 
     // Update memory.
     let heap = im.main_heap()?;
     for (addr, value) in mem_updates {
         im.write_u32(heap, addr, value)?;
+    }
+
+    // Update the `weval_is_wevaled` flag, if it exists and is exported.
+    if let Some(is_wevaled) = find_global_data_by_exported_func(&module, "weval.is.wevaled") {
+        log::info!("updating `is_wevaled` flag at {:#x} to 1", is_wevaled);
+        im.write_u32(heap, is_wevaled, 1)?;
+    }
+
+    // Create lookup table.
+    if let Some(lookup_head) = find_global_data_by_exported_func(&module, "weval.lookup.table") {
+        lookup_table.sort(); // Sort by user ID first, then arg bytestring.
+        let lookup_base = im.memories[&heap].len();
+        let mut lookup_bytes = vec![];
+        // Append arg strings to memory and record their addresses.
+        let argbuf_addrs = lookup_table
+            .iter()
+            .map(|(_, argbuf, _)| {
+                let addr = lookup_base + lookup_bytes.len();
+                lookup_bytes.extend(argbuf.iter().cloned());
+                addr
+            })
+            .collect::<Vec<_>>();
+        // Pad the lookup table to a 16-alignment.
+        let argbuf_padding = if (lookup_bytes.len() & 15) != 0 {
+            16 - (lookup_bytes.len() & 15)
+        } else {
+            0
+        };
+        lookup_bytes.extend(std::iter::repeat(0).take(argbuf_padding));
+        // Append `weval_lookup_entry_t` structs.
+        let lookup_entries = lookup_base + lookup_bytes.len();
+        let lookup_nentries = lookup_table.len();
+        for (&(user_id, args, func), &argbuf) in lookup_table.iter().zip(argbuf_addrs.iter()) {
+            let argbuf = u32::try_from(argbuf).unwrap();
+            let arglen = u32::try_from(args.len()).unwrap();
+            lookup_bytes.extend(u32::to_le_bytes(user_id));
+            lookup_bytes.extend(u32::to_le_bytes(argbuf));
+            lookup_bytes.extend(u32::to_le_bytes(arglen));
+            lookup_bytes.extend(u32::to_le_bytes(func));
+        }
+        // Append the data to the memory image.
+        im.append_data(heap, lookup_bytes);
+        // Update `entries` and `nentries` in the `weval_lookup_t`.
+        im.write_u32(heap, lookup_head, u32::try_from(lookup_entries).unwrap())?;
+        im.write_u32(
+            heap,
+            lookup_head + 4,
+            u32::try_from(lookup_nentries).unwrap(),
+        )?;
+        log::info!(
+            "created weval lookup table at {:#x} len {:#x}",
+            lookup_entries,
+            lookup_nentries
+        );
     }
 
     let mut stats = funcs
