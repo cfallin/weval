@@ -114,7 +114,7 @@ pub fn partially_evaluate<'a>(
 
             let stats = Mutex::new(SpecializationStats::new(directive.func, &f));
 
-            split_blocks_at_specialization_points(&mut f, &intrinsics);
+            split_blocks_at_intrinsic_calls(&mut f, &intrinsics);
 
             f.recompute_edges();
             let cfg = CFGInfo::new(&f);
@@ -346,17 +346,20 @@ fn partially_evaluate_func(
     )))
 }
 
-// Split at every `weval_specialize_value()` call. Requires max-SSA
-// input, and creates max-SSA output.
-fn split_blocks_at_specialization_points(func: &mut FunctionBody, intrinsics: &Intrinsics) {
+// Split at every `weval_specialize_value()` call and
+// `weval_pop_context()` call. Requires max-SSA input, and creates
+// max-SSA output.
+fn split_blocks_at_intrinsic_calls(func: &mut FunctionBody, intrinsics: &Intrinsics) {
     for block in 0..func.blocks.len() {
         let block = Block::new(block);
         for i in 0..func.blocks[block].insts.len() {
             let inst = func.blocks[block].insts[i];
             if let ValueDef::Operator(Operator::Call { function_index }, _, _) = &func.values[inst]
             {
-                if Some(*function_index) == intrinsics.specialize_value {
-                    log::trace!("Splitting at weval_specialize_value for inst {}", inst);
+                if Some(*function_index) == intrinsics.specialize_value
+                    || Some(*function_index) == intrinsics.pop_context
+                {
+                    log::trace!("Splitting at weval intrinsic for inst {}", inst);
 
                     // Split the block here!  Split *after* the call
                     // (the `i + 1`).
