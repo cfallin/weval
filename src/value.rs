@@ -62,6 +62,8 @@ pub enum AbstractValue {
     /// A value that points to memory known at specialization time,
     /// with the given offset.
     ConcreteMemory(MemoryBufferIndex, u32),
+    /// Static memory pointer.
+    StaticMemory(u32),
     /// A value only computed at runtime. The instruction that
     /// computed it is specified, if known.
     Runtime(Option<waffle::Value>),
@@ -99,6 +101,7 @@ impl AbstractValue {
     pub fn as_const_u32(&self) -> Option<u32> {
         match self {
             &AbstractValue::Concrete(WasmVal::I32(k)) => Some(k),
+            &AbstractValue::StaticMemory(addr) => Some(addr),
             _ => None,
         }
     }
@@ -114,6 +117,7 @@ impl AbstractValue {
     pub fn as_const_u64(&self) -> Option<u64> {
         match self {
             &AbstractValue::Concrete(WasmVal::I64(k)) => Some(k),
+            &AbstractValue::StaticMemory(addr) => Some(u64::from(addr)),
             _ => None,
         }
     }

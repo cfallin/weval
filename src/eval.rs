@@ -1600,6 +1600,17 @@ impl<'a> Evaluator<'a> {
                 Ok(val)
             }
 
+            (Operator::I32Load { memory }, AbstractValue::StaticMemory(addr)) => {
+                let addr = addr.checked_add(memory.offset).unwrap();
+                let val = self.image.read_u32(self.image.main_heap()?, addr)?;
+                Ok(AbstractValue::Concrete(WasmVal::I32(val)))
+            }
+            (Operator::I64Load { memory }, AbstractValue::StaticMemory(addr)) => {
+                let addr = addr.checked_add(memory.offset).unwrap();
+                let val = self.image.read_u64(self.image.main_heap()?, addr)?;
+                Ok(AbstractValue::Concrete(WasmVal::I64(val)))
+            }
+
             // TODO: FP and SIMD
             _ => Ok(AbstractValue::Runtime(Some(orig_inst))),
         }
@@ -1850,6 +1861,12 @@ impl<'a> Evaluator<'a> {
                 AbstractValue::ConcreteMemory(buf, offset),
             ) if op == Operator::I32Add => {
                 AbstractValue::ConcreteMemory(buf.clone(), offset.wrapping_add(*k))
+            }
+            (AbstractValue::StaticMemory(addr), AbstractValue::Concrete(WasmVal::I32(k)))
+            | (AbstractValue::Concrete(WasmVal::I32(k)), AbstractValue::StaticMemory(addr))
+                if op == Operator::I32Add =>
+            {
+                AbstractValue::StaticMemory(addr.wrapping_add(*k))
             }
 
             // ptr OP const (non-commutative cases)
