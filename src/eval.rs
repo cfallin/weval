@@ -330,13 +330,15 @@ fn partially_evaluate_func(
         return Ok(None);
     }
 
+    let name = format!("{} (specialized)", orig_name);
+    crate::escape::remove_shadow_stack_if_non_escaping(&mut evaluator.func);
+    evaluator.func.optimize();
+
     log::info!("Specialization of {:?} done", directive);
     log::debug!(
         "Adding func:\n{}",
         evaluator.func.display_verbose("| ", Some(module))
     );
-    let name = format!("{} (specialized)", orig_name);
-    evaluator.func.optimize();
     Ok(Some((
         evaluator.func,
         sig,

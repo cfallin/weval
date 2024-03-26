@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use structopt::StructOpt;
 
 mod directive;
+mod escape;
 mod eval;
 mod filter;
 mod image;
