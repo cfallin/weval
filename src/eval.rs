@@ -795,6 +795,14 @@ impl<'a> Evaluator<'a> {
                                 ))
                             }
                         }
+                        EvalResult::Normal(AbstractValue::StaticMemory(addr)) if tys.len() == 1 => {
+                            let const_op =
+                                const_operator(tys_slice[0], WasmVal::I32(addr)).unwrap();
+                            Some((
+                                ValueDef::Operator(const_op, ListRef::default(), specialized_tys),
+                                AbstractValue::StaticMemory(addr),
+                            ))
+                        }
                         EvalResult::Normal(av) => Some((
                             ValueDef::Operator(
                                 *op,
