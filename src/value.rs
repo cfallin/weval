@@ -34,7 +34,7 @@ impl WasmVal {
             waffle::Type::F32 => Some(WasmVal::F32(bits as u32)),
             waffle::Type::F64 => Some(WasmVal::F64(bits)),
             waffle::Type::V128 => Some(WasmVal::V128(bits as u128)),
-            waffle::Type::FuncRef => None,
+            waffle::Type::FuncRef | waffle::Type::TypedFuncRef(..) => None,
         }
     }
 }
