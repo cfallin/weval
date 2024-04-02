@@ -181,24 +181,54 @@ impl Rewrite {
                     let mut out_elements = wasm_encoder::ElementSection::new();
                     for element in elements {
                         let element = element?;
+
                         let mut out_items = vec![];
-                        let ElementItems::Functions(funcs) = element.items else {
-                            continue;
+                        let mut out_exprs = vec![];
+                        let out_items = match element.items {
+                            ElementItems::Functions(funcs) => {
+                                for f in funcs {
+                                    let f = f?;
+                                    let new = self.func_remap.get(&f).unwrap().as_index()?;
+                                    out_items.push(new);
+                                }
+                                wasm_encoder::Elements::Functions(&out_items[..])
+                            }
+                            ElementItems::Expressions(ty, exprs) => {
+                                let sig = ty.type_index().unwrap().as_module_index().unwrap();
+                                for expr in exprs {
+                                    let expr = expr?;
+                                    let func = expr
+                                        .get_operators_reader()
+                                        .into_iter()
+                                        .map(|op| {
+                                            let op = op.unwrap();
+                                            match op {
+                                                wasmparser::Operator::RefFunc {
+                                                    function_index,
+                                                } => self
+                                                    .func_remap
+                                                    .get(&function_index)
+                                                    .unwrap()
+                                                    .as_index()
+                                                    .unwrap(),
+                                                _ => panic!("Unsupported op"),
+                                            }
+                                        })
+                                        .next()
+                                        .unwrap();
+                                    out_exprs.push(wasm_encoder::ConstExpr::ref_func(func));
+                                }
+                                wasm_encoder::Elements::Expressions(
+                                    wasm_encoder::RefType {
+                                        nullable: true,
+                                        heap_type: wasm_encoder::HeapType::Concrete(sig),
+                                    },
+                                    &out_exprs[..],
+                                )
+                            }
                         };
-                        for f in funcs {
-                            let f = f?;
-                            let new = self.func_remap.get(&f).unwrap().as_index()?;
-                            out_items.push(new);
-                        }
+
                         match element.kind {
-                            ElementKind::Passive => {
-                                out_elements
-                                    .passive(wasm_encoder::Elements::Functions(&out_items[..]));
-                            }
-                            ElementKind::Declared => {
-                                out_elements
-                                    .declared(wasm_encoder::Elements::Functions(&out_items[..]));
-                            }
                             ElementKind::Active {
                                 table_index,
                                 offset_expr,
@@ -221,12 +251,9 @@ impl Rewrite {
                                         ),
                                     }
                                 }
-                                out_elements.active(
-                                    table_index,
-                                    &const_expr.unwrap(),
-                                    wasm_encoder::Elements::Functions(&out_items[..]),
-                                );
+                                out_elements.active(table_index, &const_expr.unwrap(), out_items);
                             }
+                            _ => panic!("Unsupported element kind for element section"),
                         }
                     }
 
