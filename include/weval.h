@@ -213,8 +213,9 @@ uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi)
 /* "Fast dispatch points": typed-funcref-based IC heads */
 
 /* Returns a non-zero ID, fixed for this program point, if the feature
- * is activated. */
-weval_dispatch_point_t weval_dispatch_point()
+ * is activated. Takes a function pointer in order to tie the
+ * dispatch-point to a concrete signature. */
+weval_dispatch_point_t weval_dispatch_point(void* func_with_sig)
     WEVAL_WASM_IMPORT("dispatch.point");
 /* Returns a function pointer if one is set for this program point. If
  * directly invoked or null-tested, retains is "fast" form (a typed
