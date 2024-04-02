@@ -67,6 +67,9 @@ pub enum AbstractValue {
     /// A value only computed at runtime. The instruction that
     /// computed it is specified, if known.
     Runtime(Option<waffle::Value>),
+    /// A fast-dispatch function reference. Can only be used by a
+    /// `call_indirect` or a null check; any other usage is an error.
+    FastDispatchRef(waffle::Signature),
 }
 
 /// Memory pointed to by one of the incoming arguments to a

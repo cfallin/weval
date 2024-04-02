@@ -63,13 +63,13 @@ impl Intrinsics {
             dispatch_point_get_func: find_imported_intrinsic(
                 module,
                 "dispatch.point.get.func",
-                &[Type::I32],
+                &[Type::I32, Type::I32],
                 &[Type::I32],
             ),
             dispatch_point_set_func: find_imported_intrinsic(
                 module,
                 "dispatch.point.set.func",
-                &[Type::I32, Type::I32],
+                &[Type::I32, Type::I32, Type::I32],
                 &[],
             ),
         }
