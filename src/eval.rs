@@ -167,7 +167,9 @@ pub fn partially_evaluate<'a>(
     // Compute memory updates and the pre-weval lookup table.
     let mut mem_updates = HashMap::default();
     let mut lookup_table = vec![];
+    let mut typed_func_tables_by_sig = HashMap::default();
     for (directive, decl) in bodies {
+        let sig = decl.sig();
         // Add function to module.
         let func = module.funcs.push(decl);
         // Append to table.
@@ -182,6 +184,31 @@ pub fn partially_evaluate<'a>(
             func_table.max = Some(table_idx + 1);
         }
         log::info!("New func index {} -> table index {}", func, table_idx);
+        // Append to typed-func table
+        let typed_func_table_num = *typed_func_tables_by_sig.entry(sig).or_insert_with(|| {
+            let func_table = module.tables.push(waffle::TableData {
+                ty: waffle::Type::TypedFuncRef(true, sig.index() as u32),
+                initial: 0,
+                max: Some(0),
+                func_elements: Some(vec![]),
+            });
+            func_table
+        });
+        let typed_func_table = &mut module.tables[typed_func_table_num];
+        let typed_table_idx = {
+            let func_table_elts = typed_func_table.func_elements.as_mut().unwrap();
+            let table_idx = func_table_elts.len();
+            func_table_elts.push(func);
+            table_idx
+        } as u32;
+        if typed_func_table.max.is_some() && typed_table_idx >= typed_func_table.max.unwrap() {
+            typed_func_table.max = Some(typed_table_idx + 1);
+        }
+        log::info!(
+            "Added to typed-func table {} with index {}",
+            typed_func_table_num,
+            typed_table_idx
+        );
 
         // Update memory image if this request is a live one with an
         // output function index, otherwise add to pre-weval lookup
@@ -189,9 +216,17 @@ pub fn partially_evaluate<'a>(
         if directive.func_index_out_addr != 0 {
             log::info!(" -> writing to 0x{:x}", directive.func_index_out_addr);
             mem_updates.insert(directive.func_index_out_addr, table_idx);
+            if directive.typed_func_index_out_addr != 0 {
+                mem_updates.insert(directive.typed_func_index_out_addr, typed_table_idx);
+            }
         } else {
             log::info!(" -> adding to lookup table");
-            lookup_table.push((directive.user_id, &directive.args[..], table_idx));
+            lookup_table.push((
+                directive.user_id,
+                &directive.args[..],
+                table_idx,
+                typed_table_idx,
+            ));
         }
     }
 
@@ -215,7 +250,7 @@ pub fn partially_evaluate<'a>(
         // Append arg strings to memory and record their addresses.
         let argbuf_addrs = lookup_table
             .iter()
-            .map(|(_, argbuf, _)| {
+            .map(|(_, argbuf, _, _)| {
                 let addr = lookup_base + lookup_bytes.len();
                 lookup_bytes.extend(argbuf.iter().cloned());
                 addr
@@ -231,13 +266,16 @@ pub fn partially_evaluate<'a>(
         // Append `weval_lookup_entry_t` structs.
         let lookup_entries = lookup_base + lookup_bytes.len();
         let lookup_nentries = lookup_table.len();
-        for (&(user_id, args, func), &argbuf) in lookup_table.iter().zip(argbuf_addrs.iter()) {
+        for (&(user_id, args, func, typed_func), &argbuf) in
+            lookup_table.iter().zip(argbuf_addrs.iter())
+        {
             let argbuf = u32::try_from(argbuf).unwrap();
             let arglen = u32::try_from(args.len()).unwrap();
             lookup_bytes.extend(u32::to_le_bytes(user_id));
             lookup_bytes.extend(u32::to_le_bytes(argbuf));
             lookup_bytes.extend(u32::to_le_bytes(arglen));
             lookup_bytes.extend(u32::to_le_bytes(func));
+            lookup_bytes.extend(u32::to_le_bytes(typed_func));
         }
         // Append the data to the memory image.
         im.append_data(heap, lookup_bytes);
