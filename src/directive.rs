@@ -20,10 +20,6 @@ pub struct Directive {
     /// given address in memory, if nonzero.
     #[serde(skip)]
     pub func_index_out_addr: u32,
-    /// Place the fast-dispatch table ID in the given address in
-    /// memory, if nonzero.
-    #[serde(skip)]
-    pub typed_func_index_out_addr: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -121,7 +117,6 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
     let arg_ptr = im.read_u32(heap, head + 16)?;
     let arg_len = im.read_u32(heap, head + 20)?;
     let func_index_out_addr = im.read_u32(heap, head + 24)?;
-    let typed_func_index_out_addr = im.read_u32(heap, head + 28)?;
     let args = im.read_slice(heap, arg_ptr, arg_len)?.to_vec();
 
     log::trace!("directive: args {:#x} len {:#x}", arg_ptr, arg_len);
@@ -131,7 +126,6 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
         func,
         args,
         func_index_out_addr,
-        typed_func_index_out_addr,
     })
 }
 

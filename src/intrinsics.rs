@@ -15,9 +15,6 @@ pub struct Intrinsics {
     pub assert_const32: Option<Func>,
     pub specialize_value: Option<Func>,
     pub print: Option<Func>,
-    pub dispatch_point: Option<Func>,
-    pub dispatch_point_get_func: Option<Func>,
-    pub dispatch_point_set_func: Option<Func>,
 }
 
 impl Intrinsics {
@@ -51,24 +48,6 @@ impl Intrinsics {
             print: find_imported_intrinsic(
                 module,
                 "print",
-                &[Type::I32, Type::I32, Type::I32],
-                &[],
-            ),
-            dispatch_point: find_imported_intrinsic(
-                module,
-                "dispatch.point",
-                &[Type::I32],
-                &[Type::I32],
-            ),
-            dispatch_point_get_func: find_imported_intrinsic(
-                module,
-                "dispatch.point.get.func",
-                &[Type::I32, Type::I32],
-                &[Type::I32],
-            ),
-            dispatch_point_set_func: find_imported_intrinsic(
-                module,
-                "dispatch.point.set.func",
                 &[Type::I32, Type::I32, Type::I32],
                 &[],
             ),
