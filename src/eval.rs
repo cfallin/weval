@@ -1668,9 +1668,9 @@ impl<'a> Evaluator<'a> {
                         self.func.blocks[new_block].insts.push(v_cache_key_epoch);
 
                         let v_thirty_two = self.func.add_value(ValueDef::Operator(
-                            Operator::I32Const { value: 32 },
+                            Operator::I64Const { value: 32 },
                             ListRef::default(),
-                            i32_ty,
+                            i64_ty,
                         ));
                         self.func.blocks[new_block].insts.push(v_thirty_two);
 
@@ -1682,7 +1682,7 @@ impl<'a> Evaluator<'a> {
                         ));
                         self.func.blocks[new_block].insts.push(v_epoch_ext);
 
-                        let args = self.func.arg_pool.double(*epoch, v_thirty_two);
+                        let args = self.func.arg_pool.double(v_epoch_ext, v_thirty_two);
                         let v_epoch_shifted =
                             self.func
                                 .add_value(ValueDef::Operator(Operator::I64Shl, args, i64_ty));
