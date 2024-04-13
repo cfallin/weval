@@ -70,7 +70,12 @@ fn parser_to_encoder_ty(ty: wasmparser::ValType) -> wasm_encoder::ValType {
         wasmparser::ValType::Ref(wasmparser::RefType::EXTERNREF) => {
             wasm_encoder::ValType::Ref(wasm_encoder::RefType::EXTERNREF)
         }
-        _ => panic!("Unknown type: {ty:?}"),
+        wasmparser::ValType::Ref(r) => wasm_encoder::ValType::Ref(wasm_encoder::RefType {
+            nullable: r.is_nullable(),
+            heap_type: wasm_encoder::HeapType::Concrete(
+                r.type_index().unwrap().as_module_index().unwrap(),
+            ),
+        }),
     }
 }
 

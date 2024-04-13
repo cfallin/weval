@@ -157,9 +157,9 @@ pub fn partially_evaluate<'a>(
     // - A table per weval'd function, for fast dispatch, along with
     //   tables to track observed constant keys and allocate them
     //   indices as we evaluate individual functions.
-    let wevaled_funcs = weval_id_to_func
+    let wevaled_funcs = directives
         .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|d| (d.user_id, d.func))
         .collect::<BTreeSet<(u32, Func)>>();
     let wevaled_sigs = wevaled_funcs
         .iter()
@@ -261,6 +261,7 @@ pub fn partially_evaluate<'a>(
             func_table_elts.push(func);
             table_idx
         } as u32;
+        func_table.initial = std::cmp::max(func_table.initial, table_idx + 1);
         if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
             func_table.max = Some(table_idx + 1);
         }
@@ -342,11 +343,18 @@ pub fn partially_evaluate<'a>(
     if let Some(lookup_head) = find_global_data_by_exported_func(&module, "weval.dispatch.table") {
         let mut lookup_entries = vec![];
         for (func_id, info) in &typed_func_tables.dispatch_by_func_id {
-            for (key, index) in info.index_by_key.lock().unwrap().iter() {
+            let index_by_key = info.index_by_key.lock().unwrap();
+            for (key, index) in index_by_key.iter() {
                 lookup_entries.push((*func_id, *key, *index));
             }
+
+            // Update size of table.
+            module.tables[info.table].initial = index_by_key.len() as u32;
+            module.tables[info.table].max = Some(index_by_key.len() as u32);
         }
         lookup_entries.sort();
+
+        log::info!("Lookup table for dispatch points: {:?}", lookup_entries);
 
         let lookup_entry_addr = im.memories[&heap].image.len();
         let lookup_nentries = lookup_entries.len();
@@ -376,7 +384,7 @@ pub fn partially_evaluate<'a>(
     for (sig, info) in &typed_func_tables.table_by_sig {
         let mut funcs = module.tables[Table::new(0)].func_elements.clone().unwrap();
         for f in &mut funcs {
-            if module.funcs[*f].sig() != *sig {
+            if *f != Func::invalid() && module.funcs[*f].sig() != *sig {
                 *f = Func::invalid();
             }
         }
@@ -1604,6 +1612,17 @@ impl<'a> Evaluator<'a> {
                 let func_id = abs[2]
                     .as_const_u32()
                     .ok_or_else(|| anyhow::anyhow!("Dispatch-point func ID not constant"))?;
+
+                log::trace!(
+                    "Fast-dispatch: func_ptr = {} key = {} func_id = {}",
+                    func_ptr,
+                    key,
+                    func_id
+                );
+
+                if key == 0 {
+                    return Ok(EvalResult::Normal(AbstractValue::Runtime(None)));
+                }
 
                 // Get or create an index in the dispatch table.
                 let dispatch_info = self
