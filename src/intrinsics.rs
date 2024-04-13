@@ -15,6 +15,8 @@ pub struct Intrinsics {
     pub assert_const32: Option<Func>,
     pub specialize_value: Option<Func>,
     pub print: Option<Func>,
+    pub fast_dispatch: Option<Func>,
+    pub fast_dispatch_update: Option<Func>,
 }
 
 impl Intrinsics {
@@ -48,6 +50,18 @@ impl Intrinsics {
             print: find_imported_intrinsic(
                 module,
                 "print",
+                &[Type::I32, Type::I32, Type::I32],
+                &[],
+            ),
+            fast_dispatch: find_imported_intrinsic(
+                module,
+                "fast.dispatch",
+                &[Type::I32, Type::I32, Type::I32],
+                &[Type::I32],
+            ),
+            fast_dispatch_update: find_imported_intrinsic(
+                module,
+                "fast.dispatch.update",
                 &[Type::I32, Type::I32, Type::I32],
                 &[],
             ),

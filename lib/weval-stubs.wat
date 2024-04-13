@@ -15,4 +15,7 @@
  (func (export "assert.const.memory") (param i32 i32))
  (func (export "specialize.value") (param i32 i32 i32) (result i32)
  local.get 0)
- (func (export "print") (param i32 i32 i32)))
+ (func (export "print") (param i32 i32 i32))
+ (func (export "fast.dispatch") (param i32 i32 i32) (result i32)
+ local.get 0)
+ (func (export "fast.dispatch.update") (param i32 i32 i32)))

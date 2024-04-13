@@ -14,9 +14,10 @@ use std::sync::Mutex;
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::pool::ListRef;
+use waffle::TableData;
 use waffle::{
-    entity::PerEntity, Block, BlockDef, BlockTarget, FuncDecl, FunctionBody, Module, Operator,
-    Signature, SourceLoc, Table, Terminator, Type, Value, ValueDef,
+    entity::PerEntity, Block, BlockDef, BlockTarget, Func, FuncDecl, FunctionBody, Module,
+    Operator, Signature, SourceLoc, Table, Terminator, Type, Value, ValueDef,
 };
 
 struct Evaluator<'a> {
@@ -30,6 +31,8 @@ struct Evaluator<'a> {
     directive_args: DirectiveArgs,
     /// Intrinsic function indices.
     intrinsics: &'a Intrinsics,
+    /// Tables for typed funcref usage.
+    typed_func_tables: &'a TypedFuncTables,
     /// Memory image.
     image: &'a Image,
     /// Domtree for function body.
@@ -57,6 +60,27 @@ struct Evaluator<'a> {
     queue: VecDeque<(Block, Context, Block)>,
     /// Set to deduplicate `queue`.
     queue_set: HashSet<(Block, Context)>,
+}
+
+/// For each signature used by a weval'd function ID, we have a typed
+/// func-table of all funcs of that type (with indices matching the
+/// untyped func-table's indices). For each weval'd function ID, we
+/// have another typed func-table for fast dispatch. We accumulate
+/// observed constant keys and indices in the fast-dispatch table
+/// we've assigned them.
+struct TypedFuncTables {
+    table_by_sig: HashMap<Signature, TypedFuncTableInfo>,
+    dispatch_by_func_id: HashMap<u32, DispatchTableInfo>,
+}
+
+struct TypedFuncTableInfo {
+    table: Table,
+}
+
+struct DispatchTableInfo {
+    table: Table,
+    sig: Signature,
+    index_by_key: Mutex<HashMap<u32, u32>>,
 }
 
 pub struct PartialEvalResult<'a> {
@@ -126,6 +150,58 @@ pub fn partially_evaluate<'a>(
         }
     }
 
+    // Create typed-func-table info:
+    // - A table per signature of a weval'd function, that will have
+    //   an "overlay" of all functions with that signature (and null
+    //   holes otherwise).
+    // - A table per weval'd function, for fast dispatch, along with
+    //   tables to track observed constant keys and allocate them
+    //   indices as we evaluate individual functions.
+    let wevaled_funcs = weval_id_to_func
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect::<BTreeSet<(u32, Func)>>();
+    let wevaled_sigs = wevaled_funcs
+        .iter()
+        .map(|&(_, f)| module.funcs[f].sig())
+        .collect::<BTreeSet<Signature>>();
+    let table_by_sig = wevaled_sigs
+        .iter()
+        .map(|&sig| {
+            let table = module.tables.push(TableData {
+                ty: Type::TypedFuncRef(true, sig.index() as u32),
+                initial: 0,
+                max: Some(0),
+                func_elements: Some(vec![]),
+            });
+            (sig, TypedFuncTableInfo { table })
+        })
+        .collect::<HashMap<Signature, TypedFuncTableInfo>>();
+    let dispatch_by_func_id = wevaled_funcs
+        .iter()
+        .map(|&(id, f)| {
+            let sig = module.funcs[f].sig();
+            let table = module.tables.push(TableData {
+                ty: Type::TypedFuncRef(true, sig.index() as u32),
+                initial: 0,
+                max: Some(0),
+                func_elements: Some(vec![]),
+            });
+            (
+                id,
+                DispatchTableInfo {
+                    table,
+                    sig,
+                    index_by_key: Mutex::new(HashMap::default()),
+                },
+            )
+        })
+        .collect::<HashMap<u32, DispatchTableInfo>>();
+    let typed_func_tables = TypedFuncTables {
+        table_by_sig,
+        dispatch_by_func_id,
+    };
+
     if let Some(p) = progress.as_mut() {
         p.set_length(directives.len() as u64);
     }
@@ -135,11 +211,18 @@ pub fn partially_evaluate<'a>(
         .par_iter()
         .flat_map(|directive| {
             let (generic, cfg, stats) = funcs.get(&directive.func).unwrap();
-            let result =
-                match partially_evaluate_func(&module, generic, cfg, im, &intrinsics, directive) {
-                    Ok(result) => result,
-                    Err(e) => return Some(Err(e)),
-                };
+            let result = match partially_evaluate_func(
+                &module,
+                generic,
+                cfg,
+                im,
+                &intrinsics,
+                &typed_func_tables,
+                directive,
+            ) {
+                Ok(result) => result,
+                Err(e) => return Some(Err(e)),
+            };
 
             if let Some(p) = progress_ref {
                 p.inc(1);
@@ -207,7 +290,7 @@ pub fn partially_evaluate<'a>(
         im.write_u32(heap, is_wevaled, 1)?;
     }
 
-    // Create lookup table.
+    // Create wevaled-function lookup table.
     if let Some(lookup_head) = find_global_data_by_exported_func(&module, "weval.lookup.table") {
         lookup_table.sort(); // Sort by user ID first, then arg bytestring.
         let lookup_base = im.memories[&heap].len();
@@ -255,6 +338,53 @@ pub fn partially_evaluate<'a>(
         );
     }
 
+    // Create dispatch-point lookup tables.
+    if let Some(lookup_head) = find_global_data_by_exported_func(&module, "weval.dispatch.table") {
+        let mut lookup_entries = vec![];
+        for (func_id, info) in &typed_func_tables.dispatch_by_func_id {
+            for (key, index) in info.index_by_key.lock().unwrap().iter() {
+                lookup_entries.push((*func_id, *key, *index));
+            }
+        }
+        lookup_entries.sort();
+
+        let lookup_entry_addr = im.memories[&heap].image.len();
+        let lookup_nentries = lookup_entries.len();
+        let mut lookup_bytes = vec![];
+        for (func_id, key, index) in lookup_entries {
+            lookup_bytes.extend(u32::to_le_bytes(func_id));
+            lookup_bytes.extend(u32::to_le_bytes(key));
+            lookup_bytes.extend(u32::to_le_bytes(index));
+        }
+        // Append the data to the memory image.
+        im.append_data(heap, lookup_bytes);
+        // Update `entries` and `nentries` in the `weval_dispatch_t`.
+        im.write_u32(heap, lookup_head, u32::try_from(lookup_entry_addr).unwrap())?;
+        im.write_u32(
+            heap,
+            lookup_head + 4,
+            u32::try_from(lookup_nentries).unwrap(),
+        )?;
+        log::info!(
+            "created weval dispatch-point lookup table at {:#x} len {:#x}",
+            lookup_entry_addr,
+            lookup_nentries
+        );
+    }
+
+    // Copy over function references to typed-func-ref tables.
+    for (sig, info) in &typed_func_tables.table_by_sig {
+        let mut funcs = module.tables[Table::new(0)].func_elements.clone().unwrap();
+        for f in &mut funcs {
+            if module.funcs[*f].sig() != *sig {
+                *f = Func::invalid();
+            }
+        }
+        module.tables[info.table].initial = funcs.len() as u32;
+        module.tables[info.table].max = Some(funcs.len() as u32);
+        module.tables[info.table].func_elements = Some(funcs);
+    }
+
     let mut stats = funcs
         .drain()
         .map(|(_, (_, _, stats))| stats.into_inner().unwrap())
@@ -270,6 +400,7 @@ fn partially_evaluate_func(
     cfg: &CFGInfo,
     image: &Image,
     intrinsics: &Intrinsics,
+    typed_func_tables: &TypedFuncTables,
     directive: &Directive,
 ) -> anyhow::Result<
     Option<(
@@ -295,6 +426,7 @@ fn partially_evaluate_func(
         directive,
         directive_args,
         intrinsics,
+        typed_func_tables,
         image,
         cfg,
         state: FunctionState::new(),
@@ -515,6 +647,7 @@ enum EvalResult {
     Elide,
     Alias(AbstractValue, Value),
     Normal(AbstractValue),
+    NewBlock(Block, AbstractValue, Value),
 }
 impl EvalResult {
     fn is_handled(&self) -> bool {
@@ -596,7 +729,8 @@ impl<'a> Evaluator<'a> {
         // Do the actual constant-prop, carrying the state across the
         // block and updating flow-sensitive state, and updating SSA
         // vals as well.
-        self.evaluate_block_body(orig_block, &mut state, new_block)
+        let new_block = self
+            .evaluate_block_body(orig_block, &mut state, new_block)
             .map_err(|e| {
                 e.context(anyhow::anyhow!(
                     "Evaluating block body {} in func:\n{}",
@@ -702,8 +836,8 @@ impl<'a> Evaluator<'a> {
         &mut self,
         orig_block: Block,
         state: &mut PointState,
-        new_block: Block,
-    ) -> anyhow::Result<()> {
+        mut new_block: Block,
+    ) -> anyhow::Result<Block> {
         // Reused below for each instruction.
         let mut arg_abs_values = vec![];
 
@@ -811,6 +945,10 @@ impl<'a> Evaluator<'a> {
                             ),
                             av,
                         )),
+                        EvalResult::NewBlock(block, av, value) => {
+                            new_block = block;
+                            Some((ValueDef::Alias(value), av))
+                        }
                     }
                 }
                 ValueDef::Trace(id, args) => {
@@ -839,7 +977,7 @@ impl<'a> Evaluator<'a> {
             }
         }
 
-        Ok(())
+        Ok(new_block)
     }
 
     fn meet_into_block_entry(
@@ -1250,6 +1388,13 @@ impl<'a> Evaluator<'a> {
             return Ok(reg_result);
         }
 
+        let dispatch_result =
+            self.abstract_eval_dispatch(orig_inst, new_block, op, abs, values, tys, state)?;
+        if dispatch_result.is_handled() {
+            log::debug!(" -> fast dispatch: {:?}", reg_result);
+            return Ok(dispatch_result);
+        }
+
         let ret = if op.is_call() {
             log::debug!(" -> call");
             AbstractValue::Runtime(Some(orig_inst))
@@ -1432,6 +1577,190 @@ impl<'a> Evaluator<'a> {
                 // Elide the store.
                 return Ok(EvalResult::Elide);
             }
+            _ => {}
+        }
+
+        Ok(EvalResult::Unhandled)
+    }
+
+    fn abstract_eval_dispatch(
+        &mut self,
+        _inst: Value,
+        new_block: Block,
+        op: Operator,
+        abs: &[AbstractValue],
+        vals: ListRef<Value>,
+        tys: &[Type],
+        _state: &mut PointState,
+    ) -> anyhow::Result<EvalResult> {
+        match op {
+            Operator::Call { function_index }
+                if Some(function_index) == self.intrinsics.fast_dispatch =>
+            {
+                let func_ptr = self.func.arg_pool[vals][0];
+                let key = abs[1]
+                    .as_const_u32()
+                    .ok_or_else(|| anyhow::anyhow!("Dispatch-point key not constant"))?;
+                let func_id = abs[2]
+                    .as_const_u32()
+                    .ok_or_else(|| anyhow::anyhow!("Dispatch-point func ID not constant"))?;
+
+                // Get or create an index in the dispatch table.
+                let dispatch_info = self
+                    .typed_func_tables
+                    .dispatch_by_func_id
+                    .get(&func_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Unknown func ID at dispatch point: {}", func_id)
+                    })?;
+                let index = {
+                    let mut map = dispatch_info.index_by_key.lock().unwrap();
+                    let len = map.len();
+                    *map.entry(key).or_insert(len as u32)
+                };
+
+                // Create a fast-dispatch-ref value that will be
+                // recognized with a call_indirect.
+                return Ok(EvalResult::Alias(
+                    AbstractValue::FastDispatchRef {
+                        sig: dispatch_info.sig,
+                        typed_func_table: dispatch_info.table,
+                        typed_func_index: index,
+                    },
+                    func_ptr,
+                ));
+            }
+
+            Operator::CallIndirect {
+                sig_index,
+                table_index,
+            } if table_index.index() == 0 => match abs.last() {
+                Some(AbstractValue::FastDispatchRef {
+                    sig,
+                    typed_func_table,
+                    typed_func_index,
+                }) => {
+                    anyhow::ensure!(
+                        *sig == sig_index,
+                        "Mismatching signatures on fast-dispatch ref"
+                    );
+
+                    // Generate the following sequence:
+                    //
+                    // v_idx = i32const<typed_func_index>
+                    // v_ref = table.get<typed_func_table> v_idx
+                    // v_is_null = is_null v_ref
+                    // brif v_is_null block_null, block_non_null
+                    //
+                    // block_null:
+                    // v_result_null = call_indirect<sig> [original args]
+                    // br block_cont(v_result_null)
+                    //
+                    // block_non_null:
+                    // v_result_non_null = call_ref<sig> [original args minus last] + v_ref
+                    // br block_cont(v_result_non_null)
+                    //
+                    // block_cont(c):
+                    //
+                    // with an EvalResult::NewBlock(block_cont, Runtime, c)
+
+                    let i32_ty = self.func.single_type_list(Type::I32);
+                    let v_idx = self.func.add_value(ValueDef::Operator(
+                        Operator::I32Const {
+                            value: *typed_func_index,
+                        },
+                        ListRef::default(),
+                        i32_ty,
+                    ));
+                    self.func.blocks[new_block].insts.push(v_idx);
+
+                    let ref_ty = self
+                        .func
+                        .single_type_list(Type::TypedFuncRef(true, sig.index() as u32));
+                    let idx_arg = self.func.arg_pool.single(v_idx);
+                    let v_ref = self.func.add_value(ValueDef::Operator(
+                        Operator::TableGet {
+                            table_index: *typed_func_table,
+                        },
+                        idx_arg,
+                        ref_ty,
+                    ));
+                    self.func.blocks[new_block].insts.push(v_ref);
+
+                    let ref_arg = self.func.arg_pool.single(v_ref);
+                    let v_is_null = self.func.add_value(ValueDef::Operator(
+                        Operator::RefIsNull,
+                        ref_arg,
+                        i32_ty,
+                    ));
+                    self.func.blocks[new_block].insts.push(v_is_null);
+
+                    let block_null = self.func.add_block();
+                    let block_non_null = self.func.add_block();
+                    let block_cont = self.func.add_block();
+
+                    self.func.blocks[new_block].terminator = Terminator::CondBr {
+                        cond: v_is_null,
+                        if_true: BlockTarget {
+                            block: block_null,
+                            args: vec![],
+                        },
+                        if_false: BlockTarget {
+                            block: block_non_null,
+                            args: vec![],
+                        },
+                    };
+
+                    assert_eq!(tys.len(), 1);
+                    let result_ty = self.func.single_type_list(tys[0]);
+                    let v_result_null = self.func.add_value(ValueDef::Operator(
+                        Operator::CallIndirect {
+                            sig_index,
+                            table_index,
+                        },
+                        vals,
+                        result_ty,
+                    ));
+                    self.func.blocks[block_null].insts.push(v_result_null);
+                    self.func.blocks[block_null].terminator = Terminator::Br {
+                        target: BlockTarget {
+                            block: block_cont,
+                            args: vec![v_result_null],
+                        },
+                    };
+
+                    let mut args_with_ref = self.func.arg_pool[vals].to_vec();
+                    args_with_ref.pop();
+                    args_with_ref.push(v_ref);
+                    let args_with_ref = self.func.arg_pool.from_iter(args_with_ref.into_iter());
+                    let v_result_non_null = self.func.add_value(ValueDef::Operator(
+                        Operator::CallRef { sig_index },
+                        args_with_ref,
+                        result_ty,
+                    ));
+                    self.func.blocks[block_non_null]
+                        .insts
+                        .push(v_result_non_null);
+                    self.func.blocks[block_non_null].terminator = Terminator::Br {
+                        target: BlockTarget {
+                            block: block_cont,
+                            args: vec![v_result_non_null],
+                        },
+                    };
+
+                    let c = self.func.add_blockparam(block_cont, tys[0]);
+
+                    return Ok(EvalResult::NewBlock(
+                        block_cont,
+                        AbstractValue::Runtime(None),
+                        c,
+                    ));
+                }
+                _ => {}
+            },
+
+            Operator::Call { function_index }
+                if Some(function_index) == self.intrinsics.fast_dispatch_update => {}
             _ => {}
         }
 

@@ -14,6 +14,8 @@ typedef struct weval_req_t weval_req_t;
 typedef struct weval_req_arg_t weval_req_arg_t;
 typedef struct weval_lookup_entry_t weval_lookup_entry_t;
 typedef struct weval_lookup_t weval_lookup_t;
+typedef struct weval_dispatch_entry_t weval_dispatch_entry_t;
+typedef struct weval_dispatch_t weval_dispatch_t;
 
 struct weval_req_t {
   weval_req_t* next;
@@ -70,27 +72,45 @@ struct weval_lookup_entry_t {
   weval_func_t specialized;
 };
 
+/* Fast dispatch point table created by weval */
+struct weval_dispatch_t {
+    weval_dispatch_entry_t* entries;
+    uint32_t nentries;
+};
+
+struct weval_dispatch_entry_t {
+    uint32_t func_id;
+    void* key;
+    uint32_t dispatch_index;
+};
+
 extern weval_req_t* weval_req_pending_head;
 extern bool weval_is_wevaled;
 extern weval_lookup_t weval_lookup_table;
+extern weval_dispatch_t weval_dispatch_table;
 
-#define WEVAL_DEFINE_GLOBALS()                                          \
-  weval_req_t* weval_req_pending_head;                                  \
-  __attribute__((export_name("weval.pending.head"))) weval_req_t**      \
-  __weval_pending_head() {                                              \
-    return &weval_req_pending_head;                                     \
-  }                                                                     \
-                                                                        \
-  bool weval_is_wevaled;                                                \
-  __attribute__((export_name("weval.is.wevaled"))) bool*                \
-  __weval_is_wevaled() {                                                \
-    return &weval_is_wevaled;                                           \
-  }                                                                     \
-                                                                        \
-  weval_lookup_t weval_lookup_table = {.entries = NULL, .nentries = 0}; \
-  __attribute__((export_name("weval.lookup.table"))) weval_lookup_t*    \
-  __weval_lookup_table() {                                              \
-    return &weval_lookup_table;                                         \
+#define WEVAL_DEFINE_GLOBALS()                                              \
+  weval_req_t* weval_req_pending_head;                                      \
+  __attribute__((export_name("weval.pending.head"))) weval_req_t**          \
+  __weval_pending_head() {                                                  \
+    return &weval_req_pending_head;                                         \
+  }                                                                         \
+                                                                            \
+  bool weval_is_wevaled;                                                    \
+  __attribute__((export_name("weval.is.wevaled"))) bool*                    \
+  __weval_is_wevaled() {                                                    \
+    return &weval_is_wevaled;                                               \
+  }                                                                         \
+                                                                            \
+  weval_lookup_t weval_lookup_table = {.entries = NULL, .nentries = 0};     \
+  __attribute__((export_name("weval.lookup.table"))) weval_lookup_t*        \
+  __weval_lookup_table() {                                                  \
+    return &weval_lookup_table;                                             \
+  }                                                                         \
+  weval_dispatch_t weval_dispatch_table = {.entries = NULL, .nentries = 0}; \
+  __attribute__((export_name("weval.dispatch.table"))) weval_dispatch_t*    \
+  __weval_dispatch_table() {                                                \
+    return &weval_dispatch_table;                                           \
   }
 
 #define WEVAL_DEFINE_TARGET(index, func)             \
@@ -146,6 +166,33 @@ static inline weval_lookup_entry_t* __weval_find(weval_req_t* req) {
   return NULL;
 }
 
+static inline weval_dispatch_entry_t* __weval_find_dispatch(uint32_t func_id, void* key) {
+    if (weval_dispatch_table.nentries == 0) {
+        return NULL;
+    }
+
+    uint32_t lo = 0;
+    uint32_t hi = weval_dispatch_table.nentries;
+
+    while (hi > lo) {
+      uint32_t mid = lo + (hi - lo) / 2;
+      weval_dispatch_entry_t* entry = &weval_dispatch_table.entries[mid];
+
+      if (func_id == entry->func_id && key == entry->key) {
+        return entry;
+      } else if (func_id < entry->func_id ||
+                 (func_id == entry->func_id &&
+                  reinterpret_cast<uintptr_t>(key) <
+                      reinterpret_cast<uintptr_t>(entry->key))) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+
+    return NULL;
+}
+
 static inline void weval_request(weval_req_t* req) {
   if (weval_is_wevaled) {
     weval_lookup_entry_t* entry = __weval_find(req);
@@ -199,6 +246,23 @@ void weval_write_reg(uint64_t idx, uint64_t value)
     WEVAL_WASM_IMPORT("write.reg");
 uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi)
     WEVAL_WASM_IMPORT("specialize.value");
+
+/* Fast-dispatch intrinsics */
+uint8_t* weval_fast_dispatch(uint8_t* func, void* key, uint32_t func_id)
+    WEVAL_WASM_IMPORT("fast.dispatch");
+void weval_fast_dispatch_update_index(uint32_t dispatch_index, uint8_t* new_func, uint32_t func_id)
+    WEVAL_WASM_IMPORT("fast.dispatch.update");
+
+static inline void weval_fast_dispatch_update(void* key, uint8_t* new_func,
+                                              uint32_t func_id) {
+  weval_dispatch_entry_t* entry = __weval_find_dispatch(func_id, key);
+  if (entry) {
+    weval_fast_dispatch_update_index(entry->dispatch_index, new_func, func_id);
+  }
+}
+
+void weval_fast_dispatch_clear(void* key, uint32_t func_id)
+    WEVAL_WASM_IMPORT("fast.dispatch.clear");
 
 /* Debugging and stats intrinsics */
     
