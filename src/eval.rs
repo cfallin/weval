@@ -153,7 +153,20 @@ pub fn partially_evaluate<'a>(
     //   to track observed constant keys and allocate them indices as
     //   we evaluate individual functions.
     let fast_dispatch_sig = find_global_data_by_exported_func(&module, "weval.dispatch.target")
-        .map(|func_idx| module.funcs[Func::from(func_idx)].sig());
+        .map(|table_idx| {
+            let func = module.tables[Table::from(0)]
+                .func_elements
+                .as_ref()
+                .unwrap()[table_idx as usize];
+            let sig = module.funcs[func].sig();
+            log::trace!(
+                "fast-dispatch target is {} ({}) with sig {}",
+                func,
+                module.funcs[func].name(),
+                sig
+            );
+            sig
+        });
     let fast_dispatch_func_table = fast_dispatch_sig.map(|sig| {
         module.tables.push(TableData {
             ty: Type::TypedFuncRef(true, sig.index() as u32),
@@ -1382,7 +1395,7 @@ impl<'a> Evaluator<'a> {
         let dispatch_result =
             self.abstract_eval_dispatch(orig_inst, new_block, op, abs, values, tys, state)?;
         if dispatch_result.is_handled() {
-            log::debug!(" -> fast dispatch: {:?}", reg_result);
+            log::debug!(" -> fast dispatch: {:?}", dispatch_result);
             return Ok(dispatch_result);
         }
 
