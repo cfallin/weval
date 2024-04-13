@@ -424,6 +424,7 @@ fn partially_evaluate_func(
     let sig = module.funcs[directive.func].sig();
 
     log::info!("Specializing: {:?}", directive);
+    log::info!("Args: {:?}", directive_args);
     log::debug!("body:\n{}", generic.display("| ", Some(module)));
 
     // Build the evaluator.
