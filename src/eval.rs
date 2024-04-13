@@ -62,29 +62,22 @@ struct Evaluator<'a> {
     queue_set: HashSet<(Block, Context)>,
 }
 
-/// For each signature used by a weval'd function ID, we have a typed
+/// For the specified fast-dispatch signature, if any, we have a typed
 /// func-table of all funcs of that type (with indices matching the
-/// untyped func-table's indices). For each weval'd function ID, we
-/// have another typed func-table for fast dispatch. We accumulate
-/// observed constant keys and indices in the fast-dispatch table
-/// we've assigned them.
-struct TypedFuncTables {
-    table_by_sig: HashMap<Signature, TypedFuncTableInfo>,
-    dispatch_by_func_id: HashMap<u32, DispatchTableInfo>,
-}
-
-struct TypedFuncTableInfo {
-    table: Table,
-}
-
-struct DispatchTableInfo {
-    table: Table,
-    sig: Signature,
-    index_by_key: Mutex<HashMap<u32, u32>>,
+/// untyped func-table's indices), and we have another typed
+/// func-table for fast dispatch. We accumulate observed constant keys
+/// and indices in the fast-dispatch table we've assigned them.
+#[derive(Debug)]
+pub struct TypedFuncTables {
+    pub fast_dispatch_sig: Option<Signature>,
+    pub func_table: Option<Table>,
+    pub dispatch_table: Option<Table>,
+    pub index_by_key: Mutex<HashMap<u32, u32>>,
 }
 
 pub struct PartialEvalResult<'a> {
     pub module: Module<'a>,
+    pub typed_func_tables: TypedFuncTables,
     pub stats: Vec<SpecializationStats>,
 }
 
@@ -151,56 +144,39 @@ pub fn partially_evaluate<'a>(
     }
 
     // Create typed-func-table info:
-    // - A table per signature of a weval'd function, that will have
-    //   an "overlay" of all functions with that signature (and null
-    //   holes otherwise).
-    // - A table per weval'd function, for fast dispatch, along with
-    //   tables to track observed constant keys and allocate them
-    //   indices as we evaluate individual functions.
-    let wevaled_funcs = directives
-        .iter()
-        .map(|d| (d.user_id, d.func))
-        .collect::<BTreeSet<(u32, Func)>>();
-    let wevaled_sigs = wevaled_funcs
-        .iter()
-        .map(|&(_, f)| module.funcs[f].sig())
-        .collect::<BTreeSet<Signature>>();
-    let table_by_sig = wevaled_sigs
-        .iter()
-        .map(|&sig| {
-            let table = module.tables.push(TableData {
-                ty: Type::TypedFuncRef(true, sig.index() as u32),
-                initial: 0,
-                max: Some(0),
-                func_elements: Some(vec![]),
-            });
-            (sig, TypedFuncTableInfo { table })
+    // - The fast-dispatch signature, as provided by an export with a
+    //   well-known name.
+    // - A Wasm table for the fast-dispatch signature of a weval'd
+    //   function, that will have an "overlay" of all functions with
+    //   that signature (and null holes otherwise).
+    // - A Wasm table for fast dispatch points, along with a hashmap
+    //   to track observed constant keys and allocate them indices as
+    //   we evaluate individual functions.
+    let fast_dispatch_sig = find_global_data_by_exported_func(&module, "weval.dispatch.target")
+        .map(|func_idx| module.funcs[Func::from(func_idx)].sig());
+    let fast_dispatch_func_table = fast_dispatch_sig.map(|sig| {
+        module.tables.push(TableData {
+            ty: Type::TypedFuncRef(true, sig.index() as u32),
+            initial: 0,
+            max: Some(0),
+            func_elements: Some(vec![]),
         })
-        .collect::<HashMap<Signature, TypedFuncTableInfo>>();
-    let dispatch_by_func_id = wevaled_funcs
-        .iter()
-        .map(|&(id, f)| {
-            let sig = module.funcs[f].sig();
-            let table = module.tables.push(TableData {
-                ty: Type::TypedFuncRef(true, sig.index() as u32),
-                initial: 0,
-                max: Some(0),
-                func_elements: Some(vec![]),
-            });
-            (
-                id,
-                DispatchTableInfo {
-                    table,
-                    sig,
-                    index_by_key: Mutex::new(HashMap::default()),
-                },
-            )
+    });
+    let fast_dispatch_table = fast_dispatch_sig.map(|sig| {
+        module.tables.push(TableData {
+            ty: Type::TypedFuncRef(true, sig.index() as u32),
+            initial: 0,
+            max: Some(0),
+            func_elements: Some(vec![]),
         })
-        .collect::<HashMap<u32, DispatchTableInfo>>();
+    });
     let typed_func_tables = TypedFuncTables {
-        table_by_sig,
-        dispatch_by_func_id,
+        fast_dispatch_sig,
+        func_table: fast_dispatch_func_table,
+        dispatch_table: fast_dispatch_table,
+        index_by_key: Mutex::new(HashMap::default()),
     };
+    log::info!("Typed func table info: {:?}", typed_func_tables);
 
     if let Some(p) = progress.as_mut() {
         p.set_length(directives.len() as u64);
@@ -340,27 +316,31 @@ pub fn partially_evaluate<'a>(
     }
 
     // Create dispatch-point lookup tables.
-    if let Some(lookup_head) = find_global_data_by_exported_func(&module, "weval.dispatch.table") {
-        let mut lookup_entries = vec![];
-        for (func_id, info) in &typed_func_tables.dispatch_by_func_id {
-            let index_by_key = info.index_by_key.lock().unwrap();
-            for (key, index) in index_by_key.iter() {
-                lookup_entries.push((*func_id, *key, *index));
-            }
-
-            // Update size of table.
-            module.tables[info.table].initial = index_by_key.len() as u32;
-            module.tables[info.table].max = Some(index_by_key.len() as u32);
-        }
+    if let (Some(fast_dispatch_sig), Some(dispatch_table), Some(func_table), Some(lookup_head)) = (
+        typed_func_tables.fast_dispatch_sig,
+        typed_func_tables.dispatch_table,
+        typed_func_tables.func_table,
+        find_global_data_by_exported_func(&module, "weval.dispatch.table"),
+    ) {
+        let mut lookup_entries = typed_func_tables
+            .index_by_key
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect::<Vec<_>>();
         lookup_entries.sort();
+
+        // Update size of table.
+        module.tables[dispatch_table].initial = lookup_entries.len() as u32;
+        module.tables[dispatch_table].max = Some(lookup_entries.len() as u32);
 
         log::info!("Lookup table for dispatch points: {:?}", lookup_entries);
 
         let lookup_entry_addr = im.memories[&heap].image.len();
         let lookup_nentries = lookup_entries.len();
         let mut lookup_bytes = vec![];
-        for (func_id, key, index) in lookup_entries {
-            lookup_bytes.extend(u32::to_le_bytes(func_id));
+        for (key, index) in lookup_entries {
             lookup_bytes.extend(u32::to_le_bytes(key));
             lookup_bytes.extend(u32::to_le_bytes(index));
         }
@@ -378,19 +358,17 @@ pub fn partially_evaluate<'a>(
             lookup_entry_addr,
             lookup_nentries
         );
-    }
 
-    // Copy over function references to typed-func-ref tables.
-    for (sig, info) in &typed_func_tables.table_by_sig {
+        // Copy over function references to typed-func-ref tables.
         let mut funcs = module.tables[Table::new(0)].func_elements.clone().unwrap();
         for f in &mut funcs {
-            if *f != Func::invalid() && module.funcs[*f].sig() != *sig {
+            if *f != Func::invalid() && module.funcs[*f].sig() != fast_dispatch_sig {
                 *f = Func::invalid();
             }
         }
-        module.tables[info.table].initial = funcs.len() as u32;
-        module.tables[info.table].max = Some(funcs.len() as u32);
-        module.tables[info.table].func_elements = Some(funcs);
+        module.tables[func_table].initial = funcs.len() as u32;
+        module.tables[func_table].max = Some(funcs.len() as u32);
+        module.tables[func_table].func_elements = Some(funcs);
     }
 
     let mut stats = funcs
@@ -399,7 +377,11 @@ pub fn partially_evaluate<'a>(
         .collect::<Vec<_>>();
     stats.sort_by_key(|stats| stats.generic);
 
-    Ok(PartialEvalResult { module, stats })
+    Ok(PartialEvalResult {
+        module,
+        typed_func_tables,
+        stats,
+    })
 }
 
 fn partially_evaluate_func(
@@ -1610,31 +1592,16 @@ impl<'a> Evaluator<'a> {
                 let key = abs[1]
                     .as_const_u32()
                     .ok_or_else(|| anyhow::anyhow!("Dispatch-point key not constant"))?;
-                let func_id = abs[2]
-                    .as_const_u32()
-                    .ok_or_else(|| anyhow::anyhow!("Dispatch-point func ID not constant"))?;
 
-                log::trace!(
-                    "Fast-dispatch: func_ptr = {} key = {} func_id = {}",
-                    func_ptr,
-                    key,
-                    func_id
-                );
+                log::trace!("Fast-dispatch: func_ptr = {} key = {}", func_ptr, key,);
 
                 if key == 0 {
                     return Ok(EvalResult::Normal(AbstractValue::Runtime(None)));
                 }
 
                 // Get or create an index in the dispatch table.
-                let dispatch_info = self
-                    .typed_func_tables
-                    .dispatch_by_func_id
-                    .get(&func_id)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Unknown func ID at dispatch point: {}", func_id)
-                    })?;
                 let index = {
-                    let mut map = dispatch_info.index_by_key.lock().unwrap();
+                    let mut map = self.typed_func_tables.index_by_key.lock().unwrap();
                     let len = map.len();
                     *map.entry(key).or_insert(len as u32)
                 };
@@ -1643,8 +1610,6 @@ impl<'a> Evaluator<'a> {
                 // recognized with a call_indirect.
                 return Ok(EvalResult::Alias(
                     AbstractValue::FastDispatchRef {
-                        sig: dispatch_info.sig,
-                        typed_func_table: dispatch_info.table,
                         typed_func_index: index,
                     },
                     func_ptr,
@@ -1654,133 +1619,126 @@ impl<'a> Evaluator<'a> {
             Operator::CallIndirect {
                 sig_index,
                 table_index,
-            } if table_index.index() == 0 => match abs.last() {
-                Some(AbstractValue::FastDispatchRef {
-                    sig,
-                    typed_func_table,
-                    typed_func_index,
-                }) => {
-                    anyhow::ensure!(
-                        *sig == sig_index,
-                        "Mismatching signatures on fast-dispatch ref"
-                    );
+            } if table_index.index() == 0
+                && Some(sig_index) == self.typed_func_tables.fast_dispatch_sig =>
+            {
+                match abs.last() {
+                    Some(AbstractValue::FastDispatchRef { typed_func_index }) => {
+                        // Generate the following sequence:
+                        //
+                        // v_idx = i32const<typed_func_index>
+                        // v_ref = table.get<typed_func_table> v_idx
+                        // v_is_null = is_null v_ref
+                        // brif v_is_null block_null, block_non_null
+                        //
+                        // block_null:
+                        // v_result_null = call_indirect<sig> [original args]
+                        // br block_cont(v_result_null)
+                        //
+                        // block_non_null:
+                        // v_result_non_null = call_ref<sig> [original args minus last] + v_ref
+                        // br block_cont(v_result_non_null)
+                        //
+                        // block_cont(c):
+                        //
+                        // with an EvalResult::NewBlock(block_cont, Runtime, c)
 
-                    // Generate the following sequence:
-                    //
-                    // v_idx = i32const<typed_func_index>
-                    // v_ref = table.get<typed_func_table> v_idx
-                    // v_is_null = is_null v_ref
-                    // brif v_is_null block_null, block_non_null
-                    //
-                    // block_null:
-                    // v_result_null = call_indirect<sig> [original args]
-                    // br block_cont(v_result_null)
-                    //
-                    // block_non_null:
-                    // v_result_non_null = call_ref<sig> [original args minus last] + v_ref
-                    // br block_cont(v_result_non_null)
-                    //
-                    // block_cont(c):
-                    //
-                    // with an EvalResult::NewBlock(block_cont, Runtime, c)
+                        let i32_ty = self.func.single_type_list(Type::I32);
+                        let v_idx = self.func.add_value(ValueDef::Operator(
+                            Operator::I32Const {
+                                value: *typed_func_index,
+                            },
+                            ListRef::default(),
+                            i32_ty,
+                        ));
+                        self.func.blocks[new_block].insts.push(v_idx);
 
-                    let i32_ty = self.func.single_type_list(Type::I32);
-                    let v_idx = self.func.add_value(ValueDef::Operator(
-                        Operator::I32Const {
-                            value: *typed_func_index,
-                        },
-                        ListRef::default(),
-                        i32_ty,
-                    ));
-                    self.func.blocks[new_block].insts.push(v_idx);
+                        let ref_ty = self
+                            .func
+                            .single_type_list(Type::TypedFuncRef(true, sig_index.index() as u32));
+                        let idx_arg = self.func.arg_pool.single(v_idx);
+                        let v_ref = self.func.add_value(ValueDef::Operator(
+                            Operator::TableGet {
+                                table_index: self.typed_func_tables.dispatch_table.unwrap(),
+                            },
+                            idx_arg,
+                            ref_ty,
+                        ));
+                        self.func.blocks[new_block].insts.push(v_ref);
 
-                    let ref_ty = self
-                        .func
-                        .single_type_list(Type::TypedFuncRef(true, sig.index() as u32));
-                    let idx_arg = self.func.arg_pool.single(v_idx);
-                    let v_ref = self.func.add_value(ValueDef::Operator(
-                        Operator::TableGet {
-                            table_index: *typed_func_table,
-                        },
-                        idx_arg,
-                        ref_ty,
-                    ));
-                    self.func.blocks[new_block].insts.push(v_ref);
+                        let ref_arg = self.func.arg_pool.single(v_ref);
+                        let v_is_null = self.func.add_value(ValueDef::Operator(
+                            Operator::RefIsNull,
+                            ref_arg,
+                            i32_ty,
+                        ));
+                        self.func.blocks[new_block].insts.push(v_is_null);
 
-                    let ref_arg = self.func.arg_pool.single(v_ref);
-                    let v_is_null = self.func.add_value(ValueDef::Operator(
-                        Operator::RefIsNull,
-                        ref_arg,
-                        i32_ty,
-                    ));
-                    self.func.blocks[new_block].insts.push(v_is_null);
+                        let block_null = self.func.add_block();
+                        let block_non_null = self.func.add_block();
+                        let block_cont = self.func.add_block();
 
-                    let block_null = self.func.add_block();
-                    let block_non_null = self.func.add_block();
-                    let block_cont = self.func.add_block();
+                        self.func.blocks[new_block].terminator = Terminator::CondBr {
+                            cond: v_is_null,
+                            if_true: BlockTarget {
+                                block: block_null,
+                                args: vec![],
+                            },
+                            if_false: BlockTarget {
+                                block: block_non_null,
+                                args: vec![],
+                            },
+                        };
 
-                    self.func.blocks[new_block].terminator = Terminator::CondBr {
-                        cond: v_is_null,
-                        if_true: BlockTarget {
-                            block: block_null,
-                            args: vec![],
-                        },
-                        if_false: BlockTarget {
-                            block: block_non_null,
-                            args: vec![],
-                        },
-                    };
+                        assert_eq!(tys.len(), 1);
+                        let result_ty = self.func.single_type_list(tys[0]);
+                        let v_result_null = self.func.add_value(ValueDef::Operator(
+                            Operator::CallIndirect {
+                                sig_index,
+                                table_index,
+                            },
+                            vals,
+                            result_ty,
+                        ));
+                        self.func.blocks[block_null].insts.push(v_result_null);
+                        self.func.blocks[block_null].terminator = Terminator::Br {
+                            target: BlockTarget {
+                                block: block_cont,
+                                args: vec![v_result_null],
+                            },
+                        };
 
-                    assert_eq!(tys.len(), 1);
-                    let result_ty = self.func.single_type_list(tys[0]);
-                    let v_result_null = self.func.add_value(ValueDef::Operator(
-                        Operator::CallIndirect {
-                            sig_index,
-                            table_index,
-                        },
-                        vals,
-                        result_ty,
-                    ));
-                    self.func.blocks[block_null].insts.push(v_result_null);
-                    self.func.blocks[block_null].terminator = Terminator::Br {
-                        target: BlockTarget {
-                            block: block_cont,
-                            args: vec![v_result_null],
-                        },
-                    };
+                        let mut args_with_ref = self.func.arg_pool[vals].to_vec();
+                        args_with_ref.pop();
+                        args_with_ref.push(v_ref);
+                        let args_with_ref = self.func.arg_pool.from_iter(args_with_ref.into_iter());
+                        let v_result_non_null = self.func.add_value(ValueDef::Operator(
+                            Operator::CallRef { sig_index },
+                            args_with_ref,
+                            result_ty,
+                        ));
+                        self.func.blocks[block_non_null]
+                            .insts
+                            .push(v_result_non_null);
+                        self.func.blocks[block_non_null].terminator = Terminator::Br {
+                            target: BlockTarget {
+                                block: block_cont,
+                                args: vec![v_result_non_null],
+                            },
+                        };
 
-                    let mut args_with_ref = self.func.arg_pool[vals].to_vec();
-                    args_with_ref.pop();
-                    args_with_ref.push(v_ref);
-                    let args_with_ref = self.func.arg_pool.from_iter(args_with_ref.into_iter());
-                    let v_result_non_null = self.func.add_value(ValueDef::Operator(
-                        Operator::CallRef { sig_index },
-                        args_with_ref,
-                        result_ty,
-                    ));
-                    self.func.blocks[block_non_null]
-                        .insts
-                        .push(v_result_non_null);
-                    self.func.blocks[block_non_null].terminator = Terminator::Br {
-                        target: BlockTarget {
-                            block: block_cont,
-                            args: vec![v_result_non_null],
-                        },
-                    };
+                        let c = self.func.add_blockparam(block_cont, tys[0]);
 
-                    let c = self.func.add_blockparam(block_cont, tys[0]);
-
-                    return Ok(EvalResult::NewBlock(
-                        block_cont,
-                        AbstractValue::Runtime(None),
-                        c,
-                    ));
+                        return Ok(EvalResult::NewBlock(
+                            block_cont,
+                            AbstractValue::Runtime(None),
+                            c,
+                        ));
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
 
-            Operator::Call { function_index }
-                if Some(function_index) == self.intrinsics.fast_dispatch_update => {}
             _ => {}
         }
 

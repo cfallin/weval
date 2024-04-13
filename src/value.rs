@@ -71,13 +71,10 @@ pub enum AbstractValue {
     /// `call_indirect`; any other usage degrades to the original
     /// function pointer.
     FastDispatchRef {
-        /// Signature of call.
-        sig: waffle::Signature,
-        /// Table of dispatch-point values.
-        typed_func_table: waffle::Table,
-        /// Constant index in table of dispatch-point values. If value
-        /// at this index is non-null, the value is logically *that*
-        /// function; otherwise, it is the original function pointer.
+        /// Constant index in the table of dispatch-point values. If
+        /// value at this index is non-null, the value is logically
+        /// *that* function; otherwise, it is the original function
+        /// pointer.
         typed_func_index: u32,
     },
 }
