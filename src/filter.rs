@@ -13,9 +13,7 @@
 //!     match accordingly. Generate a drop (`0x1a`) for all remaining args.
 //!   - Otherwise, if any args, generate drops for all args.
 
-use crate::eval::TypedFuncTables;
 use fxhash::FxHashMap;
-use waffle::entity::EntityRef;
 use wasmparser::{ElementItems, ElementKind, ExternalKind, Parser, Payload, TypeRef, ValType};
 
 #[derive(Clone, Debug)]
@@ -42,8 +40,6 @@ struct Rewrite {
 fn gen_replacement_bytecode(
     args: &[ValType],
     results: &[ValType],
-    name: &str,
-    typed_table_info: Option<&TypedFuncTables>,
 ) -> anyhow::Result<Vec<wasm_encoder::Instruction<'static>>> {
     anyhow::ensure!(results.len() <= 1);
     anyhow::ensure!(results.len() <= args.len());
@@ -54,27 +50,11 @@ fn gen_replacement_bytecode(
         );
     }
 
-    let dispatch_table = typed_table_info.and_then(|info| info.dispatch_table);
-    let func_table = typed_table_info.and_then(|info| info.func_table);
-    let fast_dispatch = dispatch_table.is_some() && func_table.is_some();
-
-    match name {
-        "fast.dispatch.update" if fast_dispatch => {
-            // Args are: dispatch_index, func_index. Replace with:
-            // table.get func_table, table.set dispatch_table.
-            Ok(vec![
-                wasm_encoder::Instruction::TableGet(func_table.unwrap().index() as u32),
-                wasm_encoder::Instruction::TableSet(dispatch_table.unwrap().index() as u32),
-            ])
-        }
-        _ => {
-            let mut insts = vec![];
-            for _ in 0..(args.len() - results.len()) {
-                insts.push(wasm_encoder::Instruction::Drop);
-            }
-            Ok(insts)
-        }
+    let mut insts = vec![];
+    for _ in 0..(args.len() - results.len()) {
+        insts.push(wasm_encoder::Instruction::Drop);
     }
+    Ok(insts)
 }
 
 fn parser_to_encoder_ty(ty: wasmparser::ValType) -> wasm_encoder::ValType {
@@ -100,11 +80,7 @@ fn parser_to_encoder_ty(ty: wasmparser::ValType) -> wasm_encoder::ValType {
 }
 
 impl Rewrite {
-    pub fn process(
-        mut self,
-        module: &[u8],
-        typed_table_info: Option<&TypedFuncTables>,
-    ) -> anyhow::Result<Vec<u8>> {
+    pub fn process(mut self, module: &[u8]) -> anyhow::Result<Vec<u8>> {
         let parser = Parser::new(0);
         let mut out = wasm_encoder::Module::new();
         let mut orig_func_idx = 0;
@@ -146,12 +122,7 @@ impl Rewrite {
                                 if import.module == "weval" {
                                     // Omit the import, and add a rewriting to the func_remap info.
                                     let (args, results) = &self.func_types[fty as usize];
-                                    let bytecode = gen_replacement_bytecode(
-                                        args,
-                                        results,
-                                        import.name,
-                                        typed_table_info,
-                                    )?;
+                                    let bytecode = gen_replacement_bytecode(args, results)?;
                                     self.func_remap
                                         .insert(orig_idx, FuncRemap::InlinedBytecode(bytecode));
                                 } else {
@@ -422,10 +393,7 @@ impl Rewrite {
     }
 }
 
-pub fn filter(
-    module: &[u8],
-    typed_table_info: Option<&TypedFuncTables>,
-) -> anyhow::Result<Vec<u8>> {
+pub fn filter(module: &[u8]) -> anyhow::Result<Vec<u8>> {
     let rewrite = Rewrite::default();
-    rewrite.process(module, typed_table_info)
+    rewrite.process(module)
 }

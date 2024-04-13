@@ -11,13 +11,11 @@ use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
 use std::collections::{hash_map::Entry as HashEntry, BTreeSet, VecDeque};
 use std::sync::Mutex;
-use waffle::cfg::CFGInfo;
-use waffle::entity::EntityRef;
-use waffle::pool::ListRef;
-use waffle::TableData;
+use waffle::GlobalData;
 use waffle::{
-    entity::PerEntity, Block, BlockDef, BlockTarget, Func, FuncDecl, FunctionBody, Module,
-    Operator, Signature, SourceLoc, Table, Terminator, Type, Value, ValueDef,
+    cfg::CFGInfo, entity::EntityRef, entity::PerEntity, pool::ListRef, Block, BlockDef,
+    BlockTarget, Func, FuncDecl, FunctionBody, Global, Memory, MemoryArg, Module, Operator,
+    Signature, SourceLoc, Table, TableData, Terminator, Type, Value, ValueDef,
 };
 
 struct Evaluator<'a> {
@@ -71,8 +69,15 @@ struct Evaluator<'a> {
 pub struct TypedFuncTables {
     pub fast_dispatch_sig: Option<Signature>,
     pub func_table: Option<Table>,
-    pub dispatch_table: Option<Table>,
-    pub index_by_key: Mutex<HashMap<u32, u32>>,
+    pub globals: Mutex<FastDispatchGlobals>,
+}
+
+#[derive(Debug)]
+pub struct FastDispatchGlobals {
+    pub next_global: u32,
+    pub globals: Vec<(Global, Type)>,
+    /// Map from funcptr value to (key_epoch_global, target_global).
+    pub global_map: HashMap<Value, (Global, Global)>,
 }
 
 pub struct PartialEvalResult<'a> {
@@ -175,19 +180,14 @@ pub fn partially_evaluate<'a>(
             func_elements: Some(vec![]),
         })
     });
-    let fast_dispatch_table = fast_dispatch_sig.map(|sig| {
-        module.tables.push(TableData {
-            ty: Type::TypedFuncRef(true, sig.index() as u32),
-            initial: 0,
-            max: Some(0),
-            func_elements: Some(vec![]),
-        })
-    });
     let typed_func_tables = TypedFuncTables {
         fast_dispatch_sig,
         func_table: fast_dispatch_func_table,
-        dispatch_table: fast_dispatch_table,
-        index_by_key: Mutex::new(HashMap::default()),
+        globals: Mutex::new(FastDispatchGlobals {
+            next_global: module.globals.len() as u32,
+            globals: vec![],
+            global_map: HashMap::default(),
+        }),
     };
     log::info!("Typed func table info: {:?}", typed_func_tables);
 
@@ -328,50 +328,11 @@ pub fn partially_evaluate<'a>(
         );
     }
 
-    // Create dispatch-point lookup tables.
-    if let (Some(fast_dispatch_sig), Some(dispatch_table), Some(func_table), Some(lookup_head)) = (
+    // Create fast-dispatch function table and update globals.
+    if let (Some(fast_dispatch_sig), Some(func_table)) = (
         typed_func_tables.fast_dispatch_sig,
-        typed_func_tables.dispatch_table,
         typed_func_tables.func_table,
-        find_global_data_by_exported_func(&module, "weval.dispatch.table"),
     ) {
-        let mut lookup_entries = typed_func_tables
-            .index_by_key
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect::<Vec<_>>();
-        lookup_entries.sort();
-
-        // Update size of table.
-        module.tables[dispatch_table].initial = lookup_entries.len() as u32;
-        module.tables[dispatch_table].max = Some(lookup_entries.len() as u32);
-
-        log::info!("Lookup table for dispatch points: {:?}", lookup_entries);
-
-        let lookup_entry_addr = im.memories[&heap].image.len();
-        let lookup_nentries = lookup_entries.len();
-        let mut lookup_bytes = vec![];
-        for (key, index) in lookup_entries {
-            lookup_bytes.extend(u32::to_le_bytes(key));
-            lookup_bytes.extend(u32::to_le_bytes(index));
-        }
-        // Append the data to the memory image.
-        im.append_data(heap, lookup_bytes);
-        // Update `entries` and `nentries` in the `weval_dispatch_t`.
-        im.write_u32(heap, lookup_head, u32::try_from(lookup_entry_addr).unwrap())?;
-        im.write_u32(
-            heap,
-            lookup_head + 4,
-            u32::try_from(lookup_nentries).unwrap(),
-        )?;
-        log::info!(
-            "created weval dispatch-point lookup table at {:#x} len {:#x}",
-            lookup_entry_addr,
-            lookup_nentries
-        );
-
         // Copy over function references to typed-func-ref tables.
         let mut funcs = module.tables[Table::new(0)].func_elements.clone().unwrap();
         for f in &mut funcs {
@@ -382,6 +343,16 @@ pub fn partially_evaluate<'a>(
         module.tables[func_table].initial = funcs.len() as u32;
         module.tables[func_table].max = Some(funcs.len() as u32);
         module.tables[func_table].func_elements = Some(funcs);
+
+        // Append all globals to module.
+        for &(global, ty) in &typed_func_tables.globals.lock().unwrap().globals {
+            let new_global = module.globals.push(GlobalData {
+                ty,
+                value: None,
+                mutable: true,
+            });
+            assert_eq!(new_global, global);
+        }
     }
 
     let mut stats = funcs
@@ -616,8 +587,8 @@ fn const_operator(ty: Type, value: WasmVal) -> Option<Operator> {
 }
 
 fn store_operator(ty: Type) -> Option<Operator> {
-    let memory = waffle::MemoryArg {
-        memory: waffle::Memory::new(0),
+    let memory = MemoryArg {
+        memory: Memory::new(0),
         align: 0,
         offset: 0,
     };
@@ -631,8 +602,8 @@ fn store_operator(ty: Type) -> Option<Operator> {
 }
 
 fn load_operator(ty: Type) -> Option<Operator> {
-    let memory = waffle::MemoryArg {
-        memory: waffle::Memory::new(0),
+    let memory = MemoryArg {
+        memory: Memory::new(0),
         align: 0,
         offset: 0,
     };
@@ -1601,30 +1572,22 @@ impl<'a> Evaluator<'a> {
             Operator::Call { function_index }
                 if Some(function_index) == self.intrinsics.fast_dispatch =>
             {
-                let func_ptr = self.func.arg_pool[vals][0];
-                let key = abs[1]
-                    .as_const_u32()
-                    .ok_or_else(|| anyhow::anyhow!("Dispatch-point key not constant"))?;
+                let args = &self.func.arg_pool[vals];
+                let func_ptr = args[0];
+                let key = args[1];
+                let epoch = args[2];
 
-                log::trace!("Fast-dispatch: func_ptr = {} key = {}", func_ptr, key,);
-
-                if key == 0 {
-                    return Ok(EvalResult::Normal(AbstractValue::Runtime(None)));
-                }
-
-                // Get or create an index in the dispatch table.
-                let index = {
-                    let mut map = self.typed_func_tables.index_by_key.lock().unwrap();
-                    let len = map.len();
-                    *map.entry(key).or_insert(len as u32)
-                };
+                log::trace!(
+                    "Fast-dispatch: func_ptr = {} key = {} epoch = {}",
+                    func_ptr,
+                    key,
+                    epoch
+                );
 
                 // Create a fast-dispatch-ref value that will be
                 // recognized with a call_indirect.
                 return Ok(EvalResult::Alias(
-                    AbstractValue::FastDispatchRef {
-                        typed_func_index: index,
-                    },
+                    AbstractValue::FastDispatchRef { key, epoch },
                     func_ptr,
                 ));
             }
@@ -1636,116 +1599,205 @@ impl<'a> Evaluator<'a> {
                 && Some(sig_index) == self.typed_func_tables.fast_dispatch_sig =>
             {
                 match abs.last() {
-                    Some(AbstractValue::FastDispatchRef { typed_func_index }) => {
+                    Some(AbstractValue::FastDispatchRef { key, epoch }) => {
+                        let args = &self.func.arg_pool[vals];
+                        let funcptr = args.last().cloned().unwrap();
+
+                        // Allocate globals for key/epoch and target ref.
+                        let ref_ty = Type::TypedFuncRef(
+                            true,
+                            self.typed_func_tables.fast_dispatch_sig.unwrap().index() as u32,
+                        );
+                        let (key_epoch_global, target_global) = {
+                            const MAX_GLOBALS: u32 = 50_000;
+
+                            let mut global_info = self.typed_func_tables.globals.lock().unwrap();
+                            if let Some(&ret) = global_info.global_map.get(&funcptr) {
+                                ret
+                            } else if global_info.next_global >= MAX_GLOBALS {
+                                return Ok(EvalResult::Unhandled);
+                            } else {
+                                let key_epoch_global = Global::from(global_info.next_global);
+                                let target_global = Global::from(global_info.next_global + 1);
+                                global_info.next_global += 2;
+                                global_info.globals.push((key_epoch_global, Type::I64));
+                                global_info.globals.push((target_global, ref_ty));
+                                global_info
+                                    .global_map
+                                    .insert(funcptr, (key_epoch_global, target_global));
+                                (key_epoch_global, target_global)
+                            }
+                        };
+
                         // Generate the following sequence:
                         //
-                        // v_idx = i32const<typed_func_index>
-                        // v_ref = table.get<typed_func_table> v_idx
-                        // v_is_null = is_null v_ref
-                        // brif v_is_null block_null, block_non_null
+                        // v_cache_key_epoch = global.get<key_epoch_global>
+                        // v_thirty_two = i32const<32>
+                        // v_epoch_ext = i64extendi32u epoch
+                        // v_epoch_shifted = i64shl v_epoch_ext, v_thirty_two
+                        // v_key_ext = i64extendi32u index
+                        // v_key_epoch = i64or v_epoch_shifted, v_key_ext
+                        // v_hit = i64eq v_cache_key_epoch, v_key_epoch
+                        // brif v_hit, block_hit, block_miss
                         //
-                        // block_null:
-                        // v_result_null = call_indirect<sig> [original args]
-                        // br block_cont(v_result_null)
+                        // block_hit:
+                        // v_cache_target = global.get<target_global>
+                        // br block_cont(v_cache_targe)
                         //
-                        // block_non_null:
-                        // v_result_non_null = call_ref<sig> [original args minus last] + v_ref
-                        // br block_cont(v_result_non_null)
+                        // block_miss:
+                        // v_fill_ref = table.get<func_table> funcptr
+                        // global.set<target_global> v_fill_ref
+                        // global.set<key_epoch_global> v_key_epoch
+                        // br block_cont(v_fill_ref)
                         //
-                        // block_cont(c):
+                        // block_cont(v_call_ref):
+                        // v_result = call_ref<sig> [original args minus last] + v_call_ref
                         //
-                        // with an EvalResult::NewBlock(block_cont, Runtime, c)
+                        // with an EvalResult::NewBlock(block_cont, Runtie, v_result)
 
                         let i32_ty = self.func.single_type_list(Type::I32);
-                        let v_idx = self.func.add_value(ValueDef::Operator(
-                            Operator::I32Const {
-                                value: *typed_func_index,
+                        let i64_ty = self.func.single_type_list(Type::I64);
+
+                        let v_cache_key_epoch = self.func.add_value(ValueDef::Operator(
+                            Operator::GlobalGet {
+                                global_index: key_epoch_global,
                             },
+                            ListRef::default(),
+                            i64_ty,
+                        ));
+                        self.func.blocks[new_block].insts.push(v_cache_key_epoch);
+
+                        let v_thirty_two = self.func.add_value(ValueDef::Operator(
+                            Operator::I32Const { value: 32 },
                             ListRef::default(),
                             i32_ty,
                         ));
-                        self.func.blocks[new_block].insts.push(v_idx);
+                        self.func.blocks[new_block].insts.push(v_thirty_two);
 
-                        let ref_ty = self
-                            .func
-                            .single_type_list(Type::TypedFuncRef(true, sig_index.index() as u32));
-                        let idx_arg = self.func.arg_pool.single(v_idx);
-                        let v_ref = self.func.add_value(ValueDef::Operator(
-                            Operator::TableGet {
-                                table_index: self.typed_func_tables.dispatch_table.unwrap(),
-                            },
-                            idx_arg,
-                            ref_ty,
+                        let args = self.func.arg_pool.single(*epoch);
+                        let v_epoch_ext = self.func.add_value(ValueDef::Operator(
+                            Operator::I64ExtendI32U,
+                            args,
+                            i64_ty,
                         ));
-                        self.func.blocks[new_block].insts.push(v_ref);
+                        self.func.blocks[new_block].insts.push(v_epoch_ext);
 
-                        let ref_arg = self.func.arg_pool.single(v_ref);
-                        let v_is_null = self.func.add_value(ValueDef::Operator(
-                            Operator::RefIsNull,
-                            ref_arg,
-                            i32_ty,
+                        let args = self.func.arg_pool.double(*epoch, v_thirty_two);
+                        let v_epoch_shifted =
+                            self.func
+                                .add_value(ValueDef::Operator(Operator::I64Shl, args, i64_ty));
+                        self.func.blocks[new_block].insts.push(v_epoch_shifted);
+
+                        let args = self.func.arg_pool.single(*key);
+                        let v_key_ext = self.func.add_value(ValueDef::Operator(
+                            Operator::I64ExtendI32U,
+                            args,
+                            i64_ty,
                         ));
-                        self.func.blocks[new_block].insts.push(v_is_null);
+                        self.func.blocks[new_block].insts.push(v_key_ext);
 
-                        let block_null = self.func.add_block();
-                        let block_non_null = self.func.add_block();
+                        let args = self.func.arg_pool.double(v_epoch_shifted, v_key_ext);
+                        let v_key_epoch =
+                            self.func
+                                .add_value(ValueDef::Operator(Operator::I64Or, args, i64_ty));
+                        self.func.blocks[new_block].insts.push(v_key_epoch);
+
+                        let args = self.func.arg_pool.double(v_key_epoch, v_cache_key_epoch);
+                        let v_hit =
+                            self.func
+                                .add_value(ValueDef::Operator(Operator::I64Eq, args, i32_ty));
+                        self.func.blocks[new_block].insts.push(v_hit);
+
+                        let block_hit = self.func.add_block();
+                        let block_miss = self.func.add_block();
                         let block_cont = self.func.add_block();
 
                         self.func.blocks[new_block].terminator = Terminator::CondBr {
-                            cond: v_is_null,
+                            cond: v_hit,
                             if_true: BlockTarget {
-                                block: block_null,
+                                block: block_hit,
                                 args: vec![],
                             },
                             if_false: BlockTarget {
-                                block: block_non_null,
+                                block: block_miss,
                                 args: vec![],
                             },
                         };
 
-                        assert_eq!(tys.len(), 1);
-                        let result_ty = self.func.single_type_list(tys[0]);
-                        let v_result_null = self.func.add_value(ValueDef::Operator(
-                            Operator::CallIndirect {
-                                sig_index,
-                                table_index,
+                        let ref_ty_list = self.func.single_type_list(ref_ty);
+
+                        let v_cache_target = self.func.add_value(ValueDef::Operator(
+                            Operator::GlobalGet {
+                                global_index: target_global,
                             },
-                            vals,
-                            result_ty,
+                            ListRef::default(),
+                            ref_ty_list,
                         ));
-                        self.func.blocks[block_null].insts.push(v_result_null);
-                        self.func.blocks[block_null].terminator = Terminator::Br {
+                        self.func.blocks[block_hit].insts.push(v_cache_target);
+
+                        self.func.blocks[block_hit].terminator = Terminator::Br {
                             target: BlockTarget {
                                 block: block_cont,
-                                args: vec![v_result_null],
+                                args: vec![v_cache_target],
                             },
                         };
 
+                        let args = self.func.arg_pool.single(funcptr);
+                        let v_fill_ref = self.func.add_value(ValueDef::Operator(
+                            Operator::TableGet {
+                                table_index: self.typed_func_tables.func_table.unwrap(),
+                            },
+                            args,
+                            ref_ty_list,
+                        ));
+                        self.func.blocks[block_miss].insts.push(v_fill_ref);
+
+                        let args = self.func.arg_pool.single(v_fill_ref);
+                        let v_set1 = self.func.add_value(ValueDef::Operator(
+                            Operator::GlobalSet {
+                                global_index: target_global,
+                            },
+                            args,
+                            ListRef::default(),
+                        ));
+                        self.func.blocks[block_miss].insts.push(v_set1);
+
+                        let args = self.func.arg_pool.single(v_key_epoch);
+                        let v_set2 = self.func.add_value(ValueDef::Operator(
+                            Operator::GlobalSet {
+                                global_index: key_epoch_global,
+                            },
+                            args,
+                            ListRef::default(),
+                        ));
+                        self.func.blocks[block_miss].insts.push(v_set2);
+
+                        self.func.blocks[block_miss].terminator = Terminator::Br {
+                            target: BlockTarget {
+                                block: block_cont,
+                                args: vec![v_fill_ref],
+                            },
+                        };
+
+                        let v_call_ref = self.func.add_blockparam(block_cont, ref_ty);
+
+                        assert_eq!(tys.len(), 1);
+                        let result_ty = self.func.single_type_list(tys[0]);
                         let mut args_with_ref = self.func.arg_pool[vals].to_vec();
                         args_with_ref.pop();
-                        args_with_ref.push(v_ref);
+                        args_with_ref.push(v_call_ref);
                         let args_with_ref = self.func.arg_pool.from_iter(args_with_ref.into_iter());
-                        let v_result_non_null = self.func.add_value(ValueDef::Operator(
+                        let v_result = self.func.add_value(ValueDef::Operator(
                             Operator::CallRef { sig_index },
                             args_with_ref,
                             result_ty,
                         ));
-                        self.func.blocks[block_non_null]
-                            .insts
-                            .push(v_result_non_null);
-                        self.func.blocks[block_non_null].terminator = Terminator::Br {
-                            target: BlockTarget {
-                                block: block_cont,
-                                args: vec![v_result_non_null],
-                            },
-                        };
-
-                        let c = self.func.add_blockparam(block_cont, tys[0]);
+                        self.func.blocks[block_cont].insts.push(v_result);
 
                         return Ok(EvalResult::NewBlock(
                             block_cont,
                             AbstractValue::Runtime(None),
-                            c,
+                            v_result,
                         ));
                     }
                     _ => {}

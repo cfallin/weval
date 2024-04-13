@@ -71,11 +71,12 @@ pub enum AbstractValue {
     /// `call_indirect`; any other usage degrades to the original
     /// function pointer.
     FastDispatchRef {
-        /// Constant index in the table of dispatch-point values. If
-        /// value at this index is non-null, the value is logically
-        /// *that* function; otherwise, it is the original function
-        /// pointer.
-        typed_func_index: u32,
+        /// "Key" value: user guarantees that if this value is the
+        /// same over multiple invocations (along with epoch), then
+        /// called function will be the same. Will be I32-typed.
+        key: waffle::Value,
+        /// Epoch for key. Will be I32-typed.
+        epoch: waffle::Value,
     },
 }
 

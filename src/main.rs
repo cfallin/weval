@@ -183,7 +183,7 @@ fn weval(
 
     let bytes = result.module.to_wasm_bytes()?;
 
-    let bytes = filter::filter(&bytes[..], Some(&result.typed_func_tables))?;
+    let bytes = filter::filter(&bytes[..])?;
 
     std::fs::write(&output_module, &bytes[..])?;
 
@@ -221,7 +221,7 @@ fn collect(input_module: PathBuf, output_requests: PathBuf, site: Vec<u32>) -> a
 
 fn strip(input_module: PathBuf, output_module: PathBuf) -> anyhow::Result<()> {
     let raw_bytes = std::fs::read(&input_module)?;
-    let bytes = filter::filter(&raw_bytes[..], None)?;
+    let bytes = filter::filter(&raw_bytes[..])?;
     std::fs::write(&output_module, &bytes[..])?;
     Ok(())
 }
