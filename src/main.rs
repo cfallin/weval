@@ -57,17 +57,6 @@ pub enum Command {
         #[structopt(short = "s")]
         site: Vec<u32>,
     },
-
-    /// Strip weval intrinsics without performing any other processing.
-    Strip {
-        /// The input Wasm module.
-        #[structopt(short = "i")]
-        input_module: PathBuf,
-
-        /// The output Wasm module.
-        #[structopt(short = "o")]
-        output_module: PathBuf,
-    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -87,10 +76,6 @@ fn main() -> anyhow::Result<()> {
             output_requests,
             site,
         } => collect(input_module, output_requests, site),
-        Command::Strip {
-            input_module,
-            output_module,
-        } => strip(input_module, output_module),
     }
 }
 
@@ -125,6 +110,7 @@ fn weval(
     let mut frontend_opts = waffle::FrontendOptions::default();
     frontend_opts.debug = true;
     let module = waffle::Module::from_wasm_bytes(&module_bytes[..], &frontend_opts)?;
+    let global_base = module.globals.len();
 
     // Build module image.
     let mut im = image::build_image(&module)?;
@@ -183,7 +169,7 @@ fn weval(
 
     let bytes = result.module.to_wasm_bytes()?;
 
-    let bytes = filter::filter(&bytes[..])?;
+    let bytes = filter::filter(&bytes[..], global_base)?;
 
     std::fs::write(&output_module, &bytes[..])?;
 
@@ -216,12 +202,5 @@ fn collect(input_module: PathBuf, output_requests: PathBuf, site: Vec<u32>) -> a
     let dump = bincode::serialize(&directives)?;
     std::fs::write(&output_requests, dump)?;
 
-    Ok(())
-}
-
-fn strip(input_module: PathBuf, output_module: PathBuf) -> anyhow::Result<()> {
-    let raw_bytes = std::fs::read(&input_module)?;
-    let bytes = filter::filter(&raw_bytes[..])?;
-    std::fs::write(&output_module, &bytes[..])?;
     Ok(())
 }

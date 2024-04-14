@@ -199,9 +199,12 @@ void weval_write_reg(uint64_t idx, uint64_t value)
     WEVAL_WASM_IMPORT("write.reg");
 uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi)
     WEVAL_WASM_IMPORT("specialize.value");
-uint64_t weval_read_global(uint64_t idx) WEVAL_WASM_IMPORT("read.global");
-void weval_write_global(uint64_t idx, uint64_t value)
-    WEVAL_WASM_IMPORT("write.global");
+uint64_t weval_read_global0() WEVAL_WASM_IMPORT("read.global.0");
+uint64_t weval_read_global1() WEVAL_WASM_IMPORT("read.global.1");
+uint64_t weval_read_global2() WEVAL_WASM_IMPORT("read.global.2");
+void weval_write_global0(uint64_t value) WEVAL_WASM_IMPORT("write.global.0");
+void weval_write_global1(uint64_t value) WEVAL_WASM_IMPORT("write.global.1");
+void weval_write_global2(uint64_t value) WEVAL_WASM_IMPORT("write.global.2");
 
 /* Debugging and stats intrinsics */
     
