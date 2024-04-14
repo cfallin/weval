@@ -10,7 +10,9 @@ use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
 use std::collections::{hash_map::Entry as HashEntry, BTreeSet, VecDeque};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
+use waffle::GlobalData;
 use waffle::{
     cfg::CFGInfo, entity::EntityRef, entity::PerEntity, pool::ListRef, Block, BlockDef,
     BlockTarget, FuncDecl, FunctionBody, Memory, MemoryArg, Module, Operator, Signature, SourceLoc,
@@ -28,6 +30,8 @@ struct Evaluator<'a> {
     directive_args: DirectiveArgs,
     /// Intrinsic function indices.
     intrinsics: &'a Intrinsics,
+    /// "Maximum number of globals" atomic, updated as we go.
+    num_globals: &'a AtomicUsize,
     /// Memory image.
     image: &'a Image,
     /// Domtree for function body.
@@ -128,16 +132,25 @@ pub fn partially_evaluate<'a>(
         p.set_length(directives.len() as u64);
     }
 
+    let num_globals = AtomicUsize::new(0);
+
     let progress_ref = progress.as_ref();
     let bodies = directives
         .par_iter()
         .flat_map(|directive| {
             let (generic, cfg, stats) = funcs.get(&directive.func).unwrap();
-            let result =
-                match partially_evaluate_func(&module, generic, cfg, im, &intrinsics, directive) {
-                    Ok(result) => result,
-                    Err(e) => return Some(Err(e)),
-                };
+            let result = match partially_evaluate_func(
+                &module,
+                generic,
+                cfg,
+                im,
+                &intrinsics,
+                &num_globals,
+                directive,
+            ) {
+                Ok(result) => result,
+                Err(e) => return Some(Err(e)),
+            };
 
             if let Some(p) = progress_ref {
                 p.inc(1);
@@ -198,6 +211,16 @@ pub fn partially_evaluate<'a>(
     let heap = im.main_heap()?;
     for (addr, value) in mem_updates {
         im.write_u32(heap, addr, value)?;
+    }
+
+    // Add globals as needed.
+    let num_globals = num_globals.into_inner();
+    for _ in 0..num_globals {
+        module.globals.push(GlobalData {
+            ty: Type::I64,
+            value: Some(0),
+            mutable: true,
+        });
     }
 
     // Update the `weval_is_wevaled` flag, if it exists and is exported.
@@ -269,6 +292,7 @@ fn partially_evaluate_func(
     cfg: &CFGInfo,
     image: &Image,
     intrinsics: &Intrinsics,
+    num_globals: &AtomicUsize,
     directive: &Directive,
 ) -> anyhow::Result<
     Option<(
@@ -295,6 +319,7 @@ fn partially_evaluate_func(
         directive,
         directive_args,
         intrinsics,
+        num_globals,
         image,
         cfg,
         state: FunctionState::new(),
@@ -1276,7 +1301,7 @@ impl<'a> Evaluator<'a> {
     fn abstract_eval_intrinsic(
         &mut self,
         orig_block: Block,
-        _new_block: Block,
+        new_block: Block,
         orig_inst: Value,
         op: Operator,
         _loc: SourceLoc,
@@ -1373,6 +1398,35 @@ impl<'a> Evaluator<'a> {
                     let line = abs[1].as_const_u32().unwrap();
                     let val = abs[2].clone();
                     log::info!("print: line {}: {}: {:?}", line, message, val);
+                    EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.read_global {
+                    let index = abs[0].as_const_u64().unwrap() as usize;
+                    self.num_globals
+                        .fetch_max(index + 1, std::sync::atomic::Ordering::Relaxed);
+                    let i64_ty = self.func.single_type_list(Type::I64);
+                    let value = self.func.add_value(ValueDef::Operator(
+                        Operator::GlobalGet {
+                            global_index: waffle::Global::new(self.module.globals.len() + index),
+                        },
+                        ListRef::default(),
+                        i64_ty,
+                    ));
+                    self.func.blocks[new_block].insts.push(value);
+                    EvalResult::Alias(AbstractValue::Runtime(None), value)
+                } else if Some(function_index) == self.intrinsics.write_global {
+                    let index = abs[0].as_const_u64().unwrap() as usize;
+                    self.num_globals
+                        .fetch_max(index + 1, std::sync::atomic::Ordering::Relaxed);
+                    let value = self.func.arg_pool[values][1];
+                    let args = self.func.arg_pool.single(value);
+                    let set = self.func.add_value(ValueDef::Operator(
+                        Operator::GlobalSet {
+                            global_index: waffle::Global::new(self.module.globals.len() + index),
+                        },
+                        args,
+                        ListRef::default(),
+                    ));
+                    self.func.blocks[new_block].insts.push(set);
                     EvalResult::Elide
                 } else {
                     EvalResult::Unhandled

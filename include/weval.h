@@ -74,23 +74,23 @@ extern weval_req_t* weval_req_pending_head;
 extern bool weval_is_wevaled;
 extern weval_lookup_t weval_lookup_table;
 
-#define WEVAL_DEFINE_GLOBALS()                                              \
-  weval_req_t* weval_req_pending_head;                                      \
-  __attribute__((export_name("weval.pending.head"))) weval_req_t**          \
-  __weval_pending_head() {                                                  \
-    return &weval_req_pending_head;                                         \
-  }                                                                         \
-                                                                            \
-  bool weval_is_wevaled;                                                    \
-  __attribute__((export_name("weval.is.wevaled"))) bool*                    \
-  __weval_is_wevaled() {                                                    \
-    return &weval_is_wevaled;                                               \
-  }                                                                         \
-                                                                            \
-  weval_lookup_t weval_lookup_table = {.entries = NULL, .nentries = 0};     \
-  __attribute__((export_name("weval.lookup.table"))) weval_lookup_t*        \
-  __weval_lookup_table() {                                                  \
-    return &weval_lookup_table;                                             \
+#define WEVAL_DEFINE_GLOBALS()                                          \
+  weval_req_t* weval_req_pending_head;                                  \
+  __attribute__((export_name("weval.pending.head"))) weval_req_t**      \
+  __weval_pending_head() {                                              \
+    return &weval_req_pending_head;                                     \
+  }                                                                     \
+                                                                        \
+  bool weval_is_wevaled;                                                \
+  __attribute__((export_name("weval.is.wevaled"))) bool*                \
+  __weval_is_wevaled() {                                                \
+    return &weval_is_wevaled;                                           \
+  }                                                                     \
+                                                                        \
+  weval_lookup_t weval_lookup_table = {.entries = NULL, .nentries = 0}; \
+  __attribute__((export_name("weval.lookup.table"))) weval_lookup_t*    \
+  __weval_lookup_table() {                                              \
+    return &weval_lookup_table;                                         \
   }
 
 #define WEVAL_DEFINE_TARGET(index, func)             \
@@ -199,6 +199,9 @@ void weval_write_reg(uint64_t idx, uint64_t value)
     WEVAL_WASM_IMPORT("write.reg");
 uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi)
     WEVAL_WASM_IMPORT("specialize.value");
+uint64_t weval_read_global(uint64_t idx) WEVAL_WASM_IMPORT("read.global");
+void weval_write_global(uint64_t idx, uint64_t value)
+    WEVAL_WASM_IMPORT("write.global");
 
 /* Debugging and stats intrinsics */
     

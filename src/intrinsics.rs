@@ -15,6 +15,8 @@ pub struct Intrinsics {
     pub assert_const32: Option<Func>,
     pub specialize_value: Option<Func>,
     pub print: Option<Func>,
+    pub read_global: Option<Func>,
+    pub write_global: Option<Func>,
 }
 
 impl Intrinsics {
@@ -49,6 +51,13 @@ impl Intrinsics {
                 module,
                 "print",
                 &[Type::I32, Type::I32, Type::I32],
+                &[],
+            ),
+            read_global: find_imported_intrinsic(module, "read.global", &[Type::I64], &[Type::I64]),
+            write_global: find_imported_intrinsic(
+                module,
+                "write.global",
+                &[Type::I64, Type::I64],
                 &[],
             ),
         }
