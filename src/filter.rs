@@ -43,15 +43,6 @@ fn gen_replacement_bytecode(
     name: &str,
     global_base: u32,
 ) -> anyhow::Result<Vec<wasm_encoder::Instruction<'static>>> {
-    anyhow::ensure!(results.len() <= 1);
-    anyhow::ensure!(results.len() <= args.len());
-    if args.len() > 0 && results.len() > 0 {
-        anyhow::ensure!(
-            args[0] == results[0],
-            "Intrinsic's first arg is different type than result"
-        );
-    }
-
     match name {
         "read.global.0" => Ok(vec![wasm_encoder::Instruction::GlobalGet(global_base + 0)]),
         "read.global.1" => Ok(vec![wasm_encoder::Instruction::GlobalGet(global_base + 1)]),
@@ -60,6 +51,15 @@ fn gen_replacement_bytecode(
         "write.global.1" => Ok(vec![wasm_encoder::Instruction::GlobalSet(global_base + 1)]),
         "write.global.2" => Ok(vec![wasm_encoder::Instruction::GlobalSet(global_base + 2)]),
         _ => {
+            anyhow::ensure!(results.len() <= 1);
+            anyhow::ensure!(results.len() <= args.len());
+            if args.len() > 0 && results.len() > 0 {
+                anyhow::ensure!(
+                    args[0] == results[0],
+                    "Intrinsic's first arg is different type than result"
+                );
+            }
+
             let mut insts = vec![];
             for _ in 0..(args.len() - results.len()) {
                 insts.push(wasm_encoder::Instruction::Drop);
