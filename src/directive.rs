@@ -14,6 +14,9 @@ pub struct Directive {
     /// Evaluate the given function.
     #[serde(skip)]
     pub func: Func,
+    /// Remove constant args in the signature of the specialized
+    /// function.
+    pub remove_const_args: bool,
     /// Evaluate with the given arguments, encoded as a bytestring.
     pub args: Vec<u8>,
     /// Place the ID of the resulting specialized function at the
@@ -112,11 +115,12 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
 
 fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Directive> {
     let user_id = im.read_u32(heap, head + 8)?;
-    let func_table_index = im.read_u32(heap, head + 12)?;
+    let remove_const_args = im.read_u32(heap, head + 12)? != 0;
+    let func_table_index = im.read_u32(heap, head + 16)?;
     let func = im.func_ptr(func_table_index)?;
-    let arg_ptr = im.read_u32(heap, head + 16)?;
-    let arg_len = im.read_u32(heap, head + 20)?;
-    let func_index_out_addr = im.read_u32(heap, head + 24)?;
+    let arg_ptr = im.read_u32(heap, head + 20)?;
+    let arg_len = im.read_u32(heap, head + 24)?;
+    let func_index_out_addr = im.read_u32(heap, head + 28)?;
     let args = im.read_slice(heap, arg_ptr, arg_len)?.to_vec();
 
     log::trace!("directive: args {:#x} len {:#x}", arg_ptr, arg_len);
@@ -124,6 +128,7 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
     Ok(Directive {
         user_id,
         func,
+        remove_const_args,
         args,
         func_index_out_addr,
     })

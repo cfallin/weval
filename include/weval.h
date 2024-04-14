@@ -21,6 +21,7 @@ struct weval_req_t {
   /* A user-provided ID of the weval'd function, for stability of
    * collected request bodies across relinkings: */
   uint32_t func_id;
+  uint32_t remove_const_args;
   weval_func_t func;
   uint8_t* argbuf;
   uint32_t arglen;
@@ -465,10 +466,10 @@ struct StoreArgs<RuntimeArg<T>, Rest...> {
 
 }  // namespace impl
 
-template <typename Ret, typename... Args, typename... WrappedArgs>
-weval_req_t* weval(impl::FuncPtr<Ret, Args...>* dest,
+template <typename Ret, typename... Args, typename... DestArgs, typename... WrappedArgs>
+weval_req_t* weval(impl::FuncPtr<Ret, DestArgs...>* dest,
                    impl::FuncPtr<Ret, Args...> generic, uint32_t func_id,
-                   WrappedArgs... args) {
+                   bool remove_const_args, WrappedArgs... args) {
   weval_req_t* req = (weval_req_t*)malloc(sizeof(weval_req_t));
   if (!req) {
     return nullptr;
@@ -479,6 +480,7 @@ weval_req_t* weval(impl::FuncPtr<Ret, Args...>* dest,
   }
 
   req->func_id = func_id;
+  req->remove_const_args = remove_const_args ? 1 : 0;
   req->func = (weval_func_t)generic;
   req->arglen = writer.len;
   req->argbuf = writer.take();

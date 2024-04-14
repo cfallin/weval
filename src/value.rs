@@ -136,4 +136,11 @@ impl AbstractValue {
     pub fn as_const_truthy(&self) -> Option<bool> {
         self.as_const_u32().map(|k| k != 0)
     }
+
+    pub fn is_constant(&self) -> bool {
+        match self {
+            &AbstractValue::Concrete(_) | &AbstractValue::ConcreteMemory(..) => true,
+            _ => false,
+        }
+    }
 }
