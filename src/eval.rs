@@ -11,12 +11,12 @@ use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
 use std::collections::{hash_map::Entry as HashEntry, BTreeSet, VecDeque};
 use std::sync::Mutex;
+use waffle::GlobalData;
 use waffle::{
     cfg::CFGInfo, entity::EntityRef, entity::PerEntity, pool::ListRef, Block, BlockDef,
     BlockTarget, FuncDecl, FunctionBody, Memory, MemoryArg, Module, Operator, Signature, SourceLoc,
     Table, Terminator, Type, Value, ValueDef,
 };
-use waffle::{GlobalData, SignatureData};
 
 struct Evaluator<'a> {
     /// Module.
@@ -106,15 +106,8 @@ pub fn partially_evaluate<'a>(
         d
     }));
 
-    // Expand function bodies of any function named in a
-    // directive. Also add a signature for the const-args-removed
-    // variant of the function if needed.
+    // Expand function bodies of any function named in a directive.
     let mut funcs = HashMap::default();
-    let mut sigs = module
-        .signatures
-        .entries()
-        .map(|(sig, data)| (data.clone(), sig))
-        .collect::<HashMap<SignatureData, Signature>>();
     for directive in &directives {
         if !funcs.contains_key(&directive.func) {
             let mut f = module.clone_and_expand_body(directive.func)?;
@@ -129,25 +122,7 @@ pub fn partially_evaluate<'a>(
 
             f.convert_to_max_ssa(Some(cut_blocks));
 
-            let sig = if directive.remove_const_args {
-                let directive_args = DirectiveArgs::decode(&directive.args[..]).unwrap();
-                let mut args = module.signatures[module.funcs[directive.func].sig()].clone();
-                for i in (0..args.params.len()).rev() {
-                    if i < directive_args.const_params.len()
-                        && directive_args.const_params[i].is_constant()
-                    {
-                        args.params.remove(i);
-                    }
-                }
-
-                *sigs
-                    .entry(args.clone())
-                    .or_insert_with(|| module.signatures.push(args))
-            } else {
-                module.funcs[directive.func].sig()
-            };
-
-            funcs.insert(directive.func, (f, sig, cfg, stats));
+            funcs.insert(directive.func, (f, cfg, stats));
         }
     }
 
@@ -161,19 +136,12 @@ pub fn partially_evaluate<'a>(
     let bodies = directives
         .par_iter()
         .flat_map(|directive| {
-            let (generic, sig, cfg, stats) = funcs.get(&directive.func).unwrap();
-            let result = match partially_evaluate_func(
-                &module,
-                generic,
-                cfg,
-                im,
-                &intrinsics,
-                *sig,
-                directive,
-            ) {
-                Ok(result) => result,
-                Err(e) => return Some(Err(e)),
-            };
+            let (generic, cfg, stats) = funcs.get(&directive.func).unwrap();
+            let result =
+                match partially_evaluate_func(&module, generic, cfg, im, &intrinsics, directive) {
+                    Ok(result) => result,
+                    Err(e) => return Some(Err(e)),
+                };
 
             if let Some(p) = progress_ref {
                 p.inc(1);
@@ -301,7 +269,7 @@ pub fn partially_evaluate<'a>(
 
     let mut stats = funcs
         .drain()
-        .map(|(_, (_, _, _, stats))| stats.into_inner().unwrap())
+        .map(|(_, (_, _, stats))| stats.into_inner().unwrap())
         .collect::<Vec<_>>();
     stats.sort_by_key(|stats| stats.generic);
 
@@ -318,7 +286,6 @@ fn partially_evaluate_func(
     cfg: &CFGInfo,
     image: &Image,
     intrinsics: &Intrinsics,
-    specialized_sig: Signature,
     directive: &Directive,
 ) -> anyhow::Result<
     Option<(
@@ -331,13 +298,14 @@ fn partially_evaluate_func(
 > {
     let directive_args = DirectiveArgs::decode(&directive.args[..])?;
     let orig_name = module.funcs[directive.func].name();
+    let sig = module.funcs[directive.func].sig();
 
     log::info!("Specializing: {:?}", directive);
     log::info!("Args: {:?}", directive_args);
     log::debug!("body:\n{}", generic.display("| ", Some(module)));
 
     // Build the evaluator.
-    let func = FunctionBody::new(module, specialized_sig);
+    let func = FunctionBody::new(module, sig);
     let mut evaluator = Evaluator {
         module,
         generic,
@@ -390,7 +358,7 @@ fn partially_evaluate_func(
     );
     Ok(Some((
         evaluator.func,
-        specialized_sig,
+        sig,
         name,
         evaluator.block_rev_map,
         evaluator.state.contexts,
@@ -2099,14 +2067,17 @@ impl<'a> Evaluator<'a> {
         // Define a pre-entry block that ties supposedly
         // specialized-on-constant params to actual constants. This "bakes
         // in" the values so we don't need to provide them to the
-        // specialized function. (The signature may remain the same if
-        // not in "remove constant args" mode, we just ignore the
-        // actual passed-in values.)
+        // specialized function. (The signature remains the same, we just
+        // ignore the actual passed-in values.)
         let pre_entry = self.func.add_block();
         let mut pre_entry_args = vec![];
+        for (ty, _) in &self.generic.blocks[self.generic.entry].params {
+            let param = self.func.add_blockparam(pre_entry, *ty);
+            pre_entry_args.push(param);
+        }
         for (i, abs) in self.directive_args.const_params.iter().enumerate() {
             let ty = self.generic.blocks[self.generic.entry].params[i].0;
-            let took_constant = match ty {
+            match ty {
                 Type::I32 => {
                     if let Some(value) = abs.as_const_u32() {
                         let tys = self.func.single_type_list(Type::I32);
@@ -2116,20 +2087,7 @@ impl<'a> Evaluator<'a> {
                             tys,
                         ));
                         self.func.append_to_block(pre_entry, const_op);
-                        pre_entry_args.push(const_op);
-                        true
-                    } else if let AbstractValue::ConcreteMemory(..) = abs {
-                        let tys = self.func.single_type_list(Type::I32);
-                        let const_op = self.func.add_value(ValueDef::Operator(
-                            Operator::I32Const { value: 0 },
-                            ListRef::default(),
-                            tys,
-                        ));
-                        self.func.append_to_block(pre_entry, const_op);
-                        pre_entry_args.push(const_op);
-                        true
-                    } else {
-                        false
+                        pre_entry_args[i] = const_op;
                     }
                 }
                 Type::I64 => {
@@ -2141,31 +2099,11 @@ impl<'a> Evaluator<'a> {
                             tys,
                         ));
                         self.func.append_to_block(pre_entry, const_op);
-                        pre_entry_args.push(const_op);
-                        true
-                    } else {
-                        false
+                        pre_entry_args[i] = const_op;
                     }
                 }
-                _ => false,
-            };
-
-            assert!(
-                took_constant || !abs.is_constant(),
-                "did not take constant that AbstractValue thinks is constant: {:?}",
-                abs
-            );
-            if !took_constant {
-                let param = self.func.add_blockparam(pre_entry, ty);
-                pre_entry_args.push(param);
-            } else if !self.directive.remove_const_args {
-                self.func.add_blockparam(pre_entry, ty);
+                _ => {}
             }
-        }
-
-        for &(ty, _) in &self.generic.blocks[self.generic.entry].params[pre_entry_args.len()..] {
-            let param = self.func.add_blockparam(pre_entry, ty);
-            pre_entry_args.push(param);
         }
 
         self.func.blocks[pre_entry].terminator = Terminator::Br {
