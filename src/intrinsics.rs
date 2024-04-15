@@ -21,6 +21,10 @@ pub struct Intrinsics {
     pub write_global0: Option<Func>,
     pub write_global1: Option<Func>,
     pub write_global2: Option<Func>,
+    pub push_stack: Option<Func>,
+    pub sync_stack: Option<Func>,
+    pub read_stack: Option<Func>,
+    pub pop_stack: Option<Func>,
 }
 
 impl Intrinsics {
@@ -63,6 +67,16 @@ impl Intrinsics {
             write_global0: find_imported_intrinsic(module, "write.global.0", &[Type::I64], &[]),
             write_global1: find_imported_intrinsic(module, "write.global.0", &[Type::I64], &[]),
             write_global2: find_imported_intrinsic(module, "write.global.2", &[Type::I64], &[]),
+
+            push_stack: find_imported_intrinsic(module, "push.stack", &[Type::I32, Type::I64], &[]),
+            sync_stack: find_imported_intrinsic(module, "sync.stack", &[], &[]),
+            read_stack: find_imported_intrinsic(
+                module,
+                "read.stack",
+                &[Type::I32, Type::I32],
+                &[Type::I64],
+            ),
+            pop_stack: find_imported_intrinsic(module, "pop.stack", &[Type::I32], &[Type::I64]),
         }
     }
 }

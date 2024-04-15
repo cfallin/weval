@@ -206,6 +206,46 @@ void weval_write_global0(uint64_t value) WEVAL_WASM_IMPORT("write.global.0");
 void weval_write_global1(uint64_t value) WEVAL_WASM_IMPORT("write.global.1");
 void weval_write_global2(uint64_t value) WEVAL_WASM_IMPORT("write.global.2");
 
+/* Operand-stack virtualization */
+
+/*
+ * The stack is tracked abstractly as part of block specialization
+ * context, and has entries of the form:
+ *
+ * enum StackEntry {
+ *     /// Some value pushed onto stack. Not actually stored until
+ *     /// state is synced.
+ *     Value { stackptr: Value, value: Value },
+ *     /// Some value loaded from other memory and then pushed onto
+ *     /// the stack (e.g., a local).
+ *     OtherMem { stackptr: Value, ptr: Value },
+ * }
+ *
+ * When specialization reaches a merge-point, different stack states
+ * will result in differently-specialized blocks; hence, we never have
+ * to force-synchronize or merge state. This means that fastpaths can
+ * keep value in registers *across opcodes*. We do have to be careful
+ * not to exponentially explode state.
+ */
+
+/* Push a value on the abstract stack; does not yet actually store
+ * memory until sync'd. */
+void weval_push_stack(uint64_t* ptr, uint64_t value)
+    WEVAL_WASM_IMPORT("push.stack");
+/* Synchronize all stack entries to the actual stack. */
+void weval_sync_stack() WEVAL_WASM_IMPORT("sync.stack");
+/* Read an entry from the virtual stack if available (index 0 is
+ * just-pushed, 1 is one push before that, etc.) Loads from the
+ * pointer if that index is not available. */
+uint64_t weval_read_stack(uint64_t* ptr, uint32_t index)
+    WEVAL_WASM_IMPORT("read.stack");
+/* Write an entry at an existing stack index */
+void weval_write_stack(uint64_t* ptr, uint32_t index, uint64_t value)
+    WEVAL_WASM_IMPORT("write.stack");
+/* Pops an entry from the stack, canceling its store if any (the
+ * effect never occurs). */
+uint64_t weval_pop_stack(uint64_t* ptr) WEVAL_WASM_IMPORT("pop.stack");
+
 /* Debugging and stats intrinsics */
     
 void weval_trace_line(uint32_t line_number) WEVAL_WASM_IMPORT("trace.line");

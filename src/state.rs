@@ -47,12 +47,13 @@ waffle::declare_entity!(Context, "context");
 pub type PC = u32;
 
 /// One element in the context stack.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ContextElem {
     Root,
     Loop(PC),
     PendingSpecialize(Value, u32, u32),
     Specialized(Value, u32),
+    Stack(Vec<StackEntry>),
 }
 
 /// Arena of contexts.
@@ -66,10 +67,10 @@ pub struct Contexts {
 impl Contexts {
     pub fn create(&mut self, parent: Option<Context>, elem: ContextElem) -> Context {
         let parent = parent.unwrap_or(Context::invalid());
-        match self.dedup.entry((parent, elem)) {
+        match self.dedup.entry((parent, elem.clone())) {
             Entry::Occupied(o) => *o.get(),
             Entry::Vacant(v) => {
-                let id = self.contexts.push((parent, elem));
+                let id = self.contexts.push((parent, elem.clone()));
                 log::trace!("create context: {}: parent {} leaf {:?}", id, parent, elem);
                 *v.insert(id)
             }
@@ -81,7 +82,7 @@ impl Contexts {
     }
 
     pub fn leaf_element(&self, context: Context) -> ContextElem {
-        self.contexts[context].1
+        self.contexts[context].1.clone()
     }
 
     pub fn pop_one_loop(&self, mut context: Context) -> Context {
@@ -93,6 +94,34 @@ impl Contexts {
                     context = *parent;
                 }
             }
+        }
+    }
+
+    pub fn pop_stack_and_pending_specialization(
+        &self,
+        mut context: Context,
+    ) -> Option<ContextElem> {
+        let mut ret = None;
+        loop {
+            match &self.contexts[context] {
+                (parent, ce @ ContextElem::PendingSpecialize(..)) => {
+                    ret = Some(ce.clone());
+                    context = *parent;
+                }
+                (parent, ContextElem::Stack(..)) => {
+                    context = *parent;
+                }
+                _ => break,
+            }
+        }
+        ret
+    }
+
+    pub fn push_stack(&mut self, context: Context, stack: &[StackEntry]) -> Context {
+        if stack.is_empty() {
+            context
+        }else {
+            self.create(Some(context), ContextElem::Stack(stack.to_vec()))
         }
     }
 }
@@ -185,6 +214,15 @@ impl RegValue {
     }
 }
 
+/// An entry on the virtualized stack.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StackEntry {
+    /// A value explicitly pushed on the stack. Not yet sync'd
+    /// (written) to real memory.
+    Value { stackptr: Value, value: Value },
+    // TODO: OtherMem too.
+}
+
 /// The state for a function body during analysis.
 #[derive(Clone, Debug, Default)]
 pub struct FunctionState {
@@ -204,6 +242,8 @@ pub struct PointState {
     pub context: Context,
     pub pending_context: Option<Context>,
     pub flow: ProgPointState,
+    /// Virtualized stack. This is logically part of the context as well.
+    pub stack: Vec<StackEntry>,
 }
 
 fn map_meet_with<

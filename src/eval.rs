@@ -587,6 +587,7 @@ impl<'a> Evaluator<'a> {
             context: ctx,
             pending_context: None,
             flow: self.state.block_entry[new_block].clone(),
+            stack: vec![],
         };
         log::trace!(" -> state = {:?}", state);
 
@@ -886,6 +887,7 @@ impl<'a> Evaluator<'a> {
                 format!("Pending Specialization of {}: {}..={}", index, lo, hi)
             }
             ContextElem::Specialized(index, val) => format!("Specialization of {}: {}", index, val),
+            ContextElem::Stack(entries) => format!("Virtualized stack {:?}", entries),
         }
     }
 
@@ -1069,7 +1071,15 @@ impl<'a> Evaluator<'a> {
             new_block,
             self.generic.blocks[orig_block].terminator
         );
+
         let new_context = state.pending_context.unwrap_or(state.context);
+
+        // Peel off any pending specialization on the context, and any
+        // stack state.
+        let pending_specialization = self
+            .state
+            .contexts
+            .pop_stack_and_pending_specialization(new_context);
 
         let new_term = match &self.generic.blocks[orig_block].terminator {
             &Terminator::None => Terminator::None,
@@ -1079,6 +1089,8 @@ impl<'a> Evaluator<'a> {
                 ref if_false,
             } => {
                 let (cond, abs_cond) = self.use_value(state.context, orig_block, new_block, cond);
+                // Update pending context with new stack if necessary.
+                let new_context = self.state.contexts.push_stack(new_context, &state.stack);
                 match abs_cond.as_const_truthy() {
                     Some(true) => Terminator::Br {
                         target: self.evaluate_block_target(
@@ -1118,8 +1130,7 @@ impl<'a> Evaluator<'a> {
                 }
             }
             &Terminator::Br { ref target } => {
-                if let ContextElem::PendingSpecialize(index, lo, hi) =
-                    self.state.contexts.leaf_element(new_context)
+                if let Some(ContextElem::PendingSpecialize(index, lo, hi)) = pending_specialization
                 {
                     log::trace!(
                         "Branch to target {} with PendingSpecialize on {}",
@@ -1137,6 +1148,9 @@ impl<'a> Evaluator<'a> {
                                 ContextElem::Specialized(target_specialized_value, i),
                             );
                             log::trace!(" -> created new context {} for index {}", c, i);
+                            // Update pending context with new stack if necessary.
+                            let c = self.state.contexts.push_stack(c, &state.stack);
+                            log::trace!(" -> after stack update: {}", c);
                             self.evaluate_block_target(orig_block, new_block, state, c, target)
                         })
                         .collect();
@@ -1148,6 +1162,8 @@ impl<'a> Evaluator<'a> {
                         default,
                     }
                 } else {
+                    // Update pending context with new stack if necessary.
+                    let new_context = self.state.contexts.push_stack(new_context, &state.stack);
                     Terminator::Br {
                         target: self.evaluate_block_target(
                             orig_block,
@@ -1164,6 +1180,8 @@ impl<'a> Evaluator<'a> {
                 ref targets,
                 ref default,
             } => {
+                // Update pending context with new stack if necessary.
+                let new_context = self.state.contexts.push_stack(new_context, &state.stack);
                 let (value, abs_value) =
                     self.use_value(state.context, orig_block, new_block, value);
                 if let Some(selector) = abs_value.as_const_u32() {
@@ -1459,6 +1477,83 @@ impl<'a> Evaluator<'a> {
                         ListRef::default(),
                     ));
                     self.func.blocks[new_block].insts.push(set);
+                    EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.push_stack {
+                    let stackptr = self.func.arg_pool[values][0];
+                    let value = self.func.arg_pool[values][0];
+                    state.stack.push(StackEntry::Value { stackptr, value });
+                    EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.pop_stack {
+                    if let Some(entry) = state.stack.pop() {
+                        match entry {
+                            StackEntry::Value { stackptr: _, value } => {
+                                EvalResult::Alias(AbstractValue::Runtime(None), value)
+                            }
+                        }
+                    } else {
+                        let ptr = self.func.arg_pool[values][0];
+                        let i64_ty = self.func.single_type_list(Type::I64);
+                        let args = self.func.arg_pool.single(ptr);
+                        let load = self.func.add_value(ValueDef::Operator(
+                            Operator::I64Load {
+                                memory: MemoryArg {
+                                    align: 1,
+                                    offset: 0,
+                                    memory: self.image.main_heap().unwrap(),
+                                },
+                            },
+                            args,
+                            i64_ty,
+                        ));
+                        self.func.blocks[new_block].insts.push(load);
+                        EvalResult::Alias(AbstractValue::Runtime(None), load)
+                    }
+                } else if Some(function_index) == self.intrinsics.read_stack {
+                    let idx = abs[1].as_const_u32().unwrap();
+                    if let Some(entry) = state.stack.get(idx as usize) {
+                        match entry {
+                            StackEntry::Value { stackptr: _, value } => {
+                                EvalResult::Alias(AbstractValue::Runtime(None), *value)
+                            }
+                        }
+                    } else {
+                        let ptr = self.func.arg_pool[values][0];
+                        let i64_ty = self.func.single_type_list(Type::I64);
+                        let args = self.func.arg_pool.single(ptr);
+                        let load = self.func.add_value(ValueDef::Operator(
+                            Operator::I64Load {
+                                memory: MemoryArg {
+                                    align: 1,
+                                    offset: 0,
+                                    memory: self.image.main_heap().unwrap(),
+                                },
+                            },
+                            args,
+                            i64_ty,
+                        ));
+                        self.func.blocks[new_block].insts.push(load);
+                        EvalResult::Alias(AbstractValue::Runtime(None), load)
+                    }
+                } else if Some(function_index) == self.intrinsics.sync_stack {
+                    for entry in state.stack.drain(..).rev() {
+                        match entry {
+                            StackEntry::Value { stackptr, value } => {
+                                let args = self.func.arg_pool.double(value, stackptr);
+                                let store = self.func.add_value(ValueDef::Operator(
+                                    Operator::I64Store {
+                                        memory: MemoryArg {
+                                            align: 1,
+                                            offset: 0,
+                                            memory: self.image.main_heap().unwrap(),
+                                        },
+                                    },
+                                    args,
+                                    ListRef::default(),
+                                ));
+                                self.func.blocks[new_block].insts.push(store);
+                            }
+                        }
+                    }
                     EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
