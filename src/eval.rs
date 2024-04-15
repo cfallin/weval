@@ -1480,7 +1480,7 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.push_stack {
                     let stackptr = self.func.arg_pool[values][0];
-                    let value = self.func.arg_pool[values][0];
+                    let value = self.func.arg_pool[values][1];
                     log::trace!(
                         "push_stack: value {}, current stack is {:?}",
                         value,
