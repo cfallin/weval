@@ -1509,8 +1509,10 @@ impl<'a> Evaluator<'a> {
                         EvalResult::Alias(AbstractValue::Runtime(None), load)
                     }
                 } else if Some(function_index) == self.intrinsics.read_stack {
-                    let idx = abs[1].as_const_u32().unwrap();
-                    if let Some(entry) = state.stack.get(idx as usize) {
+                    let idx = abs[1].as_const_u32().unwrap() as usize;
+                    if idx < state.stack.len() {
+                        let idx = state.stack.len() - 1 - idx;
+                        let entry = &state.stack[idx];
                         match entry {
                             StackEntry::Value { stackptr: _, value } => {
                                 EvalResult::Alias(AbstractValue::Runtime(None), *value)
@@ -1534,6 +1536,31 @@ impl<'a> Evaluator<'a> {
                         self.func.blocks[new_block].insts.push(load);
                         EvalResult::Alias(AbstractValue::Runtime(None), load)
                     }
+                } else if Some(function_index) == self.intrinsics.write_stack {
+                    let stackptr = self.func.arg_pool[values][0];
+                    let idx = abs[1].as_const_u32().unwrap() as usize;
+                    let value = self.func.arg_pool[values][2];
+                    if idx < state.stack.len() {
+                        let idx = state.stack.len() - 1 - idx;
+                        state.stack[idx] = StackEntry::Value { stackptr, value };
+                    } else if idx == state.stack.len() {
+                        state.stack.insert(0, StackEntry::Value { stackptr, value });
+                    } else {
+                        let args = self.func.arg_pool.double(value, stackptr);
+                        let store = self.func.add_value(ValueDef::Operator(
+                            Operator::I64Store {
+                                memory: MemoryArg {
+                                    align: 1,
+                                    offset: 0,
+                                    memory: self.image.main_heap().unwrap(),
+                                },
+                            },
+                            args,
+                            ListRef::default(),
+                        ));
+                        self.func.blocks[new_block].insts.push(store);
+                    }
+                    EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.sync_stack {
                     for entry in state.stack.drain(..).rev() {
                         match entry {
