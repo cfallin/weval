@@ -1481,9 +1481,15 @@ impl<'a> Evaluator<'a> {
                 } else if Some(function_index) == self.intrinsics.push_stack {
                     let stackptr = self.func.arg_pool[values][0];
                     let value = self.func.arg_pool[values][0];
+                    log::trace!(
+                        "push_stack: value {}, current stack is {:?}",
+                        value,
+                        state.stack
+                    );
                     state.stack.push(StackEntry::Value { stackptr, value });
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.pop_stack {
+                    log::trace!("pop_stack: current stack is {:?}", state.stack);
                     if let Some(entry) = state.stack.pop() {
                         match entry {
                             StackEntry::Value { stackptr: _, value } => {
@@ -1510,6 +1516,11 @@ impl<'a> Evaluator<'a> {
                     }
                 } else if Some(function_index) == self.intrinsics.read_stack {
                     let idx = abs[1].as_const_u32().unwrap() as usize;
+                    log::trace!(
+                        "read_stack: index {}, current stack is {:?}",
+                        idx,
+                        state.stack
+                    );
                     if idx < state.stack.len() {
                         let idx = state.stack.len() - 1 - idx;
                         let entry = &state.stack[idx];
@@ -1540,6 +1551,12 @@ impl<'a> Evaluator<'a> {
                     let stackptr = self.func.arg_pool[values][0];
                     let idx = abs[1].as_const_u32().unwrap() as usize;
                     let value = self.func.arg_pool[values][2];
+                    log::trace!(
+                        "write_stack: index {}, value {}, current stack is {:?}",
+                        idx,
+                        value,
+                        state.stack
+                    );
                     if idx < state.stack.len() {
                         let idx = state.stack.len() - 1 - idx;
                         state.stack[idx] = StackEntry::Value { stackptr, value };
@@ -1562,6 +1579,8 @@ impl<'a> Evaluator<'a> {
                     }
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.sync_stack {
+                    log::trace!("sync_stack current stack is {:?}", state.stack);
+
                     for entry in state.stack.drain(..).rev() {
                         match entry {
                             StackEntry::Value { stackptr, value } => {
