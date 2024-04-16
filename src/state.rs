@@ -334,6 +334,7 @@ impl ProgPointState {
             AbstractValue::meet,
             Some(AbstractValue::Runtime(None)),
         );
+        
         changed
     }
 

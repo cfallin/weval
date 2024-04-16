@@ -582,12 +582,18 @@ impl<'a> Evaluator<'a> {
         );
         debug_assert_eq!(self.block_map.get(&(ctx, orig_block)), Some(&new_block));
 
+        let stack = if let ContextElem::Stack(entries) = self.state.contexts.leaf_element(ctx) {
+            entries
+        } else {
+            vec![]
+        };
+
         // Create program-point state.
         let mut state = PointState {
             context: ctx,
             pending_context: None,
             flow: self.state.block_entry[new_block].clone(),
-            stack: vec![],
+            stack,
         };
         log::trace!(" -> state = {:?}", state);
 
