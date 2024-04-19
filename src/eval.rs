@@ -1611,7 +1611,7 @@ impl<'a> Evaluator<'a> {
                             },
                         );
                     } else {
-                        let args = self.func.arg_pool.double(value, stackptr);
+                        let args = self.func.arg_pool.double(stackptr, value);
                         let store = self.func.add_value(ValueDef::Operator(
                             Operator::I64Store {
                                 memory: MemoryArg {
@@ -1642,7 +1642,7 @@ impl<'a> Evaluator<'a> {
                             self.func.values[stackptr].ty(&self.func.type_pool).unwrap(),
                             Type::I32,
                         );
-                        let args = self.func.arg_pool.double(value, stackptr);
+                        let args = self.func.arg_pool.double(stackptr, value);
                         let store = self.func.add_value(ValueDef::Operator(
                             Operator::I64Store {
                                 memory: MemoryArg {
