@@ -39,6 +39,7 @@ use crate::value::{AbstractValue, WasmVal};
 use fxhash::FxHashMap as HashMap;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use waffle::entity::{EntityRef, EntityVec, PerEntity};
 use waffle::{Block, FunctionBody, Global, Type, Value};
 
@@ -53,7 +54,6 @@ pub enum ContextElem {
     Loop(PC),
     PendingSpecialize(Value, u32, u32),
     Specialized(Value, u32),
-    Stack(Vec<StackEntry>),
 }
 
 /// Arena of contexts.
@@ -97,46 +97,30 @@ impl Contexts {
         }
     }
 
-    pub fn pop_stack_and_pending_specialization(
-        &self,
-        mut context: Context,
-    ) -> Option<ContextElem> {
-        let mut ret = None;
-        loop {
-            match &self.contexts[context] {
-                (parent, ce @ ContextElem::PendingSpecialize(..)) => {
-                    ret = Some(ce.clone());
-                    context = *parent;
-                }
-                (parent, ContextElem::Stack(..)) => {
-                    context = *parent;
-                }
-                _ => break,
-            }
-        }
-        ret
-    }
-
-    pub fn push_stack(&mut self, context: Context, stack: &[StackEntry]) -> Context {
-        if stack.is_empty() {
-            context
-        }else {
-            self.create(Some(context), ContextElem::Stack(stack.to_vec()))
+    pub fn pop_pending_specialization(&self, context: Context) -> (Context, Option<ContextElem>) {
+        match &self.contexts[context] {
+            (parent, leaf @ ContextElem::PendingSpecialize(..)) => (*parent, Some(leaf.clone())),
+            _ => (context, None),
         }
     }
 }
-
-/// The flow-insensitive part of the satte.
-#[derive(Clone, Debug, Default)]
-pub struct SSAState {}
 
 /// The flow-sensitive part of the state.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ProgPointState {
     /// Specialization registers.
-    pub regs: BTreeMap<u64, RegValue>,
+    pub regs: BTreeMap<RegSlot, RegValue>,
     /// Global values.
     pub globals: BTreeMap<Global, AbstractValue>,
+    /// Virtualized stack (indices grow upward): known range bounds.
+    pub stack_known: Range<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RegSlot {
+    Register(u32),
+    StackData(u32),
+    StackAddr(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -242,8 +226,6 @@ pub struct PointState {
     pub context: Context,
     pub pending_context: Option<Context>,
     pub flow: ProgPointState,
-    /// Virtualized stack. This is logically part of the context as well.
-    pub stack: Vec<StackEntry>,
 }
 
 fn map_meet_with<
@@ -321,6 +303,7 @@ impl ProgPointState {
         ProgPointState {
             regs: BTreeMap::new(),
             globals,
+            stack_known: 0..0,
         }
     }
 
@@ -334,7 +317,12 @@ impl ProgPointState {
             AbstractValue::meet,
             Some(AbstractValue::Runtime(None)),
         );
-        
+
+        let new_stack_known = std::cmp::max(self.stack_known.start, other.stack_known.start)
+            ..std::cmp::min(self.stack_known.end, other.stack_known.end);
+        changed |= new_stack_known != self.stack_known;
+        self.stack_known = new_stack_known;
+
         changed
     }
 
@@ -353,8 +341,8 @@ impl ProgPointState {
 
     pub fn update_at_block_entry<
         C,
-        GB: FnMut(&mut C, u64, Type) -> Value,
-        RB: FnMut(&mut C, u64),
+        GB: FnMut(&mut C, RegSlot, Type) -> Value,
+        RB: FnMut(&mut C, RegSlot),
     >(
         &mut self,
         ctx: &mut C,
@@ -382,6 +370,7 @@ impl ProgPointState {
         for to_remove in to_remove {
             self.regs.remove(&to_remove);
         }
+
         Ok(())
     }
 }

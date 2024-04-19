@@ -50,7 +50,7 @@ struct Evaluator<'a> {
     /// specialized function) that must be re-evaluated if it changes.
     value_dep_blocks: HashMap<(Context, Value), BTreeSet<Block>>,
     /// Map of (ctx, block, idx) to blockparams for specialization-register values.
-    reg_map: HashMap<(Context, Block, u64), Value>,
+    reg_map: HashMap<(Context, Block, RegSlot), Value>,
     /// Queue of blocks to (re)compute. List of (block_in_generic,
     /// ctx, block_in_func).
     queue: VecDeque<(Block, Context, Block)>,
@@ -582,36 +582,31 @@ impl<'a> Evaluator<'a> {
         );
         debug_assert_eq!(self.block_map.get(&(ctx, orig_block)), Some(&new_block));
 
-        let stack = if let ContextElem::Stack(entries) = self.state.contexts.leaf_element(ctx) {
-            entries
-        } else {
-            vec![]
-        };
-
         // Create program-point state.
         let mut state = PointState {
             context: ctx,
             pending_context: None,
             flow: self.state.block_entry[new_block].clone(),
-            stack,
         };
         log::trace!(" -> state = {:?}", state);
 
         state.flow.update_at_block_entry(
             &mut self.reg_map,
-            &mut |reg_map, idx, ty| {
-                *reg_map.entry((ctx, orig_block, idx)).or_insert_with(|| {
-                    let param = self.func.add_placeholder(ty);
-                    log::trace!(
-                        "new blockparam {} for reg idx {} on block {} (ctx {} orig {})",
-                        param,
-                        idx,
-                        new_block,
-                        ctx,
-                        orig_block,
-                    );
-                    param
-                })
+            &mut |reg_map, regslot, ty| {
+                *reg_map
+                    .entry((ctx, orig_block, regslot))
+                    .or_insert_with(|| {
+                        let param = self.func.add_placeholder(ty);
+                        log::trace!(
+                            "new blockparam {} for reg slot {:?} on block {} (ctx {} orig {})",
+                            param,
+                            regslot,
+                            new_block,
+                            ctx,
+                            orig_block,
+                        );
+                        param
+                    })
             },
             &mut |mem_blockparam_map, idx| {
                 mem_blockparam_map.remove(&(ctx, orig_block, idx));
@@ -893,7 +888,6 @@ impl<'a> Evaluator<'a> {
                 format!("Pending Specialization of {}: {}..={}", index, lo, hi)
             }
             ContextElem::Specialized(index, val) => format!("Specialization of {}: {}", index, val),
-            ContextElem::Stack(entries) => format!("Virtualized stack {:?}", entries),
         }
     }
 
@@ -1080,13 +1074,6 @@ impl<'a> Evaluator<'a> {
 
         let new_context = state.pending_context.unwrap_or(state.context);
 
-        // Peel off any pending specialization on the context, and any
-        // stack state.
-        let pending_specialization = self
-            .state
-            .contexts
-            .pop_stack_and_pending_specialization(new_context);
-
         let new_term = match &self.generic.blocks[orig_block].terminator {
             &Terminator::None => Terminator::None,
             &Terminator::CondBr {
@@ -1096,7 +1083,6 @@ impl<'a> Evaluator<'a> {
             } => {
                 let (cond, abs_cond) = self.use_value(state.context, orig_block, new_block, cond);
                 // Update pending context with new stack if necessary.
-                let new_context = self.state.contexts.push_stack(new_context, &state.stack);
                 match abs_cond.as_const_truthy() {
                     Some(true) => Terminator::Br {
                         target: self.evaluate_block_target(
@@ -1136,7 +1122,8 @@ impl<'a> Evaluator<'a> {
                 }
             }
             &Terminator::Br { ref target } => {
-                if let Some(ContextElem::PendingSpecialize(index, lo, hi)) = pending_specialization
+                if let (new_context, Some(ContextElem::PendingSpecialize(index, lo, hi))) =
+                    self.state.contexts.pop_pending_specialization(new_context)
                 {
                     log::trace!(
                         "Branch to target {} with PendingSpecialize on {}",
@@ -1154,9 +1141,6 @@ impl<'a> Evaluator<'a> {
                                 ContextElem::Specialized(target_specialized_value, i),
                             );
                             log::trace!(" -> created new context {} for index {}", c, i);
-                            // Update pending context with new stack if necessary.
-                            let c = self.state.contexts.push_stack(c, &state.stack);
-                            log::trace!(" -> after stack update: {}", c);
                             self.evaluate_block_target(orig_block, new_block, state, c, target)
                         })
                         .collect();
@@ -1169,7 +1153,6 @@ impl<'a> Evaluator<'a> {
                     }
                 } else {
                     // Update pending context with new stack if necessary.
-                    let new_context = self.state.contexts.push_stack(new_context, &state.stack);
                     Terminator::Br {
                         target: self.evaluate_block_target(
                             orig_block,
@@ -1186,8 +1169,6 @@ impl<'a> Evaluator<'a> {
                 ref targets,
                 ref default,
             } => {
-                // Update pending context with new stack if necessary.
-                let new_context = self.state.contexts.push_stack(new_context, &state.stack);
                 let (value, abs_value) =
                     self.use_value(state.context, orig_block, new_block, value);
                 if let Some(selector) = abs_value.as_const_u32() {
@@ -1488,20 +1469,41 @@ impl<'a> Evaluator<'a> {
                     let stackptr = self.func.arg_pool[values][0];
                     let value = self.func.arg_pool[values][1];
                     log::trace!(
-                        "push_stack: value {}, current stack is {:?}",
+                        "push_stack: value {}, current stack range is {:?}",
                         value,
-                        state.stack
+                        state.flow.stack_known,
                     );
-                    state.stack.push(StackEntry::Value { stackptr, value });
+                    let data_slot = RegSlot::StackData(state.flow.stack_known.end);
+                    let addr_slot = RegSlot::StackAddr(state.flow.stack_known.end);
+                    state.flow.stack_known.end += 1;
+                    state.flow.regs.insert(
+                        data_slot,
+                        RegValue::Value {
+                            data: value,
+                            ty: Type::I64,
+                            abs: abs[1].clone(),
+                        },
+                    );
+                    state.flow.regs.insert(
+                        addr_slot,
+                        RegValue::Value {
+                            data: stackptr,
+                            ty: Type::I32,
+                            abs: abs[0].clone(),
+                        },
+                    );
+
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.pop_stack {
-                    log::trace!("pop_stack: current stack is {:?}", state.stack);
-                    if let Some(entry) = state.stack.pop() {
-                        match entry {
-                            StackEntry::Value { stackptr: _, value } => {
-                                EvalResult::Alias(AbstractValue::Runtime(None), value)
-                            }
-                        }
+                    log::trace!(
+                        "pop_stack: current stack range is {:?}",
+                        state.flow.stack_known
+                    );
+                    if state.flow.stack_known.len() > 0 {
+                        state.flow.stack_known.end -= 1;
+                        let data_slot = RegSlot::StackData(state.flow.stack_known.end);
+                        let value = state.flow.regs.get(&data_slot).unwrap().value().unwrap();
+                        EvalResult::Alias(AbstractValue::Runtime(None), value)
                     } else {
                         let ptr = self.func.arg_pool[values][0];
                         let i64_ty = self.func.single_type_list(Type::I64);
@@ -1521,20 +1523,16 @@ impl<'a> Evaluator<'a> {
                         EvalResult::Alias(AbstractValue::Runtime(None), load)
                     }
                 } else if Some(function_index) == self.intrinsics.read_stack {
-                    let idx = abs[1].as_const_u32().unwrap() as usize;
+                    let idx = abs[1].as_const_u32().unwrap();
                     log::trace!(
-                        "read_stack: index {}, current stack is {:?}",
+                        "read_stack: index {}, current stack range is {:?}",
                         idx,
-                        state.stack
+                        state.flow.stack_known
                     );
-                    if idx < state.stack.len() {
-                        let idx = state.stack.len() - 1 - idx;
-                        let entry = &state.stack[idx];
-                        match entry {
-                            StackEntry::Value { stackptr: _, value } => {
-                                EvalResult::Alias(AbstractValue::Runtime(None), *value)
-                            }
-                        }
+                    if idx < state.flow.stack_known.len() as u32 {
+                        let data_slot = RegSlot::StackData(state.flow.stack_known.end - 1 - idx);
+                        let value = state.flow.regs.get(&data_slot).unwrap().value().unwrap();
+                        EvalResult::Alias(AbstractValue::Runtime(None), value)
                     } else {
                         let ptr = self.func.arg_pool[values][0];
                         let i64_ty = self.func.single_type_list(Type::I64);
@@ -1555,19 +1553,36 @@ impl<'a> Evaluator<'a> {
                     }
                 } else if Some(function_index) == self.intrinsics.write_stack {
                     let stackptr = self.func.arg_pool[values][0];
-                    let idx = abs[1].as_const_u32().unwrap() as usize;
+                    let idx = abs[1].as_const_u32().unwrap();
                     let value = self.func.arg_pool[values][2];
                     log::trace!(
-                        "write_stack: index {}, value {}, current stack is {:?}",
+                        "write_stack: index {}, value {}, current stack range is {:?}",
                         idx,
                         value,
-                        state.stack
+                        state.flow.stack_known
                     );
-                    if idx < state.stack.len() {
-                        let idx = state.stack.len() - 1 - idx;
-                        state.stack[idx] = StackEntry::Value { stackptr, value };
-                    } else if idx == state.stack.len() {
-                        state.stack.insert(0, StackEntry::Value { stackptr, value });
+                    if idx <= state.flow.stack_known.len() as u32 {
+                        if idx == state.flow.stack_known.len() as u32 {
+                            state.flow.stack_known.end += 1;
+                        }
+                        let data_slot = RegSlot::StackData(state.flow.stack_known.end - 1 - idx);
+                        let addr_slot = RegSlot::StackAddr(state.flow.stack_known.end - 1 - idx);
+                        state.flow.regs.insert(
+                            data_slot,
+                            RegValue::Value {
+                                data: value,
+                                abs: abs[2].clone(),
+                                ty: Type::I64,
+                            },
+                        );
+                        state.flow.regs.insert(
+                            addr_slot,
+                            RegValue::Value {
+                                data: stackptr,
+                                abs: abs[0].clone(),
+                                ty: Type::I32,
+                            },
+                        );
                     } else {
                         let args = self.func.arg_pool.double(value, stackptr);
                         let store = self.func.add_value(ValueDef::Operator(
@@ -1585,27 +1600,31 @@ impl<'a> Evaluator<'a> {
                     }
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.sync_stack {
-                    log::trace!("sync_stack current stack is {:?}", state.stack);
+                    log::trace!(
+                        "sync_stack current stack range is {:?}",
+                        state.flow.stack_known
+                    );
 
-                    for entry in state.stack.drain(..).rev() {
-                        match entry {
-                            StackEntry::Value { stackptr, value } => {
-                                let args = self.func.arg_pool.double(value, stackptr);
-                                let store = self.func.add_value(ValueDef::Operator(
-                                    Operator::I64Store {
-                                        memory: MemoryArg {
-                                            align: 1,
-                                            offset: 0,
-                                            memory: self.image.main_heap().unwrap(),
-                                        },
-                                    },
-                                    args,
-                                    ListRef::default(),
-                                ));
-                                self.func.blocks[new_block].insts.push(store);
-                            }
-                        }
+                    for idx in state.flow.stack_known.clone() {
+                        let data_slot = RegSlot::StackData(idx);
+                        let addr_slot = RegSlot::StackAddr(idx);
+                        let value = state.flow.regs.remove(&data_slot).unwrap().value().unwrap();
+                        let stackptr = state.flow.regs.remove(&addr_slot).unwrap().value().unwrap();
+                        let args = self.func.arg_pool.double(value, stackptr);
+                        let store = self.func.add_value(ValueDef::Operator(
+                            Operator::I64Store {
+                                memory: MemoryArg {
+                                    align: 1,
+                                    offset: 0,
+                                    memory: self.image.main_heap().unwrap(),
+                                },
+                            },
+                            args,
+                            ListRef::default(),
+                        ));
+                        self.func.blocks[new_block].insts.push(store);
                     }
+                    state.flow.stack_known = 0..0;
                     EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
@@ -1631,7 +1650,8 @@ impl<'a> Evaluator<'a> {
             {
                 let idx = abs[0].as_const_u64().expect("Non-constant register number");
                 log::trace!("load from specialization reg {}", idx);
-                match state.flow.regs.get(&idx) {
+                let slot = RegSlot::Register(idx as u32);
+                match state.flow.regs.get(&slot) {
                     Some(RegValue::Value { data, abs, .. }) => {
                         log::trace!(" -> have value {} with abs {:?}", data, abs);
                         return Ok(EvalResult::Alias(abs.clone(), *data));
@@ -1659,8 +1679,9 @@ impl<'a> Evaluator<'a> {
                     data,
                     abs[1]
                 );
+                let slot = RegSlot::Register(idx as u32);
                 state.flow.regs.insert(
-                    idx,
+                    slot,
                     RegValue::Value {
                         data,
                         ty: Type::I64,
@@ -2172,7 +2193,7 @@ impl<'a> Evaluator<'a> {
             for (&idx, val) in &succ_state.regs {
                 let ty = val.ty().ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Inconsistent type on reg idx {} at block {} (val {:?})",
+                        "Inconsistent type on reg idx {:?} at block {} (val {:?})",
                         idx,
                         orig_block,
                         val,
@@ -2181,7 +2202,7 @@ impl<'a> Evaluator<'a> {
                 let val_blockparam = self.func.add_blockparam(block, ty);
                 let orig_val = *self.reg_map.get(&(ctx, orig_block, idx)).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "placeholder val not found for reg idx {} at block {} (ctx {} orig {})",
+                        "placeholder val not found for reg idx {:?} at block {} (ctx {} orig {})",
                         idx,
                         block,
                         ctx,
@@ -2208,6 +2229,77 @@ impl<'a> Evaluator<'a> {
         }
 
         Ok(())
+    }
+
+    fn insert_stack_syncs(&mut self) {
+        // For each edge, look at known stack range of pred and
+        // succ. If succ's range is smaller, read regs from pred and
+        // sync at end of pred.
+        for (_, &block) in &self.block_map {
+            if self.func.blocks[block].succs.is_empty() {
+                continue;
+            }
+
+            let pred_state = &self.state.block_exit[block];
+            let pred_known_range = pred_state.stack_known.clone();
+            let mut intersection_of_succ_state = 0..u32::MAX;
+
+            for &succ in &self.func.blocks[block].succs {
+                let succ_state = &self.state.block_entry[succ];
+                intersection_of_succ_state.start = std::cmp::max(
+                    intersection_of_succ_state.start,
+                    succ_state.stack_known.start,
+                );
+                intersection_of_succ_state.end =
+                    std::cmp::min(intersection_of_succ_state.end, succ_state.stack_known.end);
+
+                log::trace!(
+                    "edge from {} to {}: pred_known_range {:?} succ_known_range {:?}",
+                    block,
+                    succ,
+                    pred_known_range,
+                    succ_state.stack_known,
+                );
+            }
+            log::trace!(
+                "intersection of all succs: {:?}",
+                intersection_of_succ_state
+            );
+
+            assert!(pred_known_range.start <= intersection_of_succ_state.start);
+            assert!(pred_known_range.end >= intersection_of_succ_state.end);
+
+            for i in (pred_known_range.start..intersection_of_succ_state.start)
+                .chain(intersection_of_succ_state.end..pred_known_range.end)
+            {
+                log::trace!("spilling {} back to real stack memory", i);
+                let addr = pred_state
+                    .regs
+                    .get(&RegSlot::StackAddr(i))
+                    .unwrap()
+                    .value()
+                    .unwrap();
+                let value = pred_state
+                    .regs
+                    .get(&RegSlot::StackData(i))
+                    .unwrap()
+                    .value()
+                    .unwrap();
+                let args = self.func.arg_pool.double(value, addr);
+                let store = self.func.add_value(ValueDef::Operator(
+                    Operator::I64Store {
+                        memory: MemoryArg {
+                            align: 1,
+                            offset: 0,
+                            memory: self.image.main_heap().unwrap(),
+                        },
+                    },
+                    args,
+                    ListRef::default(),
+                ));
+                self.func.blocks[block].insts.push(store);
+            }
+        }
     }
 
     fn create_pre_entry(&mut self, specialized_entry: Block) -> Block {
@@ -2267,6 +2359,7 @@ impl<'a> Evaluator<'a> {
         self.func.recompute_edges();
 
         self.add_blockparam_reg_args()?;
+        self.insert_stack_syncs();
 
         #[cfg(debug_assertions)]
         self.func.validate().unwrap();
