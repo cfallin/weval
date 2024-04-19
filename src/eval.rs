@@ -598,8 +598,9 @@ impl<'a> Evaluator<'a> {
                     .or_insert_with(|| {
                         let param = self.func.add_placeholder(ty);
                         log::trace!(
-                            "new blockparam {} for reg slot {:?} on block {} (ctx {} orig {})",
+                            "new blockparam {} of ty {:?} for reg slot {:?} on block {} (ctx {} orig {})",
                             param,
+                            ty,
                             regslot,
                             new_block,
                             ctx,
@@ -1468,6 +1469,14 @@ impl<'a> Evaluator<'a> {
                 } else if Some(function_index) == self.intrinsics.push_stack {
                     let stackptr = self.func.arg_pool[values][0];
                     let value = self.func.arg_pool[values][1];
+                    assert_eq!(
+                        self.func.values[stackptr].ty(&self.func.type_pool).unwrap(),
+                        Type::I32
+                    );
+                    assert_eq!(
+                        self.func.values[value].ty(&self.func.type_pool).unwrap(),
+                        Type::I64
+                    );
                     log::trace!(
                         "push_stack: value {}, current stack range is {:?}",
                         value,
@@ -1475,6 +1484,7 @@ impl<'a> Evaluator<'a> {
                     );
                     let data_slot = RegSlot::StackData(state.flow.stack_known.end);
                     let addr_slot = RegSlot::StackAddr(state.flow.stack_known.end);
+                    log::trace!("push_stack: value {} stackptr {}", value, stackptr);
                     state.flow.stack_known.end += 1;
                     state.flow.regs.insert(
                         data_slot,
@@ -1503,6 +1513,10 @@ impl<'a> Evaluator<'a> {
                         state.flow.stack_known.end -= 1;
                         let data_slot = RegSlot::StackData(state.flow.stack_known.end);
                         let value = state.flow.regs.get(&data_slot).unwrap().value().unwrap();
+                        assert_eq!(
+                            self.func.values[value].ty(&self.func.type_pool).unwrap(),
+                            Type::I64
+                        );
                         EvalResult::Alias(AbstractValue::Runtime(None), value)
                     } else {
                         let ptr = self.func.arg_pool[values][0];
@@ -1532,6 +1546,10 @@ impl<'a> Evaluator<'a> {
                     if idx < state.flow.stack_known.len() as u32 {
                         let data_slot = RegSlot::StackData(state.flow.stack_known.end - 1 - idx);
                         let value = state.flow.regs.get(&data_slot).unwrap().value().unwrap();
+                        assert_eq!(
+                            self.func.values[value].ty(&self.func.type_pool).unwrap(),
+                            Type::I64
+                        );
                         EvalResult::Alias(AbstractValue::Runtime(None), value)
                     } else {
                         let ptr = self.func.arg_pool[values][0];
@@ -1555,6 +1573,14 @@ impl<'a> Evaluator<'a> {
                     let stackptr = self.func.arg_pool[values][0];
                     let idx = abs[1].as_const_u32().unwrap();
                     let value = self.func.arg_pool[values][2];
+                    assert_eq!(
+                        self.func.values[stackptr].ty(&self.func.type_pool).unwrap(),
+                        Type::I32
+                    );
+                    assert_eq!(
+                        self.func.values[value].ty(&self.func.type_pool).unwrap(),
+                        Type::I64
+                    );
                     log::trace!(
                         "write_stack: index {}, value {}, current stack range is {:?}",
                         idx,
@@ -1567,6 +1593,7 @@ impl<'a> Evaluator<'a> {
                         }
                         let data_slot = RegSlot::StackData(state.flow.stack_known.end - 1 - idx);
                         let addr_slot = RegSlot::StackAddr(state.flow.stack_known.end - 1 - idx);
+                        log::trace!("write_stack: value {} stackptr {}", value, stackptr);
                         state.flow.regs.insert(
                             data_slot,
                             RegValue::Value {
@@ -1610,6 +1637,11 @@ impl<'a> Evaluator<'a> {
                         let addr_slot = RegSlot::StackAddr(idx);
                         let value = state.flow.regs.remove(&data_slot).unwrap().value().unwrap();
                         let stackptr = state.flow.regs.remove(&addr_slot).unwrap().value().unwrap();
+                        log::trace!("sync_stack: value {} stackptr {}", value, stackptr);
+                        assert_eq!(
+                            self.func.values[stackptr].ty(&self.func.type_pool).unwrap(),
+                            Type::I32,
+                        );
                         let args = self.func.arg_pool.double(value, stackptr);
                         let store = self.func.add_value(ValueDef::Operator(
                             Operator::I64Store {
