@@ -1308,6 +1308,10 @@ impl<'a> Evaluator<'a> {
         orig_values: &[Value],
         state: &mut PointState,
     ) -> EvalResult {
+        for i in state.flow.stack_known.clone() {
+            assert!(state.flow.regs.contains_key(&RegSlot::StackData(i)));
+        }
+
         match op {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.push_context {
@@ -1563,9 +1567,12 @@ impl<'a> Evaluator<'a> {
                         value,
                         state.flow.stack_known
                     );
-                    if idx <= state.flow.stack_known.len() as u32 {
+                    if idx < state.flow.stack_known.len() as u32
+                        || (idx == state.flow.stack_known.len() as u32
+                            && state.flow.stack_known.start > 0)
+                    {
                         if idx == state.flow.stack_known.len() as u32 {
-                            state.flow.stack_known.end += 1;
+                            state.flow.stack_known.start -= 1;
                         }
                         let data_slot = RegSlot::StackData(state.flow.stack_known.end - 1 - idx);
                         let addr_slot = RegSlot::StackAddr(state.flow.stack_known.end - 1 - idx);
