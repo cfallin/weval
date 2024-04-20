@@ -2317,7 +2317,7 @@ impl<'a> Evaluator<'a> {
                     .unwrap()
                     .value()
                     .unwrap();
-                let args = self.func.arg_pool.double(value, addr);
+                let args = self.func.arg_pool.double(addr, value);
                 let store = self.func.add_value(ValueDef::Operator(
                     Operator::I64Store {
                         memory: MemoryArg {
