@@ -586,6 +586,7 @@ impl<'a> Evaluator<'a> {
         let mut state = PointState {
             context: ctx,
             pending_context: None,
+            pending_specialize: None,
             flow: self.state.block_entry[new_block].clone(),
         };
         log::trace!(" -> state = {:?}", state);
@@ -885,9 +886,6 @@ impl<'a> Evaluator<'a> {
         match self.state.contexts.leaf_element(ctx) {
             ContextElem::Root => "root".to_owned(),
             ContextElem::Loop(pc) => format!("PC {:?}", pc),
-            ContextElem::PendingSpecialize(index, lo, hi) => {
-                format!("Pending Specialization of {}: {}..={}", index, lo, hi)
-            }
             ContextElem::Specialized(index, val) => format!("Specialization of {}: {}", index, val),
         }
     }
@@ -1123,9 +1121,7 @@ impl<'a> Evaluator<'a> {
                 }
             }
             &Terminator::Br { ref target } => {
-                if let (new_context, Some(ContextElem::PendingSpecialize(index, lo, hi))) =
-                    self.state.contexts.pop_pending_specialization(new_context)
-                {
+                if let Some((index, lo, hi)) = state.pending_specialize.take() {
                     log::trace!(
                         "Branch to target {} with PendingSpecialize on {}",
                         target.block,
@@ -1354,20 +1350,15 @@ impl<'a> Evaluator<'a> {
                     self.state.contexts.context_bucket[instantaneous_context] = Some(bucket);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.specialize_value {
-                    let instantaneous_context = state.pending_context.unwrap_or(state.context);
                     let lo = abs[1].as_const_u32().unwrap();
                     let hi = abs[2].as_const_u32().unwrap();
-                    let child = self.state.contexts.create(
-                        Some(instantaneous_context),
-                        ContextElem::PendingSpecialize(orig_inst, lo, hi),
-                    );
                     log::trace!(
-                        "Creating pending-specize context for index {} lo {} hi {}",
+                        "Creating pending-specialize state for index {} lo {} hi {}",
                         orig_inst,
                         lo,
                         hi
                     );
-                    state.pending_context = Some(child);
+                    state.pending_specialize = Some((orig_inst, lo, hi));
                     EvalResult::Alias(abs[0].clone(), self.func.arg_pool[values][0])
                 } else if Some(function_index) == self.intrinsics.abort_specialization {
                     let line_num = abs[0].as_const_u32().unwrap_or(0);

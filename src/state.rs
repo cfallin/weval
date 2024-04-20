@@ -52,7 +52,6 @@ pub type PC = u32;
 pub enum ContextElem {
     Root,
     Loop(PC),
-    PendingSpecialize(Value, u32, u32),
     Specialized(Value, u32),
 }
 
@@ -94,13 +93,6 @@ impl Contexts {
                     context = *parent;
                 }
             }
-        }
-    }
-
-    pub fn pop_pending_specialization(&self, context: Context) -> (Context, Option<ContextElem>) {
-        match &self.contexts[context] {
-            (parent, leaf @ ContextElem::PendingSpecialize(..)) => (*parent, Some(leaf.clone())),
-            _ => (context, None),
         }
     }
 }
@@ -225,6 +217,7 @@ pub struct FunctionState {
 pub struct PointState {
     pub context: Context,
     pub pending_context: Option<Context>,
+    pub pending_specialize: Option<(Value, u32, u32)>,
     pub flow: ProgPointState,
 }
 
