@@ -1080,6 +1080,7 @@ impl<'a> Evaluator<'a> {
                 ref if_true,
                 ref if_false,
             } => {
+                assert!(!state.pending_specialize.is_some());
                 let (cond, abs_cond) = self.use_value(state.context, orig_block, new_block, cond);
                 // Update pending context with new stack if necessary.
                 match abs_cond.as_const_truthy() {
@@ -1127,14 +1128,13 @@ impl<'a> Evaluator<'a> {
                         target.block,
                         index
                     );
-                    let parent = self.state.contexts.parent(new_context);
                     let index_of_value = target.args.iter().position(|&arg| arg == index).unwrap();
                     let target_specialized_value =
                         self.generic.blocks[target.block].params[index_of_value].1;
                     let mut targets: Vec<BlockTarget> = (lo..=hi)
                         .map(|i| {
                             let c = self.state.contexts.create(
-                                Some(parent),
+                                Some(new_context),
                                 ContextElem::Specialized(target_specialized_value, i),
                             );
                             log::trace!(" -> created new context {} for index {}", c, i);
@@ -1166,6 +1166,7 @@ impl<'a> Evaluator<'a> {
                 ref targets,
                 ref default,
             } => {
+                assert!(!state.pending_specialize.is_some());
                 let (value, abs_value) =
                     self.use_value(state.context, orig_block, new_block, value);
                 if let Some(selector) = abs_value.as_const_u32() {
