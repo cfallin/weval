@@ -1508,8 +1508,12 @@ impl<'a> Evaluator<'a> {
                     if state.flow.stack_known.len() > 0 {
                         state.flow.stack_known.end -= 1;
                         let data_slot = RegSlot::StackData(state.flow.stack_known.end);
-                        let value = state.flow.regs.get(&data_slot).unwrap().value().unwrap();
-                        EvalResult::Alias(AbstractValue::Runtime(None), value)
+                        let reg = state.flow.regs.get(&data_slot).unwrap();
+                        let (value, abs) = match reg {
+                            RegValue::Value { data, abs, .. } => (*data, abs.clone()),
+                            _ => unreachable!(),
+                        };
+                        EvalResult::Alias(abs, value)
                     } else {
                         let ptr = self.func.arg_pool[values][0];
                         let i64_ty = self.func.single_type_list(Type::I64);
@@ -1537,8 +1541,12 @@ impl<'a> Evaluator<'a> {
                     );
                     if idx < state.flow.stack_known.len() as u32 {
                         let data_slot = RegSlot::StackData(state.flow.stack_known.end - 1 - idx);
-                        let value = state.flow.regs.get(&data_slot).unwrap().value().unwrap();
-                        EvalResult::Alias(AbstractValue::Runtime(None), value)
+                        let reg = state.flow.regs.get(&data_slot).unwrap();
+                        let (value, abs) = match reg {
+                            RegValue::Value { data, abs, .. } => (*data, abs.clone()),
+                            _ => unreachable!(),
+                        };
+                        EvalResult::Alias(abs, value)
                     } else {
                         let ptr = self.func.arg_pool[values][0];
                         let i64_ty = self.func.single_type_list(Type::I64);
