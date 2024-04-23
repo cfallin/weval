@@ -609,10 +609,7 @@ impl<'a> Evaluator<'a> {
                         );
                         param
                     })
-            },
-            &mut |mem_blockparam_map, idx| {
-                mem_blockparam_map.remove(&(ctx, orig_block, idx));
-            },
+            }
         )?;
 
         // Do the actual constant-prop, carrying the state across the
@@ -1305,10 +1302,6 @@ impl<'a> Evaluator<'a> {
         orig_values: &[Value],
         state: &mut PointState,
     ) -> EvalResult {
-        for i in state.flow.stack_known.clone() {
-            assert!(state.flow.regs.contains_key(&RegSlot::StackData(i)));
-        }
-
         match op {
             Operator::Call { function_index } => {
                 if Some(function_index) == self.intrinsics.push_context {
@@ -1466,43 +1459,33 @@ impl<'a> Evaluator<'a> {
                     let stackptr = self.func.arg_pool[values][0];
                     let value = self.func.arg_pool[values][1];
                     log::trace!(
-                        "push_stack: value {}, current stack range is {:?}",
+                        "push_stack: value {}, current stack is {:?}",
                         value,
-                        state.flow.stack_known,
+                        state.flow.stack,
                     );
-                    let data_slot = RegSlot::StackData(state.flow.stack_known.end);
-                    let addr_slot = RegSlot::StackAddr(state.flow.stack_known.end);
                     log::trace!("push_stack: value {} stackptr {}", value, stackptr);
-                    state.flow.stack_known.end += 1;
-                    state.flow.regs.insert(
-                        data_slot,
-                        RegValue::Value {
-                            data: value,
-                            ty: Type::I64,
-                            abs: abs[1].clone(),
-                        },
+                    state.flow.stack.insert(
+                        0,
+                        (
+                            RegValue::Value {
+                                data: stackptr,
+                                ty: Type::I32,
+                                abs: abs[0].clone(),
+                            },
+                            RegValue::Value {
+                                data: value,
+                                ty: Type::I64,
+                                abs: abs[1].clone(),
+                            },
+                        ),
                     );
-                    state.flow.regs.insert(
-                        addr_slot,
-                        RegValue::Value {
-                            data: stackptr,
-                            ty: Type::I32,
-                            abs: abs[0].clone(),
-                        },
-                    );
-
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.pop_stack {
-                    log::trace!(
-                        "pop_stack: current stack range is {:?}",
-                        state.flow.stack_known
-                    );
-                    if state.flow.stack_known.len() > 0 {
-                        state.flow.stack_known.end -= 1;
-                        let data_slot = RegSlot::StackData(state.flow.stack_known.end);
-                        let reg = state.flow.regs.get(&data_slot).unwrap();
+                    log::trace!("pop_stack: current stack is {:?}", state.flow.stack);
+                    if state.flow.stack.len() > 0 {
+                        let (_, reg) = state.flow.stack.remove(0);
                         let (value, abs) = match reg {
-                            RegValue::Value { data, abs, .. } => (*data, abs.clone()),
+                            RegValue::Value { data, abs, .. } => (data, abs),
                             _ => unreachable!(),
                         };
                         EvalResult::Alias(abs, value)
@@ -1527,14 +1510,12 @@ impl<'a> Evaluator<'a> {
                 } else if Some(function_index) == self.intrinsics.read_stack {
                     let idx = abs[1].as_const_u32().unwrap();
                     log::trace!(
-                        "read_stack: index {}, current stack range is {:?}",
+                        "read_stack: index {}, current stack is {:?}",
                         idx,
-                        state.flow.stack_known
+                        state.flow.stack
                     );
-                    if idx < state.flow.stack_known.len() as u32 {
-                        let data_slot = RegSlot::StackData(state.flow.stack_known.end - 1 - idx);
-                        let reg = state.flow.regs.get(&data_slot).unwrap();
-                        let (value, abs) = match reg {
+                    if let Some((_, data)) = state.flow.stack.get(idx as usize) {
+                        let (value, abs) = match data {
                             RegValue::Value { data, abs, .. } => (*data, abs.clone()),
                             _ => unreachable!(),
                         };
@@ -1562,37 +1543,27 @@ impl<'a> Evaluator<'a> {
                     let idx = abs[1].as_const_u32().unwrap();
                     let value = self.func.arg_pool[values][2];
                     log::trace!(
-                        "write_stack: index {}, value {}, current stack range is {:?}",
+                        "write_stack: index {}, value {}, current stack is {:?}",
                         idx,
                         value,
-                        state.flow.stack_known
+                        state.flow.stack
                     );
-                    if idx < state.flow.stack_known.len() as u32
-                        || (idx == state.flow.stack_known.len() as u32
-                            && state.flow.stack_known.start > 0)
-                    {
-                        if idx == state.flow.stack_known.len() as u32 {
-                            state.flow.stack_known.start -= 1;
-                        }
-                        let data_slot = RegSlot::StackData(state.flow.stack_known.end - 1 - idx);
-                        let addr_slot = RegSlot::StackAddr(state.flow.stack_known.end - 1 - idx);
+                    let addr_value = RegValue::Value {
+                        data: stackptr,
+                        abs: abs[0].clone(),
+                        ty: Type::I32,
+                    };
+                    let data_value = RegValue::Value {
+                        data: value,
+                        abs: abs[2].clone(),
+                        ty: Type::I64,
+                    };
+                    if let Some((addr, data)) = state.flow.stack.get_mut(idx as usize) {
                         log::trace!("write_stack: value {} stackptr {}", value, stackptr);
-                        state.flow.regs.insert(
-                            data_slot,
-                            RegValue::Value {
-                                data: value,
-                                abs: abs[2].clone(),
-                                ty: Type::I64,
-                            },
-                        );
-                        state.flow.regs.insert(
-                            addr_slot,
-                            RegValue::Value {
-                                data: stackptr,
-                                abs: abs[0].clone(),
-                                ty: Type::I32,
-                            },
-                        );
+                        *addr = addr_value;
+                        *data = data_value;
+                    } else if idx == 0 && state.flow.stack.is_empty() {
+                        state.flow.stack.push((addr_value, data_value));
                     } else {
                         let args = self.func.arg_pool.double(stackptr, value);
                         let store = self.func.add_value(ValueDef::Operator(
@@ -1610,18 +1581,13 @@ impl<'a> Evaluator<'a> {
                     }
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.sync_stack {
-                    log::trace!(
-                        "sync_stack current stack range is {:?}",
-                        state.flow.stack_known
-                    );
+                    log::trace!("sync_stack current stack is {:?}", state.flow.stack);
 
-                    for idx in state.flow.stack_known.clone() {
-                        let data_slot = RegSlot::StackData(idx);
-                        let addr_slot = RegSlot::StackAddr(idx);
-                        let value = state.flow.regs.remove(&data_slot).unwrap().value().unwrap();
-                        let stackptr = state.flow.regs.remove(&addr_slot).unwrap().value().unwrap();
-                        log::trace!("sync_stack: value {} stackptr {}", value, stackptr);
-                        let args = self.func.arg_pool.double(stackptr, value);
+                    for (addr, data) in state.flow.stack.drain(..) {
+                        let addr = addr.value().unwrap();
+                        let data = data.value().unwrap();
+                        log::trace!("sync_stack: value {} stackptr {}", addr, data);
+                        let args = self.func.arg_pool.double(addr, data);
                         let store = self.func.add_value(ValueDef::Operator(
                             Operator::I64Store {
                                 memory: MemoryArg {
@@ -1635,7 +1601,6 @@ impl<'a> Evaluator<'a> {
                         ));
                         self.func.blocks[new_block].insts.push(store);
                     }
-                    state.flow.stack_known = 0..0;
                     EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
@@ -2202,14 +2167,7 @@ impl<'a> Evaluator<'a> {
             let succ_state = &self.state.block_entry[block];
 
             for (&idx, val) in &succ_state.regs {
-                let ty = val.ty().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Inconsistent type on reg idx {:?} at block {} (val {:?})",
-                        idx,
-                        orig_block,
-                        val,
-                    )
-                })?;
+                let ty = val.ty();
                 let val_blockparam = self.func.add_blockparam(block, ty);
                 let orig_val = *self.reg_map.get(&(ctx, orig_block, idx)).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -2243,7 +2201,7 @@ impl<'a> Evaluator<'a> {
     }
 
     fn insert_stack_syncs(&mut self) {
-        // For each edge, look at known stack range of pred and
+        // For each edge, look at known stack depth of pred and
         // succ. If succ's range is smaller, read regs from pred and
         // sync at end of pred.
         for (_, &block) in &self.block_map {
@@ -2252,51 +2210,24 @@ impl<'a> Evaluator<'a> {
             }
 
             let pred_state = &self.state.block_exit[block];
-            let pred_known_range = pred_state.stack_known.clone();
-            let mut intersection_of_succ_state = 0..u32::MAX;
+            let pred_depth = pred_state.stack.len();
+            let succ_min_depth = self.func.blocks[block]
+                .succs
+                .iter()
+                .map(|succ| self.state.block_entry[*succ].stack.len())
+                .min()
+                .unwrap();
 
-            for &succ in &self.func.blocks[block].succs {
-                let succ_state = &self.state.block_entry[succ];
-                intersection_of_succ_state.start = std::cmp::max(
-                    intersection_of_succ_state.start,
-                    succ_state.stack_known.start,
-                );
-                intersection_of_succ_state.end =
-                    std::cmp::min(intersection_of_succ_state.end, succ_state.stack_known.end);
-
+            for i in succ_min_depth..pred_depth {
+                let addr = pred_state.stack[i].0.value().unwrap();
+                let data = pred_state.stack[i].1.value().unwrap();
                 log::trace!(
-                    "edge from {} to {}: pred_known_range {:?} succ_known_range {:?}",
-                    block,
-                    succ,
-                    pred_known_range,
-                    succ_state.stack_known,
+                    "spilling {} back to real stack memory: addr {} data {}",
+                    i,
+                    addr,
+                    data
                 );
-            }
-            log::trace!(
-                "intersection of all succs: {:?}",
-                intersection_of_succ_state
-            );
-
-            assert!(pred_known_range.start <= intersection_of_succ_state.start);
-            assert!(pred_known_range.end >= intersection_of_succ_state.end);
-
-            for i in (pred_known_range.start..intersection_of_succ_state.start)
-                .chain(intersection_of_succ_state.end..pred_known_range.end)
-            {
-                log::trace!("spilling {} back to real stack memory", i);
-                let addr = pred_state
-                    .regs
-                    .get(&RegSlot::StackAddr(i))
-                    .unwrap()
-                    .value()
-                    .unwrap();
-                let value = pred_state
-                    .regs
-                    .get(&RegSlot::StackData(i))
-                    .unwrap()
-                    .value()
-                    .unwrap();
-                let args = self.func.arg_pool.double(addr, value);
+                let args = self.func.arg_pool.double(addr, data);
                 let store = self.func.add_value(ValueDef::Operator(
                     Operator::I64Store {
                         memory: MemoryArg {

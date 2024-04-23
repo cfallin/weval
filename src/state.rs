@@ -39,7 +39,6 @@ use crate::value::{AbstractValue, WasmVal};
 use fxhash::FxHashMap as HashMap;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Range;
 use waffle::entity::{EntityRef, EntityVec, PerEntity};
 use waffle::{Block, FunctionBody, Global, Type, Value};
 
@@ -104,8 +103,12 @@ pub struct ProgPointState {
     pub regs: BTreeMap<RegSlot, RegValue>,
     /// Global values.
     pub globals: BTreeMap<Global, AbstractValue>,
-    /// Virtualized stack (indices grow upward): known range bounds.
-    pub stack_known: Range<u32>,
+    /// Virtualized stack values (grows downward: we insert at the
+    /// beginning, so indices are consistent with the API's
+    /// definitions and merging takes a common prefix).
+    ///
+    /// Each entry is an (address, data) pair.
+    pub stack: Vec<(RegValue, RegValue)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -126,7 +129,6 @@ pub enum RegValue {
         ty: Type,
         abs: AbstractValue,
     },
-    Conflict,
 }
 
 impl RegValue {
@@ -168,8 +170,7 @@ impl RegValue {
                 abs: AbstractValue::meet(abs, abs1),
             },
             _ => {
-                log::trace!("Values {:?} and {:?} meeting to Conflict", a, b);
-                RegValue::Conflict
+                panic!("Values {:?} and {:?} meeting to Conflict", a, b);
             }
         }
     }
@@ -181,22 +182,12 @@ impl RegValue {
         }
     }
 
-    pub fn ty(&self) -> Option<Type> {
+    pub fn ty(&self) -> Type {
         match self {
-            RegValue::Value { ty, .. } => Some(*ty),
-            RegValue::Merge { ty, .. } => Some(*ty),
-            _ => None,
+            RegValue::Value { ty, .. } => *ty,
+            RegValue::Merge { ty, .. } => *ty,
         }
     }
-}
-
-/// An entry on the virtualized stack.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum StackEntry {
-    /// A value explicitly pushed on the stack. Not yet sync'd
-    /// (written) to real memory.
-    Value { stackptr: Value, value: Value },
-    // TODO: OtherMem too.
 }
 
 /// The state for a function body during analysis.
@@ -296,7 +287,7 @@ impl ProgPointState {
         ProgPointState {
             regs: BTreeMap::new(),
             globals,
-            stack_known: 0..0,
+            stack: vec![],
         }
     }
 
@@ -311,16 +302,24 @@ impl ProgPointState {
             Some(AbstractValue::Runtime(None)),
         );
 
-        let new_stack_known = std::cmp::max(self.stack_known.start, other.stack_known.start)
-            ..std::cmp::min(self.stack_known.end, other.stack_known.end);
-        changed |= new_stack_known != self.stack_known;
-        self.stack_known = new_stack_known;
+        if other.stack.len() < self.stack.len() {
+            changed = true;
+            self.stack.truncate(other.stack.len());
+        }
+        for (this, other) in self.stack.iter_mut().zip(other.stack.iter()) {
+            let new_addr = RegValue::meet(&this.0, &other.0);
+            changed |= new_addr != this.0;
+            this.0 = new_addr;
+            let new_data = RegValue::meet(&this.1, &other.1);
+            changed |= new_data != this.1;
+            this.1 = new_data;
+        }
 
         changed
     }
 
     pub fn update_across_edge(&mut self) {
-        for value in self.regs.values_mut() {
+        let create_merge = |value: &mut RegValue| {
             if let RegValue::Value { ty, abs, .. } = value {
                 // Ensure all specialization-register values become
                 // blockparams, even if only one pred.
@@ -329,39 +328,39 @@ impl ProgPointState {
                     abs: abs.clone(),
                 };
             }
+        };
+
+        for value in self.regs.values_mut() {
+            create_merge(value);
+        }
+        for (addr, data) in &mut self.stack {
+            create_merge(addr);
+            create_merge(data);
         }
     }
 
-    pub fn update_at_block_entry<
-        C,
-        GB: FnMut(&mut C, RegSlot, Type) -> Value,
-        RB: FnMut(&mut C, RegSlot),
-    >(
+    pub fn update_at_block_entry<C, GB: FnMut(&mut C, RegSlot, Type) -> Value>(
         &mut self,
         ctx: &mut C,
         get_blockparam: &mut GB,
-        remove_blockparam: &mut RB,
     ) -> anyhow::Result<()> {
-        let mut to_remove = vec![];
-        for (&idx, value) in &mut self.regs {
-            match value {
-                RegValue::Value { .. } => {}
-                RegValue::Merge { ty, abs } => {
-                    let param = get_blockparam(ctx, idx, *ty);
-                    *value = RegValue::Value {
-                        data: param,
-                        ty: *ty,
-                        abs: abs.clone(),
-                    };
-                }
-                RegValue::Conflict => {
-                    remove_blockparam(ctx, idx);
-                    to_remove.push(idx);
-                }
+        let mut handle_value = |slot: RegSlot, value: &mut RegValue| match value {
+            RegValue::Value { .. } => {}
+            RegValue::Merge { ty, abs } => {
+                let param = get_blockparam(ctx, slot, *ty);
+                *value = RegValue::Value {
+                    data: param,
+                    ty: *ty,
+                    abs: abs.clone(),
+                };
             }
+        };
+        for (&idx, value) in &mut self.regs {
+            handle_value(idx, value);
         }
-        for to_remove in to_remove {
-            self.regs.remove(&to_remove);
+        for (i, (addr, data)) in self.stack.iter_mut().enumerate() {
+            handle_value(RegSlot::StackAddr(i as u32), addr);
+            handle_value(RegSlot::StackData(i as u32), data);
         }
 
         Ok(())
