@@ -2166,7 +2166,8 @@ impl<'a> Evaluator<'a> {
         for (&(ctx, orig_block), &block) in &self.block_map {
             let succ_state = &self.state.block_entry[block];
 
-            for (&idx, val) in &succ_state.regs {
+            let mut regs = vec![];
+            let mut handle_value = |idx: RegSlot, val: &RegValue| -> anyhow::Result<()> {
                 let ty = val.ty();
                 let val_blockparam = self.func.add_blockparam(block, ty);
                 let orig_val = *self.reg_map.get(&(ctx, orig_block, idx)).ok_or_else(|| {
@@ -2179,6 +2180,16 @@ impl<'a> Evaluator<'a> {
                     )
                 })?;
                 self.func.set_alias(orig_val, val_blockparam);
+                regs.push(idx);
+                Ok(())
+            };
+
+            for (&idx, val) in &succ_state.regs {
+                handle_value(idx, val)?;
+            }
+            for (i, (addr, data)) in succ_state.stack.iter().enumerate() {
+                handle_value(RegSlot::StackAddr(i as u32), addr)?;
+                handle_value(RegSlot::StackData(i as u32), data)?;
             }
 
             for pred_idx in 0..self.func.blocks[block].preds.len() {
@@ -2186,8 +2197,13 @@ impl<'a> Evaluator<'a> {
                 let pred_state = &self.state.block_exit[pred];
                 let pred_succ_idx = self.func.blocks[block].pos_in_pred_succ[pred_idx];
 
-                for &idx in succ_state.regs.keys() {
-                    let pred_val = pred_state.regs.get(&idx).unwrap().value().unwrap();
+                for &idx in &regs {
+                    let pred_reg = match idx {
+                        RegSlot::Register(_) => pred_state.regs.get(&idx).as_ref().unwrap(),
+                        RegSlot::StackAddr(i) => &pred_state.stack.get(i as usize).unwrap().0,
+                        RegSlot::StackData(i) => &pred_state.stack.get(i as usize).unwrap().1,
+                    };
+                    let pred_val = pred_reg.value().unwrap();
                     self.func.blocks[pred]
                         .terminator
                         .update_target(pred_succ_idx, |target| {
