@@ -246,6 +246,14 @@ void weval_write_stack(uint64_t* ptr, uint32_t index, uint64_t value)
  * effect never occurs). */
 uint64_t weval_pop_stack(uint64_t* ptr) WEVAL_WASM_IMPORT("pop.stack");
 
+/* Locals virtualization; locals are also flushed when the stack is
+ * flushed */
+
+uint64_t weval_read_local(uint64_t* ptr, uint32_t index)
+    WEVAL_WASM_IMPORT("read.local");
+void weval_write_local(uint64_t* ptr, uint32_t index, uint64_t value)
+    WEVAL_WASM_IMPORT("write.local");
+
 /* Debugging and stats intrinsics */
     
 void weval_trace_line(uint32_t line_number) WEVAL_WASM_IMPORT("trace.line");

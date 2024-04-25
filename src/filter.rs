@@ -51,12 +51,14 @@ fn gen_replacement_bytecode(
         "write.global.0" => Ok(vec![wasm_encoder::Instruction::GlobalSet(global_base + 0)]),
         "write.global.1" => Ok(vec![wasm_encoder::Instruction::GlobalSet(global_base + 1)]),
         "write.global.2" => Ok(vec![wasm_encoder::Instruction::GlobalSet(global_base + 2)]),
-        
+
         // These can't be polyfilled so we rewrite them to
         // trap. They're only used in template-specialized variants
         // fed to weval requests.
         "read.reg" | "write.reg" | "push.stack" | "pop.stack" | "read.stack" | "write.stack"
-            | "sync.stack" => Ok(vec![wasm_encoder::Instruction::Unreachable]),
+        | "sync.stack" | "read.local" | "write.local" => {
+            Ok(vec![wasm_encoder::Instruction::Unreachable])
+        }
 
         // All other intrinsics have "pass through first arg" behavior
         // if they have a return value, and otherwise have no effect.

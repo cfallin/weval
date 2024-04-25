@@ -109,11 +109,16 @@ pub struct ProgPointState {
     ///
     /// Each entry is an (address, data) pair.
     pub stack: Vec<(RegValue, RegValue)>,
+    /// Virtualized locals, with (address, data) pairs for spilling
+    /// back to memory at sync points.
+    pub locals: BTreeMap<u32, (RegValue, RegValue)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RegSlot {
     Register(u32),
+    LocalAddr(u32),
+    LocalData(u32),
     StackData(u32),
     StackAddr(u32),
 }
@@ -288,6 +293,7 @@ impl ProgPointState {
             regs: BTreeMap::new(),
             globals,
             stack: vec![],
+            locals: BTreeMap::new(),
         }
     }
 
@@ -315,6 +321,13 @@ impl ProgPointState {
             this.1 = new_data;
         }
 
+        changed |= map_meet_with(
+            &mut self.locals,
+            &other.locals,
+            |(a0, a1), (b0, b1)| (RegValue::meet(a0, b0), RegValue::meet(a1, b1)),
+            None,
+        );
+
         changed
     }
 
@@ -334,6 +347,10 @@ impl ProgPointState {
             create_merge(value);
         }
         for (addr, data) in &mut self.stack {
+            create_merge(addr);
+            create_merge(data);
+        }
+        for (addr, data) in self.locals.values_mut() {
             create_merge(addr);
             create_merge(data);
         }
@@ -361,6 +378,10 @@ impl ProgPointState {
         for (i, (addr, data)) in self.stack.iter_mut().enumerate() {
             handle_value(RegSlot::StackAddr(i as u32), addr);
             handle_value(RegSlot::StackData(i as u32), data);
+        }
+        for (i, (addr, value)) in self.locals.iter_mut() {
+            handle_value(RegSlot::LocalAddr(*i), addr);
+            handle_value(RegSlot::LocalData(*i), value);
         }
 
         Ok(())

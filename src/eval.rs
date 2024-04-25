@@ -1601,6 +1601,71 @@ impl<'a> Evaluator<'a> {
                         ));
                         self.func.blocks[new_block].insts.push(store);
                     }
+
+                    for (_, (addr, data)) in std::mem::take(&mut state.flow.locals) {
+                        let addr = addr.value().unwrap();
+                        let data = data.value().unwrap();
+                        log::trace!("sync_stack: local addr {} data {}", addr, data);
+                        let args = self.func.arg_pool.double(addr, data);
+                        let store = self.func.add_value(ValueDef::Operator(
+                            Operator::I64Store {
+                                memory: MemoryArg {
+                                    align: 1,
+                                    offset: 0,
+                                    memory: self.image.main_heap().unwrap(),
+                                },
+                            },
+                            args,
+                            ListRef::default(),
+                        ));
+                        self.func.blocks[new_block].insts.push(store);
+                    }
+                    EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.read_local {
+                    let ptr = self.func.arg_pool[values][0];
+                    let idx = abs[1].as_const_u32().unwrap();
+                    match state.flow.locals.get(&idx) {
+                        None => {
+                            let args = self.func.arg_pool.single(ptr);
+                            let i64_ty = self.func.single_type_list(Type::I64);
+                            let load = self.func.add_value(ValueDef::Operator(
+                                Operator::I64Load {
+                                    memory: MemoryArg {
+                                        align: 1,
+                                        offset: 0,
+                                        memory: self.image.main_heap().unwrap(),
+                                    },
+                                },
+                                args,
+                                i64_ty,
+                            ));
+                            self.func.blocks[new_block].insts.push(load);
+                            EvalResult::Alias(AbstractValue::Runtime(None), load)
+                        }
+                        Some((_, RegValue::Value { data, abs, .. })) => {
+                            EvalResult::Alias(abs.clone(), *data)
+                        }
+                        _ => unreachable!(),
+                    }
+                } else if Some(function_index) == self.intrinsics.write_local {
+                    let ptr = self.func.arg_pool[values][0];
+                    let idx = abs[1].as_const_u32().unwrap();
+                    let data = self.func.arg_pool[values][2];
+                    state.flow.locals.insert(
+                        idx,
+                        (
+                            RegValue::Value {
+                                data: ptr,
+                                abs: abs[0].clone(),
+                                ty: Type::I32,
+                            },
+                            RegValue::Value {
+                                data,
+                                abs: abs[2].clone(),
+                                ty: Type::I64,
+                            },
+                        ),
+                    );
                     EvalResult::Elide
                 } else {
                     EvalResult::Unhandled
@@ -2191,6 +2256,10 @@ impl<'a> Evaluator<'a> {
                 handle_value(RegSlot::StackAddr(i as u32), addr)?;
                 handle_value(RegSlot::StackData(i as u32), data)?;
             }
+            for (&i, (addr, data)) in succ_state.locals.iter() {
+                handle_value(RegSlot::LocalAddr(i), addr)?;
+                handle_value(RegSlot::LocalData(i), data)?;
+            }
 
             for pred_idx in 0..self.func.blocks[block].preds.len() {
                 let pred = self.func.blocks[block].preds[pred_idx];
@@ -2202,6 +2271,8 @@ impl<'a> Evaluator<'a> {
                         RegSlot::Register(_) => pred_state.regs.get(&idx).as_ref().unwrap(),
                         RegSlot::StackAddr(i) => &pred_state.stack.get(i as usize).unwrap().0,
                         RegSlot::StackData(i) => &pred_state.stack.get(i as usize).unwrap().1,
+                        RegSlot::LocalAddr(i) => &pred_state.locals.get(&i).unwrap().0,
+                        RegSlot::LocalData(i) => &pred_state.locals.get(&i).unwrap().1,
                     };
                     let pred_val = pred_reg.value().unwrap();
                     self.func.blocks[pred]
@@ -2220,6 +2291,9 @@ impl<'a> Evaluator<'a> {
         // For each edge, look at known stack depth of pred and
         // succ. If succ's range is smaller, read regs from pred and
         // sync at end of pred.
+        //
+        // Also look at `locals` and find locals present in pred and
+        // not in some succ, and sync them.
         for (_, &block) in &self.block_map {
             if self.func.blocks[block].succs.is_empty() {
                 continue;
@@ -2240,6 +2314,42 @@ impl<'a> Evaluator<'a> {
                 log::trace!(
                     "spilling {} back to real stack memory: addr {} data {}",
                     i,
+                    addr,
+                    data
+                );
+                let args = self.func.arg_pool.double(addr, data);
+                let store = self.func.add_value(ValueDef::Operator(
+                    Operator::I64Store {
+                        memory: MemoryArg {
+                            align: 1,
+                            offset: 0,
+                            memory: self.image.main_heap().unwrap(),
+                        },
+                    },
+                    args,
+                    ListRef::default(),
+                ));
+                self.func.blocks[block].insts.push(store);
+            }
+
+            let locals_to_sync = pred_state
+                .locals
+                .keys()
+                .filter(|key| {
+                    self.func.blocks[block]
+                        .succs
+                        .iter()
+                        .any(|succ| !self.state.block_entry[*succ].locals.contains_key(key))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for local in locals_to_sync {
+                let (addr, data) = pred_state.locals.get(&local).unwrap();
+                let addr = addr.value().unwrap();
+                let data = data.value().unwrap();
+                log::trace!(
+                    "spilling local {} back to real locals memory: addr {} data {}",
+                    local,
                     addr,
                     data
                 );

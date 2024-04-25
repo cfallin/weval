@@ -37,4 +37,7 @@
        unreachable)
  (func (export "write.stack") (param i32 i32 i64))
  (func (export "pop.stack") (param i32) (result i64)
-       unreachable))
+       unreachable)
+ (func (export "read.local") (param i32 i32) (result i64)
+       unreachable)
+ (func (export "write.local") (param i32 i32 i64)))

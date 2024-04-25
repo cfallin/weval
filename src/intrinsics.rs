@@ -26,6 +26,8 @@ pub struct Intrinsics {
     pub read_stack: Option<Func>,
     pub write_stack: Option<Func>,
     pub pop_stack: Option<Func>,
+    pub read_local: Option<Func>,
+    pub write_local: Option<Func>,
 }
 
 impl Intrinsics {
@@ -84,6 +86,18 @@ impl Intrinsics {
                 &[],
             ),
             pop_stack: find_imported_intrinsic(module, "pop.stack", &[Type::I32], &[Type::I64]),
+            read_local: find_imported_intrinsic(
+                module,
+                "read.local",
+                &[Type::I32, Type::I32],
+                &[Type::I64],
+            ),
+            write_local: find_imported_intrinsic(
+                module,
+                "write.local",
+                &[Type::I32, Type::I32, Type::I64],
+                &[],
+            ),
         }
     }
 }
