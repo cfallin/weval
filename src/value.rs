@@ -67,17 +67,6 @@ pub enum AbstractValue {
     /// A value only computed at runtime. The instruction that
     /// computed it is specified, if known.
     Runtime(Option<waffle::Value>),
-    /// A fast-dispatch function reference. Special when used by a
-    /// `call_indirect`; any other usage degrades to the original
-    /// function pointer.
-    FastDispatchRef {
-        /// "Key" value: user guarantees that if this value is the
-        /// same over multiple invocations (along with epoch), then
-        /// called function will be the same. Will be I32-typed.
-        key: waffle::Value,
-        /// Epoch for key. Will be I32-typed.
-        epoch: waffle::Value,
-    },
 }
 
 /// Memory pointed to by one of the incoming arguments to a
