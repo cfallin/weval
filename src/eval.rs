@@ -5,7 +5,7 @@ use crate::image::Image;
 use crate::intrinsics::{find_global_data_by_exported_func, Intrinsics};
 use crate::state::*;
 use crate::stats::SpecializationStats;
-use crate::value::{AbstractValue, WasmVal};
+use crate::value::{mask_for_ty, AbstractValue, WasmVal};
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
@@ -794,7 +794,10 @@ impl<'a> Evaluator<'a> {
                         EvalResult::Unhandled => unreachable!(),
                         EvalResult::Alias(av, val) => Some((ValueDef::Alias(val), av)),
                         EvalResult::Elide => None,
-                        EvalResult::Normal(AbstractValue::Concrete(bits)) if tys.len() == 1 => {
+                        EvalResult::Normal(AbstractValue::Concrete(bits, mask))
+                            if tys.len() == 1
+                                && mask == mask_for_ty(self.func.type_pool[*tys][0]) =>
+                        {
                             if let Some(const_op) = const_operator(tys_slice[0], bits) {
                                 Some((
                                     ValueDef::Operator(
@@ -802,7 +805,7 @@ impl<'a> Evaluator<'a> {
                                         ListRef::default(),
                                         specialized_tys,
                                     ),
-                                    AbstractValue::Concrete(bits),
+                                    AbstractValue::Concrete(bits, mask),
                                 ))
                             } else {
                                 Some((
@@ -1034,7 +1037,7 @@ impl<'a> Evaluator<'a> {
                         index,
                         val
                     );
-                    AbstractValue::Concrete(WasmVal::I32(val))
+                    AbstractValue::Concrete(WasmVal::I32(val), u32::MAX.into())
                 } else {
                     abs.clone()
                 }
@@ -1755,7 +1758,10 @@ impl<'a> Evaluator<'a> {
             Operator::I32Const { .. }
             | Operator::I64Const { .. }
             | Operator::F32Const { .. }
-            | Operator::F64Const { .. } => AbstractValue::Concrete(WasmVal::try_from(op).unwrap()),
+            | Operator::F64Const { .. } => {
+                let val = WasmVal::try_from(op).unwrap();
+                AbstractValue::Concrete(val, val.maximal_mask())
+            }
             _ => AbstractValue::Runtime(Some(orig_inst)),
         }
     }
@@ -1768,66 +1774,61 @@ impl<'a> Evaluator<'a> {
         orig_x_val: Value,
         state: &mut PointState,
     ) -> anyhow::Result<AbstractValue> {
+        const MASK32: u128 = u32::MAX.into();
+        const MASK64: u128 = u64::MAX.into();
+
         match (op, x) {
             (Operator::GlobalSet { global_index }, av) => {
                 state.flow.globals.insert(global_index, av.clone());
                 Ok(AbstractValue::Runtime(Some(orig_inst)))
             }
-            (Operator::I32Eqz, AbstractValue::Concrete(WasmVal::I32(k))) => {
-                Ok(AbstractValue::Concrete(WasmVal::I32(if *k == 0 {
-                    1
-                } else {
-                    0
-                })))
+            (Operator::I32Eqz, AbstractValue::Concrete(WasmVal::I32(k), MASK32)) => Ok(
+                AbstractValue::Concrete(WasmVal::I32(if *k == 0 { 1 } else { 0 }), MASK32),
+            ),
+            (Operator::I64Eqz, AbstractValue::Concrete(WasmVal::I64(k), MASK64)) => Ok(
+                AbstractValue::Concrete(WasmVal::I64(if *k == 0 { 1 } else { 0 }), MASK64),
+            ),
+            (Operator::I32Extend8S, AbstractValue::Concrete(WasmVal::I32(k), MASK32)) => Ok(
+                AbstractValue::Concrete(WasmVal::I32(*k as i8 as i32 as u32), MASK32),
+            ),
+            (Operator::I32Extend16S, AbstractValue::Concrete(WasmVal::I32(k), MASK32)) => Ok(
+                AbstractValue::Concrete(WasmVal::I32(*k as i16 as i32 as u32), MASK32),
+            ),
+            (Operator::I64Extend8S, AbstractValue::Concrete(WasmVal::I64(k), MASK64)) => Ok(
+                AbstractValue::Concrete(WasmVal::I64(*k as i8 as i64 as u64), MASK64),
+            ),
+            (Operator::I64Extend16S, AbstractValue::Concrete(WasmVal::I64(k), MASK64)) => Ok(
+                AbstractValue::Concrete(WasmVal::I64(*k as i16 as i64 as u64), MASK64),
+            ),
+            (Operator::I64Extend32S, AbstractValue::Concrete(WasmVal::I64(k), MASK64)) => Ok(
+                AbstractValue::Concrete(WasmVal::I64(*k as i32 as i64 as u64), MASK64),
+            ),
+            (Operator::I32Clz, AbstractValue::Concrete(WasmVal::I32(k), MASK32)) => Ok(
+                AbstractValue::Concrete(WasmVal::I32(k.leading_zeros()), MASK32),
+            ),
+            (Operator::I64Clz, AbstractValue::Concrete(WasmVal::I64(k), MASK64)) => Ok(
+                AbstractValue::Concrete(WasmVal::I64(k.leading_zeros() as u64), MASK64),
+            ),
+            (Operator::I32Ctz, AbstractValue::Concrete(WasmVal::I32(k), MASK32)) => Ok(
+                AbstractValue::Concrete(WasmVal::I32(k.trailing_zeros()), MASK32),
+            ),
+            (Operator::I64Ctz, AbstractValue::Concrete(WasmVal::I64(k), MASK64)) => Ok(
+                AbstractValue::Concrete(WasmVal::I64(k.trailing_zeros() as u64), MASK64),
+            ),
+            (Operator::I32Popcnt, AbstractValue::Concrete(WasmVal::I32(k), MASK32)) => Ok(
+                AbstractValue::Concrete(WasmVal::I32(k.count_ones()), MASK32),
+            ),
+            (Operator::I64Popcnt, AbstractValue::Concrete(WasmVal::I64(k), MASK64)) => Ok(
+                AbstractValue::Concrete(WasmVal::I64(k.count_ones() as u64), MASK64),
+            ),
+            (Operator::I32WrapI64, AbstractValue::Concrete(WasmVal::I64(k), MASK64)) => {
+                Ok(AbstractValue::Concrete(WasmVal::I32(*k as u32), MASK32))
             }
-            (Operator::I64Eqz, AbstractValue::Concrete(WasmVal::I64(k))) => {
-                Ok(AbstractValue::Concrete(WasmVal::I64(if *k == 0 {
-                    1
-                } else {
-                    0
-                })))
-            }
-            (Operator::I32Extend8S, AbstractValue::Concrete(WasmVal::I32(k))) => Ok(
-                AbstractValue::Concrete(WasmVal::I32(*k as i8 as i32 as u32)),
+            (Operator::I64ExtendI32S, AbstractValue::Concrete(WasmVal::I32(k), MASK32)) => Ok(
+                AbstractValue::Concrete(WasmVal::I64(*k as i32 as i64 as u64), MASK64),
             ),
-            (Operator::I32Extend16S, AbstractValue::Concrete(WasmVal::I32(k))) => Ok(
-                AbstractValue::Concrete(WasmVal::I32(*k as i16 as i32 as u32)),
-            ),
-            (Operator::I64Extend8S, AbstractValue::Concrete(WasmVal::I64(k))) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(*k as i8 as i64 as u64)),
-            ),
-            (Operator::I64Extend16S, AbstractValue::Concrete(WasmVal::I64(k))) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(*k as i16 as i64 as u64)),
-            ),
-            (Operator::I64Extend32S, AbstractValue::Concrete(WasmVal::I64(k))) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(*k as i32 as i64 as u64)),
-            ),
-            (Operator::I32Clz, AbstractValue::Concrete(WasmVal::I32(k))) => {
-                Ok(AbstractValue::Concrete(WasmVal::I32(k.leading_zeros())))
-            }
-            (Operator::I64Clz, AbstractValue::Concrete(WasmVal::I64(k))) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k.leading_zeros() as u64)),
-            ),
-            (Operator::I32Ctz, AbstractValue::Concrete(WasmVal::I32(k))) => {
-                Ok(AbstractValue::Concrete(WasmVal::I32(k.trailing_zeros())))
-            }
-            (Operator::I64Ctz, AbstractValue::Concrete(WasmVal::I64(k))) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(k.trailing_zeros() as u64)),
-            ),
-            (Operator::I32Popcnt, AbstractValue::Concrete(WasmVal::I32(k))) => {
-                Ok(AbstractValue::Concrete(WasmVal::I32(k.count_ones())))
-            }
-            (Operator::I64Popcnt, AbstractValue::Concrete(WasmVal::I64(k))) => {
-                Ok(AbstractValue::Concrete(WasmVal::I64(k.count_ones() as u64)))
-            }
-            (Operator::I32WrapI64, AbstractValue::Concrete(WasmVal::I64(k))) => {
-                Ok(AbstractValue::Concrete(WasmVal::I32(*k as u32)))
-            }
-            (Operator::I64ExtendI32S, AbstractValue::Concrete(WasmVal::I32(k))) => Ok(
-                AbstractValue::Concrete(WasmVal::I64(*k as i32 as i64 as u64)),
-            ),
-            (Operator::I64ExtendI32U, AbstractValue::Concrete(WasmVal::I32(k))) => {
-                Ok(AbstractValue::Concrete(WasmVal::I64(*k as u64)))
+            (Operator::I64ExtendI32U, AbstractValue::Concrete(WasmVal::I32(k), MASK32)) => {
+                Ok(AbstractValue::Concrete(WasmVal::I64(*k as u64), MASK64))
             }
 
             (Operator::I32Load { memory }, AbstractValue::ConcreteMemory(buf, offset))
@@ -1865,7 +1866,7 @@ impl<'a> Evaluator<'a> {
                     .as_ref()
                     .unwrap();
                 let val = mem.read_size(offset, size)?;
-                let val = AbstractValue::Concrete(WasmVal::I32(conv(val)));
+                let val = AbstractValue::Concrete(WasmVal::I32(conv(val)), MASK32);
                 log::trace!(" -> produces {:?}", val);
                 Ok(val)
             }
@@ -1906,7 +1907,7 @@ impl<'a> Evaluator<'a> {
                     .as_ref()
                     .unwrap();
                 let val = mem.read_size(offset, size)?;
-                let val = AbstractValue::Concrete(WasmVal::I64(conv(val)));
+                let val = AbstractValue::Concrete(WasmVal::I64(conv(val)), MASK64);
                 log::trace!(" -> produces {:?}", val);
                 Ok(val)
             }
@@ -1914,12 +1915,12 @@ impl<'a> Evaluator<'a> {
             (Operator::I32Load { memory }, AbstractValue::StaticMemory(addr)) => {
                 let addr = addr.checked_add(memory.offset).unwrap();
                 let val = self.image.read_u32(self.image.main_heap()?, addr)?;
-                Ok(AbstractValue::Concrete(WasmVal::I32(val)))
+                Ok(AbstractValue::Concrete(WasmVal::I32(val), MASK32))
             }
             (Operator::I64Load { memory }, AbstractValue::StaticMemory(addr)) => {
                 let addr = addr.checked_add(memory.offset).unwrap();
                 let val = self.image.read_u64(self.image.main_heap()?, addr)?;
-                Ok(AbstractValue::Concrete(WasmVal::I64(val)))
+                Ok(AbstractValue::Concrete(WasmVal::I64(val), MASK64))
             }
 
             // TODO: FP and SIMD

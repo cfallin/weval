@@ -164,22 +164,34 @@ impl DirectiveArgs {
             let (value, mem, arg_len) = if is_specialized != 0 {
                 match ty {
                     0 => (
-                        AbstractValue::Concrete(WasmVal::I32(read_u32(arg_ptr + 8))),
+                        AbstractValue::Concrete(
+                            WasmVal::I32(read_u32(arg_ptr + 8)),
+                            u32::MAX.into(),
+                        ),
                         None,
                         16,
                     ),
                     1 => (
-                        AbstractValue::Concrete(WasmVal::I64(read_u64(arg_ptr + 8))),
+                        AbstractValue::Concrete(
+                            WasmVal::I64(read_u64(arg_ptr + 8)),
+                            u64::MAX.into(),
+                        ),
                         None,
                         16,
                     ),
                     2 => (
-                        AbstractValue::Concrete(WasmVal::F32(read_u32(arg_ptr + 8))),
+                        AbstractValue::Concrete(
+                            WasmVal::F32(read_u32(arg_ptr + 8)),
+                            u32::MAX.into(),
+                        ),
                         None,
                         16,
                     ),
                     3 => (
-                        AbstractValue::Concrete(WasmVal::F64(read_u64(arg_ptr + 8))),
+                        AbstractValue::Concrete(
+                            WasmVal::F64(read_u64(arg_ptr + 8)),
+                            u64::MAX.into(),
+                        ),
                         None,
                         16,
                     ),
