@@ -110,7 +110,6 @@ fn weval(
     let mut frontend_opts = waffle::FrontendOptions::default();
     frontend_opts.debug = true;
     let module = waffle::Module::from_wasm_bytes(&module_bytes[..], &frontend_opts)?;
-    let global_base = module.globals.len();
 
     // Build module image.
     let mut im = image::build_image(&module)?;
@@ -169,7 +168,7 @@ fn weval(
 
     let bytes = result.module.to_wasm_bytes()?;
 
-    let bytes = filter::filter(&bytes[..], global_base)?;
+    let bytes = filter::filter(&bytes[..])?;
 
     std::fs::write(&output_module, &bytes[..])?;
 

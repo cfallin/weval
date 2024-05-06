@@ -11,7 +11,6 @@ use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
 use std::collections::{hash_map::Entry as HashEntry, BTreeSet, VecDeque};
 use std::sync::Mutex;
-use waffle::GlobalData;
 use waffle::{
     cfg::CFGInfo, entity::EntityRef, entity::PerEntity, pool::ListRef, Block, BlockDef,
     BlockTarget, FuncDecl, FunctionBody, Memory, MemoryArg, Module, Operator, Signature, SourceLoc,
@@ -204,15 +203,6 @@ pub fn partially_evaluate<'a>(
         im.write_u32(heap, addr, value)?;
     }
 
-    // Add globals as needed.
-    for _ in 0..3 {
-        module.globals.push(GlobalData {
-            ty: Type::I64,
-            value: Some(0),
-            mutable: true,
-        });
-    }
-
     // Update the `weval_is_wevaled` flag, if it exists and is exported.
     if let Some(is_wevaled) = find_global_data_by_exported_func(&module, "weval.is.wevaled") {
         log::info!("updating `is_wevaled` flag at {:#x} to 1", is_wevaled);
@@ -324,12 +314,7 @@ fn partially_evaluate_func(
         queue: VecDeque::new(),
         queue_set: HashSet::default(),
     };
-    let (ctx, entry_state) = evaluator.state.init(
-        module,
-        image,
-        &evaluator.directive,
-        &evaluator.directive_args,
-    );
+    let (ctx, entry_state) = evaluator.state.init(image);
     log::trace!("after init_args, state is {:?}", evaluator.state);
 
     let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
@@ -1392,93 +1377,22 @@ impl<'a> Evaluator<'a> {
                     let val = abs[2].clone();
                     log::info!("print: line {}: {}: {:?}", line, message, val);
                     EvalResult::Elide
-                } else if Some(function_index) == self.intrinsics.read_global0 {
-                    let global_index = waffle::Global::new(self.module.globals.len());
+                } else if Some(function_index) == self.intrinsics.read_specialization_global {
+                    let index = abs[0].as_const_u32().unwrap() as usize;
                     let i64_ty = self.func.single_type_list(Type::I64);
                     let value = self.func.add_value(ValueDef::Operator(
-                        Operator::GlobalGet { global_index },
+                        Operator::I64Const { value: 0 },
                         ListRef::default(),
                         i64_ty,
                     ));
                     self.func.blocks[new_block].insts.push(value);
-                    let state = state
-                        .flow
-                        .globals
-                        .get(&global_index)
-                        .cloned()
-                        .unwrap_or(AbstractValue::Runtime(None));
-                    log::trace!("read_global0: state = {:?}", state);
+                    let state = self.state.specialization_globals[index].clone();
+                    log::trace!(
+                        "read_specialization_global: index {}: state = {:?}",
+                        index,
+                        state
+                    );
                     EvalResult::Alias(state, value)
-                } else if Some(function_index) == self.intrinsics.read_global1 {
-                    let global_index = waffle::Global::new(self.module.globals.len() + 1);
-                    let i64_ty = self.func.single_type_list(Type::I64);
-                    let value = self.func.add_value(ValueDef::Operator(
-                        Operator::GlobalGet { global_index },
-                        ListRef::default(),
-                        i64_ty,
-                    ));
-                    self.func.blocks[new_block].insts.push(value);
-                    let state = state
-                        .flow
-                        .globals
-                        .get(&global_index)
-                        .cloned()
-                        .unwrap_or(AbstractValue::Runtime(None));
-                    log::trace!("read_global1: state = {:?}", state);
-                    EvalResult::Alias(state, value)
-                } else if Some(function_index) == self.intrinsics.read_global2 {
-                    let global_index = waffle::Global::new(self.module.globals.len() + 2);
-                    let i64_ty = self.func.single_type_list(Type::I64);
-                    let value = self.func.add_value(ValueDef::Operator(
-                        Operator::GlobalGet { global_index },
-                        ListRef::default(),
-                        i64_ty,
-                    ));
-                    self.func.blocks[new_block].insts.push(value);
-                    let state = state
-                        .flow
-                        .globals
-                        .get(&global_index)
-                        .cloned()
-                        .unwrap_or(AbstractValue::Runtime(None));
-                    log::trace!("read_global2: state = {:?}", state);
-                    EvalResult::Alias(state, value)
-                } else if Some(function_index) == self.intrinsics.write_global0 {
-                    let value = self.func.arg_pool[values][0];
-                    let args = self.func.arg_pool.single(value);
-                    let set = self.func.add_value(ValueDef::Operator(
-                        Operator::GlobalSet {
-                            global_index: waffle::Global::new(self.module.globals.len()),
-                        },
-                        args,
-                        ListRef::default(),
-                    ));
-                    self.func.blocks[new_block].insts.push(set);
-                    EvalResult::Elide
-                } else if Some(function_index) == self.intrinsics.write_global1 {
-                    let value = self.func.arg_pool[values][0];
-                    let args = self.func.arg_pool.single(value);
-                    let set = self.func.add_value(ValueDef::Operator(
-                        Operator::GlobalSet {
-                            global_index: waffle::Global::new(self.module.globals.len() + 1),
-                        },
-                        args,
-                        ListRef::default(),
-                    ));
-                    self.func.blocks[new_block].insts.push(set);
-                    EvalResult::Elide
-                } else if Some(function_index) == self.intrinsics.write_global2 {
-                    let value = self.func.arg_pool[values][0];
-                    let args = self.func.arg_pool.single(value);
-                    let set = self.func.add_value(ValueDef::Operator(
-                        Operator::GlobalSet {
-                            global_index: waffle::Global::new(self.module.globals.len() + 2),
-                        },
-                        args,
-                        ListRef::default(),
-                    ));
-                    self.func.blocks[new_block].insts.push(set);
-                    EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.push_stack {
                     let stackptr = self.func.arg_pool[values][0];
                     let value = self.func.arg_pool[values][1];

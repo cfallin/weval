@@ -34,7 +34,6 @@
 //! examine the state at a given program point and using a different
 //! context implies leaving the current loop.
 
-use crate::directive::{Directive, DirectiveArgs};
 use crate::image::Image;
 use crate::value::{AbstractValue, WasmVal};
 use fxhash::FxHashMap as HashMap;
@@ -207,6 +206,8 @@ pub struct FunctionState {
     pub block_entry: PerEntity<Block, ProgPointState>,
     /// Block-exit abstract values, indexed by specialized Block.
     pub block_exit: PerEntity<Block, ProgPointState>,
+    /// Specialization values (constant args).
+    pub specialization_globals: Vec<AbstractValue>,
 }
 
 /// State carried during a pass through a block.
@@ -274,13 +275,8 @@ fn set_union<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
 }
 
 impl ProgPointState {
-    pub fn entry(
-        module: &waffle::Module,
-        im: &Image,
-        directive: &Directive,
-        directive_args: &DirectiveArgs,
-    ) -> ProgPointState {
-        let mut globals: BTreeMap<Global, AbstractValue> = im
+    pub fn entry(im: &Image) -> ProgPointState {
+        let globals: BTreeMap<Global, AbstractValue> = im
             .globals
             .iter()
             .enumerate()
@@ -295,12 +291,6 @@ impl ProgPointState {
                 }
             })
             .collect();
-
-        for i in 0..(directive.num_globals as usize) {
-            let global = waffle::Global::new(module.globals.len() + i);
-            let state = directive_args.const_params[i].clone();
-            globals.insert(global, state);
-        }
 
         ProgPointState {
             regs: BTreeMap::new(),
@@ -406,18 +396,9 @@ impl FunctionState {
         FunctionState::default()
     }
 
-    pub fn init(
-        &mut self,
-        module: &waffle::Module,
-        im: &Image,
-        directive: &Directive,
-        directive_args: &DirectiveArgs,
-    ) -> (Context, ProgPointState) {
+    pub fn init(&mut self, im: &Image) -> (Context, ProgPointState) {
         let ctx = self.contexts.create(None, ContextElem::Root);
-        (
-            ctx,
-            ProgPointState::entry(module, im, directive, directive_args),
-        )
+        (ctx, ProgPointState::entry(im))
     }
 
     pub fn set_args(
@@ -437,6 +418,11 @@ impl FunctionState {
         {
             let spec_value = *value_map.get(&(ctx, *orig_value)).unwrap();
             self.values[spec_value] = abs.clone();
+        }
+
+        // Set specialization globals, if any.
+        for i in 0..num_globals {
+            self.specialization_globals.push(args[i].clone());
         }
     }
 }

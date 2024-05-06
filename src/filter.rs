@@ -41,24 +41,21 @@ fn gen_replacement_bytecode(
     args: &[ValType],
     results: &[ValType],
     name: &str,
-    global_base: u32,
 ) -> anyhow::Result<Vec<wasm_encoder::Instruction<'static>>> {
     match name {
-        // These have special polyfills using the globals directly.
-        "read.global.0" => Ok(vec![wasm_encoder::Instruction::GlobalGet(global_base + 0)]),
-        "read.global.1" => Ok(vec![wasm_encoder::Instruction::GlobalGet(global_base + 1)]),
-        "read.global.2" => Ok(vec![wasm_encoder::Instruction::GlobalGet(global_base + 2)]),
-        "write.global.0" => Ok(vec![wasm_encoder::Instruction::GlobalSet(global_base + 0)]),
-        "write.global.1" => Ok(vec![wasm_encoder::Instruction::GlobalSet(global_base + 1)]),
-        "write.global.2" => Ok(vec![wasm_encoder::Instruction::GlobalSet(global_base + 2)]),
-
         // These can't be polyfilled so we rewrite them to
         // trap. They're only used in template-specialized variants
         // fed to weval requests.
-        "read.reg" | "write.reg" | "push.stack" | "pop.stack" | "read.stack" | "write.stack"
-        | "sync.stack" | "read.local" | "write.local" => {
-            Ok(vec![wasm_encoder::Instruction::Unreachable])
-        }
+        "read.specialization.global"
+        | "read.reg"
+        | "write.reg"
+        | "push.stack"
+        | "pop.stack"
+        | "read.stack"
+        | "write.stack"
+        | "sync.stack"
+        | "read.local"
+        | "write.local" => Ok(vec![wasm_encoder::Instruction::Unreachable]),
 
         // All other intrinsics have "pass through first arg" behavior
         // if they have a return value, and otherwise have no effect.
@@ -104,7 +101,7 @@ fn parser_to_encoder_ty(ty: wasmparser::ValType) -> wasm_encoder::ValType {
 }
 
 impl Rewrite {
-    pub fn process(mut self, module: &[u8], global_base: usize) -> anyhow::Result<Vec<u8>> {
+    pub fn process(mut self, module: &[u8]) -> anyhow::Result<Vec<u8>> {
         let parser = Parser::new(0);
         let mut out = wasm_encoder::Module::new();
         let mut orig_func_idx = 0;
@@ -146,12 +143,8 @@ impl Rewrite {
                                 if import.module == "weval" {
                                     // Omit the import, and add a rewriting to the func_remap info.
                                     let (args, results) = &self.func_types[fty as usize];
-                                    let bytecode = gen_replacement_bytecode(
-                                        args,
-                                        results,
-                                        import.name,
-                                        global_base as u32,
-                                    )?;
+                                    let bytecode =
+                                        gen_replacement_bytecode(args, results, import.name)?;
                                     self.func_remap
                                         .insert(orig_idx, FuncRemap::InlinedBytecode(bytecode));
                                 } else {
@@ -422,7 +415,7 @@ impl Rewrite {
     }
 }
 
-pub fn filter(module: &[u8], global_base: usize) -> anyhow::Result<Vec<u8>> {
+pub fn filter(module: &[u8]) -> anyhow::Result<Vec<u8>> {
     let rewrite = Rewrite::default();
-    rewrite.process(module, global_base)
+    rewrite.process(module)
 }
