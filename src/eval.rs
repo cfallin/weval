@@ -324,7 +324,12 @@ fn partially_evaluate_func(
         queue: VecDeque::new(),
         queue_set: HashSet::default(),
     };
-    let (ctx, entry_state) = evaluator.state.init(image);
+    let (ctx, entry_state) = evaluator.state.init(
+        module,
+        image,
+        &evaluator.directive,
+        &evaluator.directive_args,
+    );
     log::trace!("after init_args, state is {:?}", evaluator.state);
 
     let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
@@ -334,6 +339,7 @@ fn partially_evaluate_func(
     evaluator.queue_set.insert((evaluator.generic.entry, ctx));
     evaluator.state.set_args(
         evaluator.generic,
+        evaluator.directive.num_globals as usize,
         &evaluator.directive_args.const_params[..],
         ctx,
         &evaluator.value_map,
@@ -1387,38 +1393,56 @@ impl<'a> Evaluator<'a> {
                     log::info!("print: line {}: {}: {:?}", line, message, val);
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.read_global0 {
+                    let global_index = waffle::Global::new(self.module.globals.len());
                     let i64_ty = self.func.single_type_list(Type::I64);
                     let value = self.func.add_value(ValueDef::Operator(
-                        Operator::GlobalGet {
-                            global_index: waffle::Global::new(self.module.globals.len()),
-                        },
+                        Operator::GlobalGet { global_index },
                         ListRef::default(),
                         i64_ty,
                     ));
                     self.func.blocks[new_block].insts.push(value);
-                    EvalResult::Alias(AbstractValue::Runtime(None), value)
+                    let state = state
+                        .flow
+                        .globals
+                        .get(&global_index)
+                        .cloned()
+                        .unwrap_or(AbstractValue::Runtime(None));
+                    log::trace!("read_global0: state = {:?}", state);
+                    EvalResult::Alias(state, value)
                 } else if Some(function_index) == self.intrinsics.read_global1 {
+                    let global_index = waffle::Global::new(self.module.globals.len() + 1);
                     let i64_ty = self.func.single_type_list(Type::I64);
                     let value = self.func.add_value(ValueDef::Operator(
-                        Operator::GlobalGet {
-                            global_index: waffle::Global::new(self.module.globals.len() + 1),
-                        },
+                        Operator::GlobalGet { global_index },
                         ListRef::default(),
                         i64_ty,
                     ));
                     self.func.blocks[new_block].insts.push(value);
-                    EvalResult::Alias(AbstractValue::Runtime(None), value)
+                    let state = state
+                        .flow
+                        .globals
+                        .get(&global_index)
+                        .cloned()
+                        .unwrap_or(AbstractValue::Runtime(None));
+                    log::trace!("read_global1: state = {:?}", state);
+                    EvalResult::Alias(state, value)
                 } else if Some(function_index) == self.intrinsics.read_global2 {
+                    let global_index = waffle::Global::new(self.module.globals.len() + 2);
                     let i64_ty = self.func.single_type_list(Type::I64);
                     let value = self.func.add_value(ValueDef::Operator(
-                        Operator::GlobalGet {
-                            global_index: waffle::Global::new(self.module.globals.len() + 2),
-                        },
+                        Operator::GlobalGet { global_index },
                         ListRef::default(),
                         i64_ty,
                     ));
                     self.func.blocks[new_block].insts.push(value);
-                    EvalResult::Alias(AbstractValue::Runtime(None), value)
+                    let state = state
+                        .flow
+                        .globals
+                        .get(&global_index)
+                        .cloned()
+                        .unwrap_or(AbstractValue::Runtime(None));
+                    log::trace!("read_global2: state = {:?}", state);
+                    EvalResult::Alias(state, value)
                 } else if Some(function_index) == self.intrinsics.write_global0 {
                     let value = self.func.arg_pool[values][0];
                     let args = self.func.arg_pool.single(value);
@@ -1822,6 +1846,9 @@ impl<'a> Evaluator<'a> {
             }
             (Operator::I32WrapI64, AbstractValue::Concrete(WasmVal::I64(k))) => {
                 Ok(AbstractValue::Concrete(WasmVal::I32(*k as u32)))
+            }
+            (Operator::I32WrapI64, AbstractValue::ConcreteMemory(buf, off)) => {
+                Ok(AbstractValue::ConcreteMemory(buf.clone(), *off))
             }
             (Operator::I64ExtendI32S, AbstractValue::Concrete(WasmVal::I32(k))) => Ok(
                 AbstractValue::Concrete(WasmVal::I64(*k as i32 as i64 as u64)),
@@ -2382,7 +2409,13 @@ impl<'a> Evaluator<'a> {
             let param = self.func.add_blockparam(pre_entry, *ty);
             pre_entry_args.push(param);
         }
-        for (i, abs) in self.directive_args.const_params.iter().enumerate() {
+        for (i, abs) in self
+            .directive_args
+            .const_params
+            .iter()
+            .skip(self.directive.num_globals as usize)
+            .enumerate()
+        {
             let ty = self.generic.blocks[self.generic.entry].params[i].0;
             match ty {
                 Type::I32 => {

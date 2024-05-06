@@ -16,6 +16,8 @@ pub struct Directive {
     pub func: Func,
     /// Evaluate with the given arguments, encoded as a bytestring.
     pub args: Vec<u8>,
+    /// The number of globals prepended to the `args` list.
+    pub num_globals: u32,
     /// Place the ID of the resulting specialized function at the
     /// given address in memory, if nonzero.
     #[serde(skip)]
@@ -38,15 +40,6 @@ pub struct DirectiveArgs {
 pub struct MemoryBuffer {
     /// The bytes in memory at this pointer.
     data: Arc<Vec<u8>>,
-}
-
-/// Saved directive, able to be reinjected later in a new context.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SavedDirective {
-    /// User-defined weval site.
-    pub user_id: u32,
-    /// Serialized argument request string.
-    pub args: Vec<u8>,
 }
 
 impl MemoryBuffer {
@@ -112,17 +105,19 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
 
 fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Directive> {
     let user_id = im.read_u32(heap, head + 8)?;
-    let func_table_index = im.read_u32(heap, head + 12)?;
+    let num_globals = im.read_u32(heap, head + 12)?;
+    let func_table_index = im.read_u32(heap, head + 16)?;
     let func = im.func_ptr(func_table_index)?;
-    let arg_ptr = im.read_u32(heap, head + 16)?;
-    let arg_len = im.read_u32(heap, head + 20)?;
-    let func_index_out_addr = im.read_u32(heap, head + 24)?;
+    let arg_ptr = im.read_u32(heap, head + 20)?;
+    let arg_len = im.read_u32(heap, head + 24)?;
+    let func_index_out_addr = im.read_u32(heap, head + 28)?;
     let args = im.read_slice(heap, arg_ptr, arg_len)?.to_vec();
 
     log::trace!("directive: args {:#x} len {:#x}", arg_ptr, arg_len);
 
     Ok(Directive {
         user_id,
+        num_globals,
         func,
         args,
         func_index_out_addr,

@@ -21,6 +21,8 @@ struct weval_req_t {
   /* A user-provided ID of the weval'd function, for stability of
    * collected request bodies across relinkings: */
   uint32_t func_id;
+  uint32_t
+      num_globals; /* how many globals to specialize (prepended to arg list)? */
   weval_func_t func;
   uint8_t* argbuf;
   uint32_t arglen;
@@ -516,6 +518,7 @@ struct StoreArgs<RuntimeArg<T>, Rest...> {
 template <typename Ret, typename... Args, typename... WrappedArgs>
 weval_req_t* weval(impl::FuncPtr<Ret, Args...>* dest,
                    impl::FuncPtr<Ret, Args...> generic, uint32_t func_id,
+                   uint32_t num_globals,
                    WrappedArgs... args) {
   weval_req_t* req = (weval_req_t*)malloc(sizeof(weval_req_t));
   if (!req) {
@@ -527,6 +530,7 @@ weval_req_t* weval(impl::FuncPtr<Ret, Args...>* dest,
   }
 
   req->func_id = func_id;
+  req->num_globals = num_globals;
   req->func = (weval_func_t)generic;
   req->arglen = writer.len;
   req->argbuf = writer.take();
