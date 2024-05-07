@@ -204,20 +204,26 @@ uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi)
 uint64_t weval_read_specialization_global(uint32_t index)
     WEVAL_WASM_IMPORT("read.specialization.global");
 
+/* Convenience access to several globals added to the mdoule by
+ * weval. These must not take a dynamic index because they are
+ * rewritten everywhere, not just in wevaled functions, and we don't
+ * do a full constant-value analysis of every function. */
+uint64_t weval_read_global0()
+    WEVAL_WASM_IMPORT("read.global.0");
+void weval_write_global0(uint64_t value)
+    WEVAL_WASM_IMPORT("write.global.0");
+uint64_t weval_read_global1()
+    WEVAL_WASM_IMPORT("read.global.1");
+void weval_write_global1(uint64_t value)
+    WEVAL_WASM_IMPORT("write.global.1");
+
 /* Operand-stack virtualization */
 
 /*
  * The stack is tracked abstractly as part of block specialization
- * context, and has entries of the form:
- *
- * enum StackEntry {
- *     /// Some value pushed onto stack. Not actually stored until
- *     /// state is synced.
- *     Value { stackptr: Value, value: Value },
- *     /// Some value loaded from other memory and then pushed onto
- *     /// the stack (e.g., a local).
- *     OtherMem { stackptr: Value, ptr: Value },
- * }
+ * context, and has entries of the form (ptr, value). Values are not
+ * actually written back to the corresponding memory locations until
+ * "synchronized" either explicitly or on an edge into a merge point.
  *
  * When specialization reaches a merge-point, different stack states
  * will result in differently-specialized blocks; hence, we never have

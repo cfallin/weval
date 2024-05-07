@@ -1,4 +1,6 @@
 (module
+ (global $g0 (mut i64) (i64.const 0))
+ (global $g1 (mut i64) (i64.const 0))
  (func (export "assume.const.memory") (param i32) (result i32)
        local.get 0)
  (func (export "assume.const.memory.transitive") (param i32) (result i32)
@@ -26,4 +28,13 @@
        unreachable)
  (func (export "read.local") (param i32 i32) (result i64)
        unreachable)
- (func (export "write.local") (param i32 i32 i64)))
+ (func (export "write.local") (param i32 i32 i64))
+ (func (export "read.global.0") (result i64)
+       global.get $g0)
+ (func (export "write.global.0") (param i64)
+       local.get 0
+       global.set $g0)
+ (func (export "read.global.1") (result i64) global.get $g1)
+ (func (export "write.global.1") (param i64)
+       local.get 0
+       global.set $g1))

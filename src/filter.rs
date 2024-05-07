@@ -41,8 +41,18 @@ fn gen_replacement_bytecode(
     args: &[ValType],
     results: &[ValType],
     name: &str,
+    weval_globals: u32,
 ) -> anyhow::Result<Vec<wasm_encoder::Instruction<'static>>> {
     match name {
+        // These are polyfilled to access newly-added globals.
+        "read.global.0" => Ok(vec![wasm_encoder::Instruction::GlobalGet(weval_globals)]),
+        "read.global.1" => Ok(vec![wasm_encoder::Instruction::GlobalGet(
+            weval_globals + 1,
+        )]),
+        "write.global.0" => Ok(vec![wasm_encoder::Instruction::GlobalSet(weval_globals)]),
+        "write.global.1" => Ok(vec![wasm_encoder::Instruction::GlobalGet(
+            weval_globals + 1,
+        )]),
         // These can't be polyfilled so we rewrite them to
         // trap. They're only used in template-specialized variants
         // fed to weval requests.
@@ -109,6 +119,20 @@ impl Rewrite {
         let mut num_funcs = 0;
         let mut num_funcs_emitted = 0;
         let mut out_code_section = wasm_encoder::CodeSection::new();
+        let mut weval_globals = 0;
+
+        // Scan globals section once to count globals.
+        for payload in parser.clone().parse_all(module) {
+            match payload? {
+                Payload::GlobalSection(globals) => {
+                    for _ in globals.into_iter() {
+                        weval_globals += 1;
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
 
         for payload in parser.parse_all(module) {
             let payload = payload?;
@@ -143,8 +167,12 @@ impl Rewrite {
                                 if import.module == "weval" {
                                     // Omit the import, and add a rewriting to the func_remap info.
                                     let (args, results) = &self.func_types[fty as usize];
-                                    let bytecode =
-                                        gen_replacement_bytecode(args, results, import.name)?;
+                                    let bytecode = gen_replacement_bytecode(
+                                        args,
+                                        results,
+                                        import.name,
+                                        weval_globals,
+                                    )?;
                                     self.func_remap
                                         .insert(orig_idx, FuncRemap::InlinedBytecode(bytecode));
                                 } else {
@@ -164,6 +192,65 @@ impl Rewrite {
                     }
 
                     out.section(&out_imports);
+                    false
+                }
+
+                // Globals section: add two mut i64 globals for {read,write}.global.{0,1}.
+                Payload::GlobalSection(globals) => {
+                    let mut out_globals = wasm_encoder::GlobalSection::new();
+                    for global in globals.into_iter() {
+                        let global = global?;
+                        let val_type = match global.ty.content_type {
+                            wasmparser::ValType::I32 => wasm_encoder::ValType::I32,
+                            wasmparser::ValType::I64 => wasm_encoder::ValType::I64,
+                            wasmparser::ValType::F32 => wasm_encoder::ValType::F32,
+                            wasmparser::ValType::F64 => wasm_encoder::ValType::F64,
+                            wasmparser::ValType::V128 => wasm_encoder::ValType::V128,
+                            ty => panic!("Unsupported global type: {:?}", ty),
+                        };
+                        let ty = wasm_encoder::GlobalType {
+                            val_type,
+                            mutable: global.ty.mutable,
+                        };
+                        let reader = global.init_expr.get_operators_reader();
+                        let mut init_expr = wasm_encoder::ConstExpr::empty();
+                        for op in reader {
+                            let op = op?;
+                            match op {
+                                wasmparser::Operator::I32Const { value } => {
+                                    init_expr = init_expr.with_i32_const(value);
+                                }
+                                wasmparser::Operator::I64Const { value } => {
+                                    init_expr = init_expr.with_i64_const(value);
+                                }
+                                wasmparser::Operator::F32Const { value } => {
+                                    init_expr =
+                                        init_expr.with_f32_const(f32::from_bits(value.bits()));
+                                }
+                                wasmparser::Operator::F64Const { value } => {
+                                    init_expr =
+                                        init_expr.with_f64_const(f64::from_bits(value.bits()));
+                                }
+                                wasmparser::Operator::End => {}
+                                op => {
+                                    panic!("Unsupported operator in global initializer: {:?}", op)
+                                }
+                            }
+                        }
+                        out_globals.global(ty, &init_expr);
+                    }
+
+                    for _ in 0..2 {
+                        out_globals.global(
+                            wasm_encoder::GlobalType {
+                                val_type: wasm_encoder::ValType::I64,
+                                mutable: true,
+                            },
+                            &wasm_encoder::ConstExpr::empty().with_i64_const(0),
+                        );
+                    }
+
+                    out.section(&out_globals);
                     false
                 }
 
