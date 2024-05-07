@@ -50,7 +50,7 @@ fn gen_replacement_bytecode(
             weval_globals + 1,
         )]),
         "write.global.0" => Ok(vec![wasm_encoder::Instruction::GlobalSet(weval_globals)]),
-        "write.global.1" => Ok(vec![wasm_encoder::Instruction::GlobalGet(
+        "write.global.1" => Ok(vec![wasm_encoder::Instruction::GlobalSet(
             weval_globals + 1,
         )]),
         // These can't be polyfilled so we rewrite them to
