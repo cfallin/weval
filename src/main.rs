@@ -152,17 +152,23 @@ fn weval(
                 stats.generic, stats.generic_blocks, stats.generic_insts,
             );
             eprintln!(
-                "   specialized: {} blocks, {} insts",
-                stats.specialized_blocks, stats.specialized_insts
+                "   specialized ({} times): {} blocks, {} insts",
+                stats.specializations, stats.specialized_blocks, stats.specialized_insts
             );
-            let mut buckets = stats
-                .blocks_and_insts_by_bucket
-                .into_iter()
-                .collect::<Vec<_>>();
-            buckets.sort_by_key(|(_bucket, (_blocks, insts))| std::cmp::Reverse(*insts));
-            for (bucket, (blocks, insts)) in buckets {
-                eprintln!(" * bucket {:?}: {} blocks, {} insts", bucket, blocks, insts);
-            }
+            eprintln!(
+                "   virtstack: {} reads ({} mem), {} writes ({} mem)",
+                stats.virtstack_reads,
+                stats.virtstack_reads_mem,
+                stats.virtstack_writes,
+                stats.virtstack_writes_mem
+            );
+            eprintln!(
+                "   locals: {} reads ({} mem), {} writes ({} mem)",
+                stats.local_reads,
+                stats.local_reads_mem,
+                stats.local_writes,
+                stats.local_writes_mem
+            );
         }
     }
 

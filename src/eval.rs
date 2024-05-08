@@ -55,6 +55,8 @@ struct Evaluator<'a> {
     queue: VecDeque<(Block, Context, Block)>,
     /// Set to deduplicate `queue`.
     queue_set: HashSet<(Block, Context)>,
+    /// Stats accumulated during specialization.
+    stats: SpecializationStats,
 }
 
 pub struct PartialEvalResult<'a> {
@@ -145,11 +147,8 @@ pub fn partially_evaluate<'a>(
             if let Some(p) = progress_ref {
                 p.inc(1);
             }
-            if let Some((body, sig, name, block_rev_map, contexts)) = result {
-                stats
-                    .lock()
-                    .unwrap()
-                    .add_specialization(&body, &block_rev_map, &contexts);
+            if let Some((body, sig, name, spec_stats)) = result {
+                stats.lock().unwrap().add_specialization(&spec_stats);
                 let decl = {
                     let body = match body.compile() {
                         Ok(body) => body,
@@ -277,15 +276,7 @@ fn partially_evaluate_func(
     image: &Image,
     intrinsics: &Intrinsics,
     directive: &Directive,
-) -> anyhow::Result<
-    Option<(
-        FunctionBody,
-        Signature,
-        String,
-        PerEntity<Block, (Context, Block)>,
-        Contexts,
-    )>,
-> {
+) -> anyhow::Result<Option<(FunctionBody, Signature, String, SpecializationStats)>> {
     let directive_args = DirectiveArgs::decode(&directive.args[..])?;
     let orig_name = module.funcs[directive.func].name();
     let sig = module.funcs[directive.func].sig();
@@ -313,6 +304,7 @@ fn partially_evaluate_func(
         reg_map: HashMap::default(),
         queue: VecDeque::new(),
         queue_set: HashSet::default(),
+        stats: SpecializationStats::default(),
     };
     let (ctx, entry_state) = evaluator.state.init(image);
     log::trace!("after init_args, state is {:?}", evaluator.state);
@@ -347,13 +339,7 @@ fn partially_evaluate_func(
         "Adding func:\n{}",
         evaluator.func.display_verbose("| ", Some(module))
     );
-    Ok(Some((
-        evaluator.func,
-        sig,
-        name,
-        evaluator.block_rev_map,
-        evaluator.state.contexts,
-    )))
+    Ok(Some((evaluator.func, sig, name, evaluator.stats)))
 }
 
 // Split at every `weval_specialize_value()` call and
@@ -851,6 +837,8 @@ impl<'a> Evaluator<'a> {
                 self.func.append_to_block(new_block, result_value);
 
                 self.def_value(orig_block, input_ctx, inst, result_value, result_abs);
+
+                self.stats.specialized_insts += 1;
             }
         }
 
@@ -909,6 +897,7 @@ impl<'a> Evaluator<'a> {
         self.block_map.insert((context, orig_block), block);
         self.block_rev_map[block] = (context, orig_block);
         self.state.block_entry[block] = state;
+        self.stats.specialized_blocks += 1;
         block
     }
 
@@ -1417,9 +1406,11 @@ impl<'a> Evaluator<'a> {
                             },
                         ),
                     );
+                    self.stats.virtstack_writes += 1;
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.pop_stack {
                     log::trace!("pop_stack: current stack is {:?}", state.flow.stack);
+                    self.stats.virtstack_reads += 1;
                     if state.flow.stack.len() > 0 {
                         let (_, reg) = state.flow.stack.remove(0);
                         let (value, abs) = match reg {
@@ -1442,6 +1433,7 @@ impl<'a> Evaluator<'a> {
                             args,
                             i64_ty,
                         ));
+                        self.stats.virtstack_reads_mem += 1;
                         self.func.blocks[new_block].insts.push(load);
                         EvalResult::Alias(AbstractValue::Runtime(None), load)
                     }
@@ -1452,6 +1444,7 @@ impl<'a> Evaluator<'a> {
                         idx,
                         state.flow.stack
                     );
+                    self.stats.virtstack_reads += 1;
                     if let Some((_, data)) = state.flow.stack.get(idx as usize) {
                         let (value, abs) = match data {
                             RegValue::Value { data, abs, .. } => (*data, abs.clone()),
@@ -1474,6 +1467,7 @@ impl<'a> Evaluator<'a> {
                             i64_ty,
                         ));
                         self.func.blocks[new_block].insts.push(load);
+                        self.stats.virtstack_reads_mem += 1;
                         EvalResult::Alias(AbstractValue::Runtime(None), load)
                     }
                 } else if Some(function_index) == self.intrinsics.write_stack {
@@ -1496,6 +1490,7 @@ impl<'a> Evaluator<'a> {
                         abs: abs[2].clone(),
                         ty: Type::I64,
                     };
+                    self.stats.virtstack_writes += 1;
                     if let Some((addr, data)) = state.flow.stack.get_mut(idx as usize) {
                         log::trace!("write_stack: value {} stackptr {}", value, stackptr);
                         *addr = addr_value;
@@ -1515,6 +1510,7 @@ impl<'a> Evaluator<'a> {
                             args,
                             ListRef::default(),
                         ));
+                        self.stats.virtstack_writes_mem += 1;
                         self.func.blocks[new_block].insts.push(store);
                     }
                     EvalResult::Elide
@@ -1538,6 +1534,7 @@ impl<'a> Evaluator<'a> {
                             ListRef::default(),
                         ));
                         self.func.blocks[new_block].insts.push(store);
+                        self.stats.virtstack_writes_mem += 1;
                     }
 
                     for (_, (addr, data)) in std::mem::take(&mut state.flow.locals) {
@@ -1557,9 +1554,11 @@ impl<'a> Evaluator<'a> {
                             ListRef::default(),
                         ));
                         self.func.blocks[new_block].insts.push(store);
+                        self.stats.local_writes_mem += 1;
                     }
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.read_local {
+                    self.stats.local_reads += 1;
                     let ptr = self.func.arg_pool[values][0];
                     let idx = abs[1].as_const_u32().unwrap();
                     match state.flow.locals.get(&idx) {
@@ -1578,6 +1577,7 @@ impl<'a> Evaluator<'a> {
                                 i64_ty,
                             ));
                             self.func.blocks[new_block].insts.push(load);
+                            self.stats.local_reads_mem += 1;
                             EvalResult::Alias(AbstractValue::Runtime(None), load)
                         }
                         Some((_, RegValue::Value { data, abs, .. })) => {
@@ -1586,6 +1586,7 @@ impl<'a> Evaluator<'a> {
                         _ => unreachable!(),
                     }
                 } else if Some(function_index) == self.intrinsics.write_local {
+                    self.stats.local_writes += 1;
                     let ptr = self.func.arg_pool[values][0];
                     let idx = abs[1].as_const_u32().unwrap();
                     let data = self.func.arg_pool[values][2];
