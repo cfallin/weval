@@ -317,7 +317,7 @@ fn partially_evaluate_func(
     let (ctx, entry_state) = evaluator.state.init(image);
     log::trace!("after init_args, state is {:?}", evaluator.state);
 
-    let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, entry_state);
+    let specialized_entry = evaluator.create_block(evaluator.generic.entry, ctx, Some(entry_state));
     evaluator
         .queue
         .push_back((evaluator.generic.entry, ctx, specialized_entry));
@@ -578,7 +578,9 @@ impl<'a> Evaluator<'a> {
             context: ctx,
             pending_context: None,
             pending_specialize: None,
-            flow: self.state.block_entry[new_block].clone(),
+            flow: self.state.block_entry[new_block]
+                .clone()
+                .unwrap_or(ProgPointState::default()),
         };
         log::trace!(" -> state = {:?}", state);
 
@@ -617,7 +619,7 @@ impl<'a> Evaluator<'a> {
             })?;
 
         // Store the exit state at this point for later use.
-        self.state.block_exit[new_block] = state.flow.clone();
+        self.state.block_exit[new_block] = Some(state.flow.clone());
 
         self.evaluate_term(orig_block, &mut state, new_block);
 
@@ -867,7 +869,13 @@ impl<'a> Evaluator<'a> {
         let mut state = state.clone();
         state.update_across_edge();
 
-        self.state.block_entry[new_block].meet_with(&state)
+        match &mut self.state.block_entry[new_block] {
+            Some(existing_state) => existing_state.meet_with(&state),
+            empty_state @ None => {
+                *empty_state = Some(state);
+                true
+            }
+        }
     }
 
     fn context_desc(&self, ctx: Context) -> String {
@@ -882,9 +890,11 @@ impl<'a> Evaluator<'a> {
         &mut self,
         orig_block: Block,
         context: Context,
-        mut state: ProgPointState,
+        mut state: Option<ProgPointState>,
     ) -> Block {
-        state.update_across_edge();
+        if let Some(s) = state.as_mut() {
+            s.update_across_edge();
+        }
         let block = self.func.add_block();
         self.func.blocks[block].desc = format!(
             "Orig {} ctx {} ({})",
@@ -939,7 +949,7 @@ impl<'a> Evaluator<'a> {
 
         match self.block_map.entry((target_context, target)) {
             HashEntry::Vacant(_) => {
-                let block = self.create_block(target, target_context, state.flow.clone());
+                let block = self.create_block(target, target_context, Some(state.flow.clone()));
                 log::trace!(" -> created block {}", block);
                 self.block_map.insert((target_context, target), block);
                 self.queue_set.insert((target, target_context));
@@ -2170,7 +2180,7 @@ impl<'a> Evaluator<'a> {
         // specialized block, and create blockparams for all values
         // that in the end were `BlockParam`.
         for (&(ctx, orig_block), &block) in &self.block_map {
-            let succ_state = &self.state.block_entry[block];
+            let succ_state = self.state.block_entry[block].as_ref().unwrap();
 
             let mut regs = vec![];
             let mut handle_value = |idx: RegSlot, val: &RegValue| -> anyhow::Result<()> {
@@ -2204,7 +2214,7 @@ impl<'a> Evaluator<'a> {
 
             for pred_idx in 0..self.func.blocks[block].preds.len() {
                 let pred = self.func.blocks[block].preds[pred_idx];
-                let pred_state = &self.state.block_exit[pred];
+                let pred_state = self.state.block_exit[pred].clone().unwrap_or_default();
                 let pred_succ_idx = self.func.blocks[block].pos_in_pred_succ[pred_idx];
 
                 for &idx in &regs {
@@ -2240,12 +2250,12 @@ impl<'a> Evaluator<'a> {
                 continue;
             }
 
-            let pred_state = &self.state.block_exit[block];
+            let pred_state = self.state.block_exit[block].as_ref().unwrap();
             let pred_depth = pred_state.stack.len();
             let succ_min_depth = self.func.blocks[block]
                 .succs
                 .iter()
-                .map(|succ| self.state.block_entry[*succ].stack.len())
+                .map(|succ| self.state.block_entry[*succ].as_ref().unwrap().stack.len())
                 .min()
                 .unwrap();
 
@@ -2277,10 +2287,13 @@ impl<'a> Evaluator<'a> {
                 .locals
                 .keys()
                 .filter(|key| {
-                    self.func.blocks[block]
-                        .succs
-                        .iter()
-                        .any(|succ| !self.state.block_entry[*succ].locals.contains_key(key))
+                    self.func.blocks[block].succs.iter().any(|succ| {
+                        !self.state.block_entry[*succ]
+                            .as_ref()
+                            .unwrap()
+                            .locals
+                            .contains_key(key)
+                    })
                 })
                 .cloned()
                 .collect::<Vec<_>>();

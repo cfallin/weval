@@ -203,9 +203,9 @@ pub struct FunctionState {
     /// Value.
     pub values: PerEntity<Value, AbstractValue>,
     /// Block-entry abstract values, indexed by specialized Block.
-    pub block_entry: PerEntity<Block, ProgPointState>,
+    pub block_entry: PerEntity<Block, Option<ProgPointState>>,
     /// Block-exit abstract values, indexed by specialized Block.
-    pub block_exit: PerEntity<Block, ProgPointState>,
+    pub block_exit: PerEntity<Block, Option<ProgPointState>>,
     /// Specialization values (constant args).
     pub specialization_globals: Vec<AbstractValue>,
 }
