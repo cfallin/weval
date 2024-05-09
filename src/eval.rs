@@ -2,8 +2,8 @@
 
 use crate::directive::{Directive, DirectiveArgs};
 use crate::image::Image;
-use crate::liveness::Liveness;
 use crate::intrinsics::{find_global_data_by_exported_func, Intrinsics};
+use crate::liveness::Liveness;
 use crate::state::*;
 use crate::stats::SpecializationStats;
 use crate::value::{AbstractValue, WasmVal};

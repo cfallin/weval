@@ -7,6 +7,7 @@ use waffle::{cfg::CFGInfo, entity::PerEntity, Block, FunctionBody, Terminator, V
 
 pub type LiveSet = FxHashSet<Value>;
 
+#[derive(Clone, Debug)]
 pub struct Liveness<'a> {
     pub func: &'a FunctionBody,
     pub block_start: PerEntity<Block, LiveSet>,
@@ -20,11 +21,9 @@ pub fn scan_block_backward<T, Use: Fn(&mut T, Value), Def: Fn(&mut T, Value)>(
     use_func: Use,
     def_func: Def,
 ) {
-    func.blocks[block].terminator.visit_targets(|target| {
-        for &arg in &target.args {
-            let arg = func.resolve_alias(arg);
-            use_func(state, arg);
-        }
+    func.blocks[block].terminator.visit_uses(|arg| {
+        let arg = func.resolve_alias(arg);
+        use_func(state, arg);
     });
 
     for &value in func.blocks[block].insts.iter().rev() {
@@ -68,16 +67,21 @@ impl<'a> Liveness<'a> {
         };
 
         let mut workqueue = VecDeque::new();
+        let mut workqueue_set = FxHashSet::default();
+        let mut processed = FxHashSet::default();
         for (block, block_def) in func.blocks.entries() {
             match &block_def.terminator {
                 Terminator::Return { .. } | Terminator::Unreachable => {
                     workqueue.push_back(block);
+                    workqueue_set.insert(block);
+                    processed.insert(block);
                 }
                 _ => {}
             }
         }
 
         while let Some(block) = workqueue.pop_front() {
+            workqueue_set.remove(&block);
             let mut liveness = this.block_end[block].clone();
             scan_block_backward(
                 func,
@@ -93,7 +97,7 @@ impl<'a> Liveness<'a> {
             this.block_start[block] = liveness.clone();
 
             for &pred in &cfg.preds[block] {
-                let mut changed = false;
+                let mut changed = processed.insert(pred);
                 let pred_live = &mut this.block_end[pred];
                 for &value in &liveness {
                     if pred_live.insert(value) {
@@ -101,7 +105,9 @@ impl<'a> Liveness<'a> {
                     }
                 }
                 if changed {
-                    workqueue.push_back(pred);
+                    if workqueue_set.insert(pred) {
+                        workqueue.push_back(pred);
+                    }
                 }
             }
         }
