@@ -1850,9 +1850,9 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "waffle"
-version = "0.0.32"
+version = "0.0.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1eed0c9234495d9a87410db7cbf5365dc3f64f21b3d766a6ee10aed92b414c4"
+checksum = "d8c4f3e55b2d4673b39e527657e050cca4f78f486ee99bebea0a0312d19bb073"
 dependencies = [
  "addr2line",
  "anyhow",

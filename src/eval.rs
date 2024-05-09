@@ -74,6 +74,7 @@ pub fn partially_evaluate<'a>(
     directives: &[Directive],
     corpus: &[Directive],
     mut progress: Option<indicatif::ProgressBar>,
+    output_ir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<PartialEvalResult<'a>> {
     let intrinsics = Intrinsics::find(&module);
     log::trace!("intrinsics: {:?}", intrinsics);
@@ -114,6 +115,13 @@ pub fn partially_evaluate<'a>(
         if !funcs.contains_key(&directive.func) {
             let mut f = module.clone_and_expand_body(directive.func)?;
 
+            if let Some(path) = &output_ir {
+                let mut generic_ir_file = path.clone();
+                generic_ir_file.push(&format!("generic_{}.txt", directive.func));
+                std::fs::write(&generic_ir_file, format!("{}", f.display_verbose("", None)))
+                    .unwrap();
+            }
+
             let stats = Mutex::new(SpecializationStats::new(directive.func, &f));
 
             split_blocks_at_intrinsic_calls(&mut f, &intrinsics);
@@ -150,6 +158,21 @@ pub fn partially_evaluate<'a>(
             }
             if let Some((body, sig, name, spec_stats)) = result {
                 stats.lock().unwrap().add_specialization(&spec_stats);
+                let ir = if output_ir.is_some() {
+                    use std::fmt::Write;
+                    let cfg = CFGInfo::new(&body);
+                    let liveness = Liveness::new(&body, &cfg);
+                    let mut s = String::new();
+                    writeln!(&mut s, "# Liveness:").unwrap();
+                    for (block, _) in body.blocks.entries() {
+                        writeln!(&mut s, "# {}: {:?}", block, liveness.block_start[block]).unwrap();
+                    }
+                    writeln!(&mut s, "").unwrap();
+                    writeln!(&mut s, "{}", body.display("", None)).unwrap();
+                    s
+                } else {
+                    String::new()
+                };
                 let decl = {
                     let body = match body.compile() {
                         Ok(body) => body,
@@ -157,7 +180,7 @@ pub fn partially_evaluate<'a>(
                     };
                     FuncDecl::Compiled(sig, name, body)
                 };
-                Some(Ok((directive, decl)))
+                Some(Ok((directive, decl, ir)))
             } else {
                 log::warn!("Failed to weval for directive {:?}", directive);
                 None
@@ -168,7 +191,7 @@ pub fn partially_evaluate<'a>(
     // Compute memory updates and the pre-weval lookup table.
     let mut mem_updates = HashMap::default();
     let mut lookup_table = vec![];
-    for (directive, decl) in bodies {
+    for (directive, decl, ir) in bodies {
         // Add function to module.
         let func = module.funcs.push(decl);
         // Append to table.
@@ -184,6 +207,12 @@ pub fn partially_evaluate<'a>(
             func_table.max = Some(table_idx + 1);
         }
         log::info!("New func index {} -> table index {}", func, table_idx);
+
+        if let Some(path) = &output_ir {
+            let mut specialized_ir_file = path.clone();
+            specialized_ir_file.push(&format!("specialized_{}_to_{}.txt", directive.func, func));
+            std::fs::write(&specialized_ir_file, ir).unwrap();
+        }
 
         // Update memory image if this request is a live one with an
         // output function index, otherwise add to pre-weval lookup
@@ -333,7 +362,11 @@ fn partially_evaluate_func(
 
     let name = format!("{} (specialized)", orig_name);
     crate::escape::remove_shadow_stack_if_non_escaping(&mut evaluator.func);
-    evaluator.func.optimize();
+    evaluator.func.optimize(&waffle::OptOptions {
+        gvn: false,
+        cprop: false,
+        redundant_blockparams: true,
+    });
 
     accumulate_stats_from_func(&mut evaluator.stats, &evaluator.func);
 
@@ -851,6 +884,7 @@ impl<'a> Evaluator<'a> {
                 let result_value = self.func.add_value(result_value);
                 self.value_map.insert((input_ctx, inst), result_value);
                 self.func.append_to_block(new_block, result_value);
+                self.func.source_locs[result_value] = self.generic.source_locs[inst];
 
                 self.def_value(orig_block, input_ctx, inst, result_value, result_abs);
             }

@@ -40,6 +40,10 @@ pub enum Command {
         /// Show stats on specialization code size.
         #[structopt(long = "show-stats")]
         show_stats: bool,
+
+        /// Output IR for generic and specialized functions to files in a directory.
+        #[structopt(long = "output-ir")]
+        output_ir: Option<PathBuf>,
     },
 
     /// Run a Wasm module normally, collecting all weval requests at
@@ -71,7 +75,15 @@ fn main() -> anyhow::Result<()> {
             wizen,
             corpus,
             show_stats,
-        } => weval(input_module, output_module, wizen, corpus, show_stats),
+            output_ir,
+        } => weval(
+            input_module,
+            output_module,
+            wizen,
+            corpus,
+            show_stats,
+            output_ir,
+        ),
         Command::Collect {
             input_module,
             output_requests,
@@ -97,6 +109,7 @@ fn weval(
     do_wizen: bool,
     corpus: Option<PathBuf>,
     show_stats: bool,
+    output_ir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let raw_bytes = std::fs::read(&input_module)?;
 
@@ -131,6 +144,11 @@ fn weval(
         }
     };
 
+    // Make sure IR output directory exists.
+    if let Some(dir) = &output_ir {
+        std::fs::create_dir_all(dir)?;
+    }
+
     // Partially evaluate.
     let progress = indicatif::ProgressBar::new(0);
     let mut result = eval::partially_evaluate(
@@ -139,6 +157,7 @@ fn weval(
         &directives[..],
         &corpus[..],
         Some(progress),
+        output_ir,
     )?;
 
     // Update memories in module.
