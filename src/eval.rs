@@ -6,7 +6,7 @@ use crate::intrinsics::{find_global_data_by_exported_func, Intrinsics};
 use crate::liveness::Liveness;
 use crate::state::*;
 use crate::stats::SpecializationStats;
-use crate::value::{AbstractValue, WasmVal};
+use crate::value::{AbstractValue, RematValue, WasmVal};
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
@@ -1261,7 +1261,7 @@ impl<'a> Evaluator<'a> {
         op: Operator,
         loc: SourceLoc,
         abs: &[AbstractValue],
-        values: ListRef<Value>,
+        mut values: ListRef<Value>,
         orig_values: &[Value],
         tys: &[Type],
         state: &mut PointState,
@@ -1276,6 +1276,78 @@ impl<'a> Evaluator<'a> {
         );
 
         debug_assert_eq!(abs.len(), values.len());
+
+        // Can we do loads from constant memory? This comes before
+        // even `non_remat` below because that will generate actual
+        // loads/stores to remat'd (constant-offset) ptrs.
+        let constant_load_result = self.abstract_eval_constant_loads(
+            orig_block,
+            new_block,
+            orig_inst,
+            op,
+            loc,
+            abs,
+            values,
+            orig_values,
+            state,
+        )?;
+        if constant_load_result.is_handled() {
+            log::debug!(" -> constant-load: {:?}", constant_load_result);
+            return Ok(constant_load_result);
+        }
+
+        // Do any ops that can fold remat'd values in without
+        // remat'ing them.
+        let non_remat_result = self.abstract_eval_non_remat(
+            orig_block,
+            new_block,
+            orig_inst,
+            op,
+            loc,
+            abs,
+            values,
+            orig_values,
+            state,
+        );
+        if non_remat_result.is_handled() {
+            log::debug!(" -> non-remat: {:?}", non_remat_result);
+            return Ok(non_remat_result);
+        }
+
+        // At this point, rematerialize any args as needed.
+        let has_any_invalid = self.func.arg_pool[values].iter().any(|v| v.is_invalid());
+        if has_any_invalid {
+            let mut new_args = vec![];
+            for i in 0..values.len() {
+                if self.func.arg_pool[values][i] == Value::invalid() {
+                    let remat = match &abs[i] {
+                        AbstractValue::ConcreteMemory(_, _, Some(remat)) => remat,
+                        AbstractValue::Remat(remat) => remat,
+                        _ => unreachable!(),
+                    };
+
+                    let i32_ty = self.func.single_type_list(Type::I32);
+                    let k = self.func.add_value(ValueDef::Operator(
+                        Operator::I32Const {
+                            value: remat.offset,
+                        },
+                        ListRef::default(),
+                        i32_ty,
+                    ));
+                    self.func.blocks[new_block].insts.push(k);
+                    let args = self.func.arg_pool.double(remat.base, k);
+                    let add =
+                        self.func
+                            .add_value(ValueDef::Operator(Operator::I32Add, args, i32_ty));
+                    self.func.blocks[new_block].insts.push(add);
+
+                    new_args.push(add);
+                } else {
+                    new_args.push(self.func.arg_pool[values][i]);
+                }
+            }
+            values = self.func.arg_pool.from_iter(new_args.into_iter());
+        }
 
         let intrinsic_result = self.abstract_eval_intrinsic(
             orig_block,
@@ -1306,7 +1378,7 @@ impl<'a> Evaluator<'a> {
         } else {
             match abs.len() {
                 0 => self.abstract_eval_nullary(orig_inst, op, state),
-                1 => self.abstract_eval_unary(orig_inst, op, &abs[0], orig_values[0], state)?,
+                1 => self.abstract_eval_unary(orig_inst, op, &abs[0], state)?,
                 2 => self.abstract_eval_binary(orig_inst, op, &abs[0], &abs[1]),
                 3 => self.abstract_eval_ternary(orig_inst, op, &abs[0], &abs[1], &abs[2]),
                 _ => AbstractValue::Runtime(Some(orig_inst)),
@@ -1315,6 +1387,204 @@ impl<'a> Evaluator<'a> {
 
         log::debug!(" -> result: {:?}", ret);
         Ok(EvalResult::Normal(ret))
+    }
+
+    fn abstract_eval_non_remat(
+        &mut self,
+        _orig_block: Block,
+        _new_block: Block,
+        _orig_inst: Value,
+        op: Operator,
+        _loc: SourceLoc,
+        abs: &[AbstractValue],
+        _values: ListRef<Value>,
+        _orig_values: &[Value],
+        _state: &mut PointState,
+    ) -> EvalResult {
+        match abs.len() {
+            2 => match (op, &abs[0], &abs[1]) {
+                (
+                    Operator::I32Add,
+                    AbstractValue::Remat(RematValue { base, offset }),
+                    AbstractValue::Concrete(WasmVal::I32(k)),
+                )
+                | (
+                    Operator::I32Add,
+                    AbstractValue::Concrete(WasmVal::I32(k)),
+                    AbstractValue::Remat(RematValue { base, offset }),
+                ) => EvalResult::Alias(
+                    AbstractValue::Remat(RematValue {
+                        base: *base,
+                        offset: offset.wrapping_add(*k),
+                    }),
+                    Value::invalid(),
+                ),
+
+                (
+                    Operator::I32Sub,
+                    AbstractValue::Remat(RematValue { base, offset }),
+                    AbstractValue::Concrete(WasmVal::I32(k)),
+                ) => EvalResult::Alias(
+                    AbstractValue::Remat(RematValue {
+                        base: *base,
+                        offset: offset.wrapping_sub(*k),
+                    }),
+                    Value::invalid(),
+                ),
+
+                            // ptr OP const | const OP ptr (commutative cases)
+            (
+                AbstractValue::ConcreteMemory(buf, offset, remat),
+                AbstractValue::Concrete(WasmVal::I32(k)),
+            )
+            | (
+                AbstractValue::Concrete(WasmVal::I32(k)),
+                AbstractValue::ConcreteMemory(buf, offset, remat),
+            ) if op == Operator::I32Add => AbstractValue::ConcreteMemory(
+                buf.clone(),
+                offset.wrapping_add(*k),
+                remat.as_ref().map(|r| r.add32(*k)),
+            ),
+            (AbstractValue::StaticMemory(addr), AbstractValue::Concrete(WasmVal::I32(k)))
+            | (AbstractValue::Concrete(WasmVal::I32(k)), AbstractValue::StaticMemory(addr))
+                if op == Operator::I32Add =>
+            {
+                AbstractValue::StaticMemory(addr.wrapping_add(*k))
+            }
+
+            // ptr OP const (non-commutative cases)
+            (
+                AbstractValue::ConcreteMemory(buf, offset, remat),
+                AbstractValue::Concrete(WasmVal::I32(k)),
+            ) if op == Operator::I32Sub => AbstractValue::ConcreteMemory(
+                buf.clone(),
+                offset.wrapping_sub(*k),
+                remat.as_ref().map(|r| r.sub32(*k)),
+            ),
+
+            // ptr OP ptr
+            (
+                AbstractValue::ConcreteMemory(buf1, offset1, _),
+                AbstractValue::ConcreteMemory(buf2, offset2, _),
+            ) if op == Operator::I32Sub && buf1 == buf2 => {
+                AbstractValue::Concrete(WasmVal::I32(offset1.wrapping_sub(*offset2)))
+            }
+
+
+
+                _ => EvalResult::Unhandled,
+            },
+            _ => EvalResult::Unhandled,
+        }
+    }
+
+    fn abstract_eval_constant_loads(
+        &mut self,
+        _orig_block: Block,
+        _new_block: Block,
+        _orig_inst: Value,
+        op: Operator,
+        _loc: SourceLoc,
+        abs: &[AbstractValue],
+        values: ListRef<Value>,
+        orig_values: &[Value],
+        _state: &mut PointState,
+    ) -> anyhow::Result<EvalResult> {
+        if abs.len() != 1 {
+            return Ok(EvalResult::Unhandled);
+        }
+
+        let x = self.func.arg_pool[values][0];
+        let orig_x_val = orig_values[0];
+
+        Ok(match (op, &abs[0]) {
+            (Operator::I32Load { memory }, AbstractValue::ConcreteMemory(buf, offset, _))
+            | (Operator::I32Load8U { memory }, AbstractValue::ConcreteMemory(buf, offset, _))
+            | (Operator::I32Load8S { memory }, AbstractValue::ConcreteMemory(buf, offset, _))
+            | (Operator::I32Load16U { memory }, AbstractValue::ConcreteMemory(buf, offset, _))
+            | (Operator::I32Load16S { memory }, AbstractValue::ConcreteMemory(buf, offset, _)) => {
+                log::trace!(
+                    "load of addr {:?} offset {} (orig value {}) with const_memory tag",
+                    x,
+                    memory.offset,
+                    orig_x_val,
+                );
+                let size = match op {
+                    Operator::I32Load { .. } => 4,
+                    Operator::I32Load8U { .. } => 1,
+                    Operator::I32Load8S { .. } => 1,
+                    Operator::I32Load16U { .. } => 2,
+                    Operator::I32Load16S { .. } => 2,
+                    _ => unreachable!(),
+                };
+                let conv = |x: u64| match op {
+                    Operator::I32Load { .. } => x as u32,
+                    Operator::I32Load8U { .. } => x as u8 as u32,
+                    Operator::I32Load8S { .. } => x as i8 as i32 as u32,
+                    Operator::I32Load16U { .. } => x as u16 as u32,
+                    Operator::I32Load16S { .. } => x as i16 as i32 as u32,
+                    _ => unreachable!(),
+                };
+
+                let offset = offset
+                    .checked_add(memory.offset)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid offset"))?;
+                let mem = self.directive_args.const_memory[buf.0 as usize]
+                    .as_ref()
+                    .unwrap();
+                let val = mem.read_size(offset, size)?;
+                let val = AbstractValue::Concrete(WasmVal::I32(conv(val)));
+                log::trace!(" -> produces {:?}", val);
+                // Value will be rewritten with a constant when we
+                // return.
+                EvalResult::Alias(val, Value::invalid())
+            }
+
+            (Operator::I64Load { memory }, AbstractValue::ConcreteMemory(buf, offset, _))
+            | (Operator::I64Load8U { memory }, AbstractValue::ConcreteMemory(buf, offset, _))
+            | (Operator::I64Load8S { memory }, AbstractValue::ConcreteMemory(buf, offset, _))
+            | (Operator::I64Load16U { memory }, AbstractValue::ConcreteMemory(buf, offset, _))
+            | (Operator::I64Load16S { memory }, AbstractValue::ConcreteMemory(buf, offset, _))
+            | (Operator::I64Load32U { memory }, AbstractValue::ConcreteMemory(buf, offset, _))
+            | (Operator::I64Load32S { memory }, AbstractValue::ConcreteMemory(buf, offset, _)) => {
+                let size = match op {
+                    Operator::I64Load { .. } => 8,
+                    Operator::I64Load8U { .. } => 1,
+                    Operator::I64Load8S { .. } => 1,
+                    Operator::I64Load16U { .. } => 2,
+                    Operator::I64Load16S { .. } => 2,
+                    Operator::I64Load32U { .. } => 4,
+                    Operator::I64Load32S { .. } => 4,
+                    _ => unreachable!(),
+                };
+                let conv = |x: u64| match op {
+                    Operator::I64Load { .. } => x,
+                    Operator::I64Load8U { .. } => x as u8 as u64,
+                    Operator::I64Load8S { .. } => x as i8 as i64 as u64,
+                    Operator::I64Load16U { .. } => x as u16 as u64,
+                    Operator::I64Load16S { .. } => x as i16 as i64 as u64,
+                    Operator::I64Load32U { .. } => x as u32 as u64,
+                    Operator::I64Load32S { .. } => x as i32 as i64 as u64,
+                    _ => unreachable!(),
+                };
+
+                let offset = offset
+                    .checked_add(memory.offset)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid offset"))?;
+
+                let mem = self.directive_args.const_memory[buf.0 as usize]
+                    .as_ref()
+                    .unwrap();
+                let val = mem.read_size(offset, size)?;
+                let val = AbstractValue::Concrete(WasmVal::I64(conv(val)));
+                log::trace!(" -> produces {:?}", val);
+                // Value will be rewritten with a constant when we
+                // return.
+                EvalResult::Alias(val, Value::invalid())
+            }
+
+            _ => EvalResult::Unhandled,
+        })
     }
 
     fn abstract_eval_intrinsic(
@@ -1653,6 +1923,47 @@ impl<'a> Evaluator<'a> {
                         ),
                     );
                     EvalResult::Elide
+                } else if Some(function_index) == self.intrinsics.erase32_const_offset {
+                    let base = self.func.arg_pool[values][0];
+                    let bias = abs[1].as_const_u32().unwrap() as i32;
+
+                    // If bias is nonzero, generate an i32add or i32sub.
+                    let base = if bias == 0 {
+                        base
+                    } else {
+                        let i32_ty = self.func.single_type_list(Type::I32);
+                        let (abs_bias, op) = if bias < 0 {
+                            (-bias, Operator::I32Sub)
+                        } else {
+                            (bias, Operator::I32Add)
+                        };
+                        let abs_bias = abs_bias as u32;
+                        let bias_const = self.func.add_value(ValueDef::Operator(
+                            Operator::I32Const { value: abs_bias },
+                            ListRef::default(),
+                            i32_ty,
+                        ));
+                        self.func.blocks[new_block].insts.push(bias_const);
+                        let args = self.func.arg_pool.double(base, bias_const);
+                        let inst = self.func.add_value(ValueDef::Operator(op, args, i32_ty));
+                        self.func.blocks[new_block].insts.push(inst);
+                        inst
+                    };
+
+                    let remat = RematValue {
+                        base,
+                        offset: (-bias) as u32,
+                    };
+
+                    // Rewrite existing AbstractValue to include the RematValue.
+                    let abs = match &abs[0] {
+                        AbstractValue::ConcreteMemory(buf, offset, _) => {
+                            AbstractValue::ConcreteMemory(buf.clone(), *offset, Some(remat))
+                        }
+                        _ => AbstractValue::Remat(remat),
+                    };
+
+                    EvalResult::Alias(abs, Value::invalid())
                 } else {
                     EvalResult::Unhandled
                 }
@@ -1751,7 +2062,6 @@ impl<'a> Evaluator<'a> {
         orig_inst: Value,
         op: Operator,
         x: &AbstractValue,
-        orig_x_val: Value,
         state: &mut PointState,
     ) -> anyhow::Result<AbstractValue> {
         match (op, x) {
@@ -1809,95 +2119,14 @@ impl<'a> Evaluator<'a> {
             (Operator::I32WrapI64, AbstractValue::Concrete(WasmVal::I64(k))) => {
                 Ok(AbstractValue::Concrete(WasmVal::I32(*k as u32)))
             }
-            (Operator::I32WrapI64, AbstractValue::ConcreteMemory(buf, off)) => {
-                Ok(AbstractValue::ConcreteMemory(buf.clone(), *off))
-            }
+            (Operator::I32WrapI64, AbstractValue::ConcreteMemory(buf, off, remat)) => Ok(
+                AbstractValue::ConcreteMemory(buf.clone(), *off, remat.clone()),
+            ),
             (Operator::I64ExtendI32S, AbstractValue::Concrete(WasmVal::I32(k))) => Ok(
                 AbstractValue::Concrete(WasmVal::I64(*k as i32 as i64 as u64)),
             ),
             (Operator::I64ExtendI32U, AbstractValue::Concrete(WasmVal::I32(k))) => {
                 Ok(AbstractValue::Concrete(WasmVal::I64(*k as u64)))
-            }
-
-            (Operator::I32Load { memory }, AbstractValue::ConcreteMemory(buf, offset))
-            | (Operator::I32Load8U { memory }, AbstractValue::ConcreteMemory(buf, offset))
-            | (Operator::I32Load8S { memory }, AbstractValue::ConcreteMemory(buf, offset))
-            | (Operator::I32Load16U { memory }, AbstractValue::ConcreteMemory(buf, offset))
-            | (Operator::I32Load16S { memory }, AbstractValue::ConcreteMemory(buf, offset)) => {
-                log::trace!(
-                    "load of addr {:?} offset {} (orig value {}) with const_memory tag",
-                    x,
-                    memory.offset,
-                    orig_x_val,
-                );
-                let size = match op {
-                    Operator::I32Load { .. } => 4,
-                    Operator::I32Load8U { .. } => 1,
-                    Operator::I32Load8S { .. } => 1,
-                    Operator::I32Load16U { .. } => 2,
-                    Operator::I32Load16S { .. } => 2,
-                    _ => unreachable!(),
-                };
-                let conv = |x: u64| match op {
-                    Operator::I32Load { .. } => x as u32,
-                    Operator::I32Load8U { .. } => x as u8 as u32,
-                    Operator::I32Load8S { .. } => x as i8 as i32 as u32,
-                    Operator::I32Load16U { .. } => x as u16 as u32,
-                    Operator::I32Load16S { .. } => x as i16 as i32 as u32,
-                    _ => unreachable!(),
-                };
-
-                let offset = offset
-                    .checked_add(memory.offset)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid offset"))?;
-                let mem = self.directive_args.const_memory[buf.0 as usize]
-                    .as_ref()
-                    .unwrap();
-                let val = mem.read_size(offset, size)?;
-                let val = AbstractValue::Concrete(WasmVal::I32(conv(val)));
-                log::trace!(" -> produces {:?}", val);
-                Ok(val)
-            }
-
-            (Operator::I64Load { memory }, AbstractValue::ConcreteMemory(buf, offset))
-            | (Operator::I64Load8U { memory }, AbstractValue::ConcreteMemory(buf, offset))
-            | (Operator::I64Load8S { memory }, AbstractValue::ConcreteMemory(buf, offset))
-            | (Operator::I64Load16U { memory }, AbstractValue::ConcreteMemory(buf, offset))
-            | (Operator::I64Load16S { memory }, AbstractValue::ConcreteMemory(buf, offset))
-            | (Operator::I64Load32U { memory }, AbstractValue::ConcreteMemory(buf, offset))
-            | (Operator::I64Load32S { memory }, AbstractValue::ConcreteMemory(buf, offset)) => {
-                let size = match op {
-                    Operator::I64Load { .. } => 8,
-                    Operator::I64Load8U { .. } => 1,
-                    Operator::I64Load8S { .. } => 1,
-                    Operator::I64Load16U { .. } => 2,
-                    Operator::I64Load16S { .. } => 2,
-                    Operator::I64Load32U { .. } => 4,
-                    Operator::I64Load32S { .. } => 4,
-                    _ => unreachable!(),
-                };
-                let conv = |x: u64| match op {
-                    Operator::I64Load { .. } => x,
-                    Operator::I64Load8U { .. } => x as u8 as u64,
-                    Operator::I64Load8S { .. } => x as i8 as i64 as u64,
-                    Operator::I64Load16U { .. } => x as u16 as u64,
-                    Operator::I64Load16S { .. } => x as i16 as i64 as u64,
-                    Operator::I64Load32U { .. } => x as u32 as u64,
-                    Operator::I64Load32S { .. } => x as i32 as i64 as u64,
-                    _ => unreachable!(),
-                };
-
-                let offset = offset
-                    .checked_add(memory.offset)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid offset"))?;
-
-                let mem = self.directive_args.const_memory[buf.0 as usize]
-                    .as_ref()
-                    .unwrap();
-                let val = mem.read_size(offset, size)?;
-                let val = AbstractValue::Concrete(WasmVal::I64(conv(val)));
-                log::trace!(" -> produces {:?}", val);
-                Ok(val)
             }
 
             (Operator::I32Load { memory }, AbstractValue::StaticMemory(addr)) => {
@@ -2149,40 +2378,6 @@ impl<'a> Evaluator<'a> {
                     // TODO: FP and SIMD ops.
                     _ => AbstractValue::Runtime(Some(orig_inst)),
                 }
-            }
-
-            // ptr OP const | const OP ptr (commutative cases)
-            (
-                AbstractValue::ConcreteMemory(buf, offset),
-                AbstractValue::Concrete(WasmVal::I32(k)),
-            )
-            | (
-                AbstractValue::Concrete(WasmVal::I32(k)),
-                AbstractValue::ConcreteMemory(buf, offset),
-            ) if op == Operator::I32Add => {
-                AbstractValue::ConcreteMemory(buf.clone(), offset.wrapping_add(*k))
-            }
-            (AbstractValue::StaticMemory(addr), AbstractValue::Concrete(WasmVal::I32(k)))
-            | (AbstractValue::Concrete(WasmVal::I32(k)), AbstractValue::StaticMemory(addr))
-                if op == Operator::I32Add =>
-            {
-                AbstractValue::StaticMemory(addr.wrapping_add(*k))
-            }
-
-            // ptr OP const (non-commutative cases)
-            (
-                AbstractValue::ConcreteMemory(buf, offset),
-                AbstractValue::Concrete(WasmVal::I32(k)),
-            ) if op == Operator::I32Sub => {
-                AbstractValue::ConcreteMemory(buf.clone(), offset.wrapping_sub(*k))
-            }
-
-            // ptr OP ptr
-            (
-                AbstractValue::ConcreteMemory(buf1, offset1),
-                AbstractValue::ConcreteMemory(buf2, offset2),
-            ) if op == Operator::I32Sub && buf1 == buf2 => {
-                AbstractValue::Concrete(WasmVal::I32(offset1.wrapping_sub(*offset2)))
             }
 
             _ => AbstractValue::Runtime(Some(orig_inst)),

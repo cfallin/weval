@@ -188,7 +188,7 @@ impl DirectiveArgs {
                             ),
                         };
                         (
-                            AbstractValue::ConcreteMemory(MemoryBufferIndex(i), 0),
+                            AbstractValue::ConcreteMemory(MemoryBufferIndex(i), 0, None),
                             Some(data),
                             16 + padded_len,
                         )

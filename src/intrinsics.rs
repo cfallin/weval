@@ -23,6 +23,7 @@ pub struct Intrinsics {
     pub pop_stack: Option<Func>,
     pub read_local: Option<Func>,
     pub write_local: Option<Func>,
+    pub erase32_const_offset: Option<Func>,
 }
 
 impl Intrinsics {
@@ -92,6 +93,12 @@ impl Intrinsics {
                 "write.local",
                 &[Type::I32, Type::I32, Type::I64],
                 &[],
+            ),
+            erase32_const_offset: find_imported_intrinsic(
+                module,
+                "erase32.const.offset",
+                &[Type::I32, Type::I32],
+                &[Type::I32],
             ),
         }
     }

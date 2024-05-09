@@ -61,12 +61,23 @@ pub enum AbstractValue {
     Concrete(WasmVal),
     /// A value that points to memory known at specialization time,
     /// with the given offset.
-    ConcreteMemory(MemoryBufferIndex, u32),
+    ConcreteMemory(MemoryBufferIndex, u32, Option<RematValue>),
     /// Static memory pointer.
     StaticMemory(u32),
+    /// A lazily-rematerialized value based on another SSA value and
+    /// an offset.
+    Remat(RematValue),
     /// A value only computed at runtime. The instruction that
     /// computed it is specified, if known.
     Runtime(Option<waffle::Value>),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RematValue {
+    /// The SSA value we are based on.
+    pub base: waffle::Value,
+    /// The unsigned offset in wrapping 32-bit space from that value.
+    pub offset: u32,
 }
 
 /// Memory pointed to by one of the incoming arguments to a
@@ -109,7 +120,7 @@ impl AbstractValue {
     pub fn as_const_u32_or_mem_offset(&self) -> Option<u32> {
         match self {
             &AbstractValue::Concrete(WasmVal::I32(k)) => Some(k),
-            &AbstractValue::ConcreteMemory(_, off) => Some(off),
+            &AbstractValue::ConcreteMemory(_, off, _) => Some(off),
             _ => None,
         }
     }
@@ -124,5 +135,21 @@ impl AbstractValue {
 
     pub fn as_const_truthy(&self) -> Option<bool> {
         self.as_const_u32().map(|k| k != 0)
+    }
+}
+
+impl RematValue {
+    pub fn add32(&self, offset: u32) -> RematValue {
+        RematValue {
+            base: self.base,
+            offset: self.offset.wrapping_add(offset),
+        }
+    }
+
+    pub fn sub32(&self, offset: u32) -> RematValue {
+        RematValue {
+            base: self.base,
+            offset: self.offset.wrapping_sub(offset),
+        }
     }
 }

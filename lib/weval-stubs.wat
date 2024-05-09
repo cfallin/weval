@@ -37,4 +37,8 @@
  (func (export "read.global.1") (result i64) global.get $g1)
  (func (export "write.global.1") (param i64)
        local.get 0
-       global.set $g1))
+       global.set $g1)
+ (func (export "erase32.const.mem") (param i32) (result i32)
+       local.get 0)
+ (func (export "erase32.const.offset") (param i32) (result i32)
+       local.get 0))
