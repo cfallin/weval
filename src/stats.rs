@@ -1,7 +1,7 @@
 //! Post-specialization stats.
 
 use fxhash::FxHashSet;
-use waffle::{Func, FunctionBody};
+use waffle::{Block, Func, FunctionBody};
 
 /// Stats per original/generic function.
 #[derive(Clone, Debug, Default)]
@@ -23,13 +23,14 @@ pub struct SpecializationStats {
     pub local_writes: usize,
     pub local_reads_mem: usize,
     pub local_writes_mem: usize,
+    pub live_value_at_block_start: usize,
 }
 
 impl SpecializationStats {
     pub fn new(generic: Func, body: &FunctionBody) -> Self {
         let mut ret = Self::default();
         ret.generic = generic;
-        let (blocks, insts) = count_reachable_blocks_and_insts(body);
+        let (blocks, insts, _) = count_reachable_blocks_and_insts(body);
         ret.generic_blocks = blocks;
         ret.generic_insts = insts;
         ret
@@ -47,10 +48,11 @@ impl SpecializationStats {
         self.local_reads_mem += stats.local_reads_mem;
         self.local_writes += stats.local_writes;
         self.local_writes_mem += stats.local_writes_mem;
+        self.live_value_at_block_start += stats.live_value_at_block_start;
     }
 }
 
-fn count_reachable_blocks_and_insts(body: &FunctionBody) -> (usize, usize) {
+pub fn count_reachable_blocks_and_insts(body: &FunctionBody) -> (usize, usize, FxHashSet<Block>) {
     let mut queue = vec![body.entry];
     let mut visited = queue.iter().cloned().collect::<FxHashSet<_>>();
     let mut insts = 0;
@@ -64,5 +66,5 @@ fn count_reachable_blocks_and_insts(body: &FunctionBody) -> (usize, usize) {
         });
     }
 
-    (visited.len(), insts)
+    (visited.len(), insts, visited)
 }

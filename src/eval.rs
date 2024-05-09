@@ -2,6 +2,7 @@
 
 use crate::directive::{Directive, DirectiveArgs};
 use crate::image::Image;
+use crate::liveness::Liveness;
 use crate::intrinsics::{find_global_data_by_exported_func, Intrinsics};
 use crate::state::*;
 use crate::stats::SpecializationStats;
@@ -334,6 +335,8 @@ fn partially_evaluate_func(
     crate::escape::remove_shadow_stack_if_non_escaping(&mut evaluator.func);
     evaluator.func.optimize();
 
+    accumulate_stats_from_func(&mut evaluator.stats, &evaluator.func);
+
     log::info!("Specialization of {:?} done", directive);
     log::debug!(
         "Adding func:\n{}",
@@ -460,6 +463,19 @@ fn meet_ancestors(cfg: &CFGInfo, a: Block, b: Block) -> Block {
     } else {
         assert!(cfg.domtree[a].is_valid());
         meet_ancestors(cfg, cfg.domtree[a], b)
+    }
+}
+
+fn accumulate_stats_from_func(stats: &mut SpecializationStats, func: &FunctionBody) {
+    let (blocks, insts, reachable_blocks) = crate::stats::count_reachable_blocks_and_insts(func);
+    stats.specialized_blocks += blocks;
+    stats.specialized_insts += insts;
+
+    // Compute liveness over all blocks and find the live-over-edge count.
+    let cfg = CFGInfo::new(func);
+    let liveness = Liveness::new(func, &cfg);
+    for &block in &reachable_blocks {
+        stats.live_value_at_block_start += liveness.block_start[block].len();
     }
 }
 
@@ -837,8 +853,6 @@ impl<'a> Evaluator<'a> {
                 self.func.append_to_block(new_block, result_value);
 
                 self.def_value(orig_block, input_ctx, inst, result_value, result_abs);
-
-                self.stats.specialized_insts += 1;
             }
         }
 
@@ -897,7 +911,6 @@ impl<'a> Evaluator<'a> {
         self.block_map.insert((context, orig_block), block);
         self.block_rev_map[block] = (context, orig_block);
         self.state.block_entry[block] = state;
-        self.stats.specialized_blocks += 1;
         block
     }
 

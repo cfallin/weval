@@ -9,6 +9,7 @@ mod eval;
 mod filter;
 mod image;
 mod intrinsics;
+mod liveness;
 mod state;
 mod stats;
 mod value;
@@ -168,6 +169,11 @@ fn weval(
                 stats.local_reads_mem,
                 stats.local_writes,
                 stats.local_writes_mem
+            );
+            eprintln!(
+                "   live values at block starts: {} ({} per block)",
+                stats.live_value_at_block_start,
+                (stats.live_value_at_block_start as f64) / (stats.specialized_blocks as f64),
             );
         }
     }
