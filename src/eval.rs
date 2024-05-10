@@ -361,14 +361,14 @@ fn partially_evaluate_func(
     }
 
     let name = format!("{} (specialized)", orig_name);
+    let cfg = CFGInfo::new(&evaluator.func);
+    crate::escape::remove_shadow_stack_if_non_escaping(&mut evaluator.func, &cfg);
     evaluator.func.optimize(&waffle::OptOptions {
         gvn: false,
         cprop: false,
         redundant_blockparams: true,
     });
-    let cfg = CFGInfo::new(&evaluator.func);
 //    crate::constant_offsets::run(&mut evaluator.func, &cfg);
-    crate::escape::remove_shadow_stack_if_non_escaping(&mut evaluator.func, &cfg);
     crate::dce::run(&mut evaluator.func, &cfg);
 
     accumulate_stats_from_func(&mut evaluator.stats, &evaluator.func);
