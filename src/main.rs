@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use structopt::StructOpt;
 
+mod constant_offsets;
+mod dce;
 mod directive;
 mod escape;
 mod eval;

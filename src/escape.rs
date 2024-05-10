@@ -108,8 +108,7 @@ fn shadow_stack_escapes(func: &FunctionBody, cfg: &CFGInfo) -> EscapeAnalysisRes
     EscapeAnalysisResult::NonEscaping(tainted)
 }
 
-pub fn remove_shadow_stack_if_non_escaping(func: &mut FunctionBody) {
-    let cfg = CFGInfo::new(func);
+pub fn remove_shadow_stack_if_non_escaping(func: &mut FunctionBody, cfg: &CFGInfo) {
     if let EscapeAnalysisResult::NonEscaping(values_to_remove) = shadow_stack_escapes(func, &cfg) {
         log::trace!("removing shadow stack operations: {:?}", values_to_remove);
         let ty_u32 = func.type_pool.single(Type::I32);
