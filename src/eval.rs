@@ -368,7 +368,7 @@ fn partially_evaluate_func(
         cprop: false,
         redundant_blockparams: true,
     });
-//    crate::constant_offsets::run(&mut evaluator.func, &cfg);
+    crate::constant_offsets::run(&mut evaluator.func, &cfg);
     crate::dce::run(&mut evaluator.func, &cfg);
 
     accumulate_stats_from_func(&mut evaluator.stats, &evaluator.func);

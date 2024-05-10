@@ -2,7 +2,6 @@
 //! of one base, to minimize live value / register pressure.
 
 use fxhash::{FxHashMap, FxHashSet};
-use smallvec::SmallVec;
 use std::collections::VecDeque;
 use waffle::{
     cfg::CFGInfo, entity::PerEntity, pool::ListRef, Block, FunctionBody, Operator, Type, Value,
@@ -38,6 +37,10 @@ impl AbsValue {
 }
 
 pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
+    log::trace!(
+        "constant_offsets pass running on:\n{}",
+        func.display("| ", None)
+    );
     // Compute a fixpoint analysis: which values are some original SSA
     // value plus an offset?
     let mut values: PerEntity<Value, AbsValue> = PerEntity::default();
@@ -49,9 +52,11 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
     workqueue_set.insert(func.entry);
 
     while let Some(block) = workqueue.pop_front() {
+        log::trace!("processing {}", block);
         workqueue_set.remove(&block);
 
         for &inst in &func.blocks[block].insts {
+            log::trace!("block {} value {}: {:?}", block, inst, func.values[inst]);
             match &func.values[inst] {
                 ValueDef::BlockParam(..) => {
                     unreachable!();
@@ -63,6 +68,7 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
 
                 ValueDef::Operator(op, args, tys) if tys.len() == 1 => {
                     let args = &func.arg_pool[*args];
+                    log::trace!(" -> args = {:?}", args);
 
                     match op {
                         Operator::I32Const { value } => {
@@ -113,6 +119,7 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                     values[inst] = AbsValue::Bottom;
                 }
             }
+            log::trace!(" -> values[{}] = {:?}", inst, values[inst]);
         }
 
         func.blocks[block].terminator.visit_targets(|target| {
@@ -121,13 +128,17 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
             for (&arg, &(_, blockparam)) in target.args.iter().zip(succ_params.iter()) {
                 let arg = func.resolve_alias(arg);
                 let new = AbsValue::meet(values[arg], values[blockparam]);
+                log::trace!(" -> block {} target {}: arg {} to blockparam {}: value {:?} -> {:?}",
+                            block, target.block, arg, blockparam, values[blockparam], new);
                 changed |= new != values[blockparam];
                 values[blockparam] = new;
             }
 
-            if changed || cfg.dominates(block, target.block) {
-                if workqueue_set.insert(block) {
-                    workqueue.push_back(block);
+            if changed || (block != target.block && cfg.dominates(block, target.block)) {
+                log::trace!(" -> at least one blockparam changed, or we dominate target block; enqueuing {}",
+                            target.block);
+                if workqueue_set.insert(target.block) {
+                    workqueue.push_back(target.block);
                 }
             }
         });
@@ -137,11 +148,12 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
     // instruction. (We don't bother removing the original
     // instructions: that will happen with a later DCE pass.)
     let i32_ty = func.single_type_list(Type::I32);
-    for block_def in func.blocks.values_mut() {
+    for (block, block_def) in func.blocks.entries_mut() {
+        log::trace!("rewriting in block {}", block);
         let mut computed_offsets: FxHashMap<AbsValue, Value> = FxHashMap::default();
-        let mut rewrite: FxHashMap<Value, Value> = FxHashMap::default();
         let mut new_insts = vec![];
         for inst in std::mem::take(&mut block_def.insts) {
+            log::trace!("visiting inst {}: {:?}", inst, values[inst]);
             if let AbsValue::Offset(base, offset) = values[inst] {
                 let computed_offset = *computed_offsets.entry(values[inst]).or_insert_with(|| {
                     let k = func.values.push(ValueDef::Operator(
@@ -154,27 +166,14 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                     let add = func
                         .values
                         .push(ValueDef::Operator(Operator::I32Add, args, i32_ty));
+                    log::trace!(" -> recomputed as {}", add);
                     new_insts.push(add);
                     add
                 });
-                rewrite.insert(inst, computed_offset);
+                log::trace!(" -> rewrite to {}", computed_offset);
+                func.values[inst] = ValueDef::Alias(computed_offset);
             } else {
-                let value = match &func.values[inst] {
-                    ValueDef::Operator(op, args, tys)
-                        if func.arg_pool[*args]
-                            .iter()
-                            .any(|&arg| rewrite.contains_key(&arg)) =>
-                    {
-                        let new_args = func.arg_pool[*args]
-                            .iter()
-                            .map(|&arg| rewrite.get(&arg).cloned().unwrap_or(arg))
-                            .collect::<SmallVec<[Value; 4]>>();
-                        let args = func.arg_pool.from_iter(new_args.into_iter());
-                        func.values.push(ValueDef::Operator(op.clone(), args, *tys))
-                    }
-                    _ => inst,
-                };
-                new_insts.push(value);
+                new_insts.push(inst);
             }
         }
         block_def.insts = new_insts;

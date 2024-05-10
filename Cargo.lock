@@ -2388,7 +2388,6 @@ dependencies = [
  "log",
  "rayon",
  "serde",
- "smallvec",
  "structopt",
  "waffle",
  "wasm-encoder 0.202.0",
