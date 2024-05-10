@@ -156,19 +156,27 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
             log::trace!("visiting inst {}: {:?}", inst, values[inst]);
             if let AbsValue::Offset(base, offset) = values[inst] {
                 let computed_offset = *computed_offsets.entry(values[inst]).or_insert_with(|| {
-                    let k = func.values.push(ValueDef::Operator(
-                        Operator::I32Const { value: offset },
-                        ListRef::default(),
-                        i32_ty,
-                    ));
-                    new_insts.push(k);
-                    let args = func.arg_pool.double(base, k);
-                    let add = func
-                        .values
-                        .push(ValueDef::Operator(Operator::I32Add, args, i32_ty));
-                    log::trace!(" -> recomputed as {}", add);
-                    new_insts.push(add);
-                    add
+                    if offset == 0 {
+                        base
+                    } else {
+                        let offset = offset as i32;
+                        let (op, value) = if offset > 0 {
+                            (Operator::I32Add, offset as u32)
+                        } else {
+                            (Operator::I32Sub, (-offset) as u32)
+                        };
+                        let k = func.values.push(ValueDef::Operator(
+                            Operator::I32Const { value },
+                            ListRef::default(),
+                            i32_ty,
+                        ));
+                        new_insts.push(k);
+                        let args = func.arg_pool.double(base, k);
+                        let add = func.values.push(ValueDef::Operator(op, args, i32_ty));
+                        log::trace!(" -> recomputed as {}", add);
+                        new_insts.push(add);
+                        add
+                    }
                 });
                 log::trace!(" -> rewrite to {}", computed_offset);
                 func.values[inst] = ValueDef::Alias(computed_offset);
