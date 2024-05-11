@@ -7,12 +7,7 @@ use waffle::{cfg::CFGInfo, Block, FunctionBody, Terminator, Value, ValueDef};
 /// instruction that itself is used (or for a branch arg, for which
 /// any target's corresponding blockparam is used). Returns `true` if
 /// any changes occurred to the used-value set.
-fn scan_block(
-    func: &FunctionBody,
-    block: Block,
-    used: &mut FxHashSet<Value>,
-    used_branch_args: &mut FxHashSet<(Block, usize, usize)>,
-) -> bool {
+fn scan_block(func: &FunctionBody, block: Block, used: &mut FxHashSet<Value>) -> bool {
     let mark_used = |used: &mut FxHashSet<Value>, mut arg: Value| -> bool {
         let mut changed = false;
         changed |= used.insert(arg);
@@ -26,11 +21,10 @@ fn scan_block(
     log::trace!("DCE: scanning {}", block);
     let mut changed = false;
 
-    let mut target_idx = 0;
     func.blocks[block].terminator.visit_targets(|target| {
         log::trace!(" -> considering succ {}", target.block);
         let succ_params = &func.blocks[target.block].params;
-        for (i, (&arg, &(_, param))) in target.args.iter().zip(succ_params.iter()).enumerate() {
+        for (&arg, &(_, param)) in target.args.iter().zip(succ_params.iter()) {
             if used.contains(&param) {
                 log::trace!(
                     "  -> succ blockparam {} is used; marking arg {} used",
@@ -38,10 +32,8 @@ fn scan_block(
                     arg
                 );
                 changed |= mark_used(used, arg);
-                used_branch_args.insert((block, target_idx, i));
             }
         }
-        target_idx += 1;
     });
     match &func.blocks[block].terminator {
         Terminator::CondBr { cond: value, .. } | Terminator::Select { value, .. } => {
@@ -107,11 +99,13 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
 
     // Now compute value uses.
     let mut used = FxHashSet::default();
-    let mut used_branch_args = FxHashSet::default();
+    for &(_, param) in &func.blocks[func.entry].params {
+        used.insert(param);
+    }
     loop {
         let mut changed = false;
         for &block in cfg.rpo.values().rev() {
-            changed |= scan_block(func, block, &mut used, &mut used_branch_args);
+            changed |= scan_block(func, block, &mut used);
         }
         log::trace!("done with all blocks; changed = {}", changed);
         if !changed {
@@ -121,17 +115,39 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
 
     // Now delete any values that aren't used from `insts`, `params`
     // and targets' `args`.
-    for (block, block_def) in func.blocks.entries_mut() {
-        block_def.params.retain(|(_ty, param)| used.contains(param));
-        block_def.insts.retain(|inst| used.contains(inst));
-        let mut target_idx = 0;
-        block_def.terminator.update_targets(|target| {
+    for block in func.blocks.iter() {
+        func.blocks[block].insts.retain(|inst| used.contains(inst));
+        let mut terminator = std::mem::take(&mut func.blocks[block].terminator);
+        terminator.update_targets(|target| {
             for i in (0..target.args.len()).rev() {
-                if !used_branch_args.contains(&(block, target_idx, i)) {
+                let succ_arg = func.blocks[target.block].params[i].1;
+                if !used.contains(&succ_arg) {
                     target.args.remove(i);
                 }
             }
-            target_idx += 1;
+        });
+        func.blocks[block].terminator = terminator;
+    }
+    for block_def in func.blocks.values_mut() {
+        block_def.params.retain(|(_ty, param)| used.contains(param));
+    }
+
+    // Now validate branch arg types against blockparam types.
+    for (block, block_def) in func.blocks.entries() {
+        block_def.terminator.visit_targets(|target| {
+            for (&arg, &(param_ty, param)) in target
+                .args
+                .iter()
+                .zip(func.blocks[target.block].params.iter())
+            {
+                let arg = func.resolve_alias(arg);
+                let arg_ty = func.values[arg].ty(&func.type_pool).unwrap();
+                assert_eq!(
+                    arg_ty, param_ty,
+                    "block arg {} in {} to param {} on {} mismatches type",
+                    arg, block, param, target.block
+                );
+            }
         });
     }
 }
