@@ -47,6 +47,7 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
 
     let mut workqueue: VecDeque<Block> = VecDeque::new();
     let mut workqueue_set: FxHashSet<Block> = FxHashSet::default();
+    let mut visited: FxHashSet<Block> = FxHashSet::default();
 
     workqueue.push_back(func.entry);
     workqueue_set.insert(func.entry);
@@ -138,7 +139,9 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                 values[blockparam] = new;
             }
 
-            if changed || (block != target.block && cfg.dominates(block, target.block)) {
+            if changed ||
+                visited.insert(target.block) ||
+                (block != target.block && cfg.dominates(block, target.block)) {
                 log::trace!(" -> at least one blockparam changed, or we dominate target block; enqueuing {}",
                             target.block);
                 if workqueue_set.insert(target.block) {
@@ -149,8 +152,7 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
     }
 
     // Now, for each value that's an Offset, rewrite it to an add
-    // instruction. (We don't bother removing the original
-    // instructions: that will happen with a later DCE pass.)
+    // instruction.
     let i32_ty = func.single_type_list(Type::I32);
     for (block, block_def) in func.blocks.entries_mut() {
         log::trace!("rewriting in block {}", block);
