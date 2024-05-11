@@ -51,6 +51,10 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
     workqueue.push_back(func.entry);
     workqueue_set.insert(func.entry);
 
+    for &(_, param) in &func.blocks[func.entry].params {
+        values[param] = AbsValue::Bottom;
+    }
+
     while let Some(block) = workqueue.pop_front() {
         log::trace!("processing {}", block);
         workqueue_set.remove(&block);
