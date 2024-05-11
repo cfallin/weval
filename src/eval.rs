@@ -168,7 +168,7 @@ pub fn partially_evaluate<'a>(
                         writeln!(&mut s, "# {}: {:?}", block, liveness.block_start[block]).unwrap();
                     }
                     writeln!(&mut s, "").unwrap();
-                    writeln!(&mut s, "{}", body.display("", None)).unwrap();
+                    writeln!(&mut s, "{}", body.display_verbose("", None)).unwrap();
                     s
                 } else {
                     String::new()
