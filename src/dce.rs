@@ -67,7 +67,10 @@ fn scan_block(func: &FunctionBody, block: Block, used: &mut FxHashSet<Value>) ->
                 }
             }
             ValueDef::Operator(op, args, _) => {
-                if !op.is_pure() || used.contains(&inst) {
+                if !op.is_pure() {
+                    changed |= used.insert(inst);
+                }
+                if used.contains(&inst) {
                     for &arg in &func.arg_pool[*args] {
                         log::trace!(" -> marking arg {} used", arg);
                         changed |= mark_used(used, arg);
