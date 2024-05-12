@@ -118,8 +118,11 @@ pub fn partially_evaluate<'a>(
             if let Some(path) = &output_ir {
                 let mut generic_ir_file = path.clone();
                 generic_ir_file.push(&format!("generic_{}.txt", directive.func));
-                std::fs::write(&generic_ir_file, format!("{}", f.display_verbose("", None)))
-                    .unwrap();
+                std::fs::write(
+                    &generic_ir_file,
+                    format!("{}", f.display_verbose("", Some(&module))),
+                )
+                .unwrap();
             }
 
             let stats = Mutex::new(SpecializationStats::new(directive.func, &f));
@@ -168,7 +171,7 @@ pub fn partially_evaluate<'a>(
                         writeln!(&mut s, "# {}: {:?}", block, liveness.block_start[block]).unwrap();
                     }
                     writeln!(&mut s, "").unwrap();
-                    writeln!(&mut s, "{}", body.display_verbose("", None)).unwrap();
+                    writeln!(&mut s, "{}", body.display_verbose("", Some(&module))).unwrap();
                     s
                 } else {
                     String::new()
