@@ -9,8 +9,7 @@ edition = "2021"
 exclude = ["/npm", "/ci"]
 
 [dependencies]
-#waffle = "0.0.33"
-waffle = { path = "../waffle" }
+waffle = "0.0.33"
 anyhow = "1.0"
 structopt = "0.3"
 wasm-encoder = "0.202.0"
