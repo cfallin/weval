@@ -1,11 +1,12 @@
 //! Constant-offset "remat" pass: rewrite x+k to local additions off
-//! of one base, to minimize live value / register pressure.
+//! of one base, to minimize live value / register pressure. Also push
+//! these offsets into loads/stores where possible.
 
 use fxhash::{FxHashMap, FxHashSet};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use waffle::{
-    cfg::CFGInfo, entity::PerEntity, pool::ListRef, Block, FunctionBody, Operator, Type, Value,
-    ValueDef,
+    cfg::CFGInfo, entity::PerEntity, pool::ListRef, Block, FunctionBody, MemoryArg, Operator, Type,
+    Value, ValueDef,
 };
 
 /// Dataflow analysis lattice: a value is either some original SSA
@@ -33,6 +34,56 @@ impl AbsValue {
             (x, Top) | (Top, x) => x,
             _ => Bottom,
         }
+    }
+}
+
+fn is_load_or_store(op: &Operator) -> bool {
+    match op {
+        Operator::I32Load { .. }
+        | Operator::I32Load8S { .. }
+        | Operator::I32Load8U { .. }
+        | Operator::I32Load16S { .. }
+        | Operator::I32Load16U { .. }
+        | Operator::I64Load { .. }
+        | Operator::I64Load8S { .. }
+        | Operator::I64Load8U { .. }
+        | Operator::I64Load16S { .. }
+        | Operator::I64Load16U { .. }
+        | Operator::I64Load32S { .. }
+        | Operator::I64Load32U { .. } => true,
+        Operator::I32Store { .. }
+        | Operator::I32Store8 { .. }
+        | Operator::I32Store16 { .. }
+        | Operator::I64Store { .. }
+        | Operator::I64Store8 { .. }
+        | Operator::I64Store16 { .. }
+        | Operator::I64Store32 { .. } => true,
+        _ => false,
+    }
+}
+
+fn update_load_or_store_memarg<F: Fn(&mut MemoryArg)>(op: &mut Operator, f: F) {
+    match op {
+        Operator::I32Load { memory }
+        | Operator::I32Load8S { memory }
+        | Operator::I32Load8U { memory }
+        | Operator::I32Load16S { memory }
+        | Operator::I32Load16U { memory }
+        | Operator::I64Load { memory }
+        | Operator::I64Load8S { memory }
+        | Operator::I64Load8U { memory }
+        | Operator::I64Load16S { memory }
+        | Operator::I64Load16U { memory }
+        | Operator::I64Load32S { memory }
+        | Operator::I64Load32U { memory }
+        | Operator::I32Store { memory }
+        | Operator::I32Store8 { memory }
+        | Operator::I32Store16 { memory }
+        | Operator::I64Store { memory }
+        | Operator::I64Store8 { memory }
+        | Operator::I64Store16 { memory }
+        | Operator::I64Store32 { memory } => f(memory),
+        _ => {}
     }
 }
 
@@ -151,15 +202,108 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
         });
     }
 
+    // Find the set of all values used as addresses to loads/stores.
+    let mut used_as_addr = FxHashSet::default();
+    for (_, def) in func.values.entries() {
+        if let ValueDef::Operator(op, args, _) = def {
+            if is_load_or_store(op) {
+                used_as_addr.insert(func.arg_pool[*args][0]);
+            }
+        }
+    }
+
+    // For any value that's a base, compute the minimum offset (when
+    // interpreted as an i32).
+    let mut min_offset_from: BTreeMap<Value, i32> = BTreeMap::new();
+    for value in func.values.iter() {
+        if used_as_addr.contains(&value) {
+            if let AbsValue::Offset(base, off) = values[value] {
+                let signed = off as i32;
+                let min = min_offset_from.entry(base).or_insert(0);
+                *min = std::cmp::min(*min, signed);
+            }
+        }
+    }
+
+    // Create an i32add or i32sub computing one shared base (with only
+    // positive offsets needed) for each address-related offset-from
+    // value in `min_offset_from`. For a value `x`, with `y =
+    // offset_base[x]`, we have `y + min_offset_from[x] == x`.
+    //
+    // Note that we don't insert these values into any blocks yet; we
+    // do that when we see the original defs below (i.e., insert `y`
+    // just after `x` is defined). `offset_base_const` facilitates
+    // this (we need to insert the i32const first).
+    let mut offset_base: BTreeMap<Value, Value> = BTreeMap::new();
+    let mut offset_base_const: BTreeMap<Value, Value> = BTreeMap::new();
+    let i32_ty = func.single_type_list(Type::I32);
+    for (&value, &offset) in &min_offset_from {
+        let k = func.add_value(ValueDef::Operator(
+            Operator::I32Const {
+                value: (-offset) as u32,
+            },
+            ListRef::default(),
+            i32_ty,
+        ));
+        let args = func.arg_pool.double(value, k);
+        let add = func.add_value(ValueDef::Operator(Operator::I32Sub, args, i32_ty));
+        offset_base_const.insert(value, k);
+        offset_base.insert(value, add);
+        log::trace!(
+            "created common base {} (and const {}) associated with offset-from value {}",
+            k,
+            add,
+            value
+        );
+    }
+
     // Now, for each value that's an Offset, rewrite it to an add
     // instruction.
-    let i32_ty = func.single_type_list(Type::I32);
     for (block, block_def) in func.blocks.entries_mut() {
         log::trace!("rewriting in block {}", block);
         let mut computed_offsets: FxHashMap<AbsValue, Value> = FxHashMap::default();
         let mut new_insts = vec![];
+
+        for (_, param) in &block_def.params {
+            // Insert the common-base computations where needed.
+            if let Some(common_base) = offset_base.get(&param) {
+                new_insts.push(*offset_base_const.get(&param).unwrap());
+                new_insts.push(*common_base);
+            }
+        }
+
         for inst in std::mem::take(&mut block_def.insts) {
             log::trace!("visiting inst {}: {:?}", inst, values[inst]);
+
+            // Handle loads/stores.
+            if let ValueDef::Operator(op, args, tys) = &func.values[inst] {
+                if is_load_or_store(op) {
+                    let args = &func.arg_pool[*args];
+                    let tys = *tys;
+                    let addr = args[0];
+                    if let AbsValue::Offset(base, this_offset) = values[addr] {
+                        log::trace!("inst {} is a load/store with addr that is offset from base {}; pushing offset into instruction", inst, base);
+                        // Update the offset embedded in the Operator
+                        // and use the `base` value instead as the
+                        // address arg.
+                        let mut op = op.clone();
+                        let mut args = args.iter().cloned().collect::<Vec<_>>();
+                        let common_base = *offset_base.get(&base).unwrap();
+                        let offset = *min_offset_from.get(&base).unwrap();
+                        assert!(offset <= 0);
+                        let addend = (-offset) as u32;
+                        update_load_or_store_memarg(&mut op, |memory| {
+                            memory.offset =
+                                memory.offset.wrapping_add(addend).wrapping_add(this_offset)
+                        });
+                        args[0] = common_base;
+                        let args = func.arg_pool.from_iter(args.into_iter());
+                        func.values[inst] = ValueDef::Operator(op, args, tys);
+                    }
+                }
+            }
+
+            // Recompute this particular value if appropriate.
             if let AbsValue::Offset(base, offset) = values[inst] {
                 let computed_offset = *computed_offsets.entry(values[inst]).or_insert_with(|| {
                     if offset == 0 {
@@ -188,6 +332,12 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                 func.values[inst] = ValueDef::Alias(computed_offset);
             } else {
                 new_insts.push(inst);
+            }
+
+            // Insert the common-base computations where needed.
+            if let Some(common_base) = offset_base.get(&inst) {
+                new_insts.push(*offset_base_const.get(&inst).unwrap());
+                new_insts.push(*common_base);
             }
         }
         block_def.insts = new_insts;
