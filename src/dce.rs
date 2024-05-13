@@ -53,9 +53,10 @@ fn scan_block(func: &FunctionBody, block: Block, used: &mut FxHashSet<Value>) ->
         for (&arg, &(_, param)) in target.args.iter().zip(succ_params.iter()) {
             if used.contains(&param) {
                 log::trace!(
-                    "  -> succ blockparam {} is used; marking arg {} used",
+                    "  -> succ blockparam {} is used; marking arg {} used from term on {}",
                     param,
-                    arg
+                    arg,
+                    block,
                 );
                 changed |= mark_used(used, arg);
             }
@@ -98,7 +99,7 @@ fn scan_block(func: &FunctionBody, block: Block, used: &mut FxHashSet<Value>) ->
                 }
                 if used.contains(&inst) {
                     for &arg in &func.arg_pool[*args] {
-                        log::trace!(" -> marking arg {} used", arg);
+                        log::trace!(" -> marking arg {} used from {}", arg, inst);
                         changed |= mark_used(used, arg);
                     }
                 }

@@ -90,7 +90,7 @@ fn update_load_or_store_memarg<F: Fn(&mut MemoryArg)>(op: &mut Operator, f: F) {
 pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
     log::trace!(
         "constant_offsets pass running on:\n{}",
-        func.display("| ", None)
+        func.display_verbose("| ", None)
     );
     // Compute a fixpoint analysis: which values are some original SSA
     // value plus an offset?
@@ -131,8 +131,8 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                             values[inst] = AbsValue::Constant(*value);
                         }
                         Operator::I32Add => {
-                            let x = args[0];
-                            let y = args[1];
+                            let x = func.resolve_alias(args[0]);
+                            let y = func.resolve_alias(args[1]);
                             values[inst] = match (values[x], values[y]) {
                                 (AbsValue::Top, _) | (_, AbsValue::Top) => AbsValue::Top,
                                 (AbsValue::Constant(k1), AbsValue::Constant(k2)) => {
@@ -149,8 +149,8 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                         }
                         Operator::I32Sub => {
                             // Like the addition case, but no commutativity.
-                            let x = args[0];
-                            let y = args[1];
+                            let x = func.resolve_alias(args[0]);
+                            let y = func.resolve_alias(args[1]);
                             values[inst] = match (values[x], values[y]) {
                                 (AbsValue::Top, _) | (_, AbsValue::Top) => AbsValue::Top,
                                 (AbsValue::Constant(k1), AbsValue::Constant(k2)) => {
@@ -176,6 +176,13 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                 }
             }
             log::trace!(" -> values[{}] = {:?}", inst, values[inst]);
+        }
+
+        for value in func.values.iter() {
+            let resolved = func.resolve_alias(value);
+            if resolved != value {
+                values[value] = values[resolved];
+            }
         }
 
         func.blocks[block].terminator.visit_targets(|target| {
@@ -281,6 +288,7 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                     let args = &func.arg_pool[*args];
                     let tys = *tys;
                     let addr = args[0];
+                    log::trace!("load/store with addr {}", addr);
                     if let AbsValue::Offset(base, this_offset) = values[addr] {
                         log::trace!("inst {} is a load/store with addr that is offset from base {}; pushing offset into instruction", inst, base);
                         // Update the offset embedded in the Operator
