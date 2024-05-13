@@ -245,23 +245,28 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
     let mut offset_base_const: BTreeMap<Value, Value> = BTreeMap::new();
     let i32_ty = func.single_type_list(Type::I32);
     for (&value, &offset) in &min_offset_from {
-        let k = func.add_value(ValueDef::Operator(
-            Operator::I32Const {
-                value: (-offset) as u32,
-            },
-            ListRef::default(),
-            i32_ty,
-        ));
-        let args = func.arg_pool.double(value, k);
-        let add = func.add_value(ValueDef::Operator(Operator::I32Sub, args, i32_ty));
-        offset_base_const.insert(value, k);
-        offset_base.insert(value, add);
-        log::trace!(
-            "created common base {} (and const {}) associated with offset-from value {}",
-            k,
-            add,
-            value
-        );
+        assert!(offset <= 0);
+        if offset != 0 {
+            let k = func.add_value(ValueDef::Operator(
+                Operator::I32Const {
+                    value: (-offset) as u32,
+                },
+                ListRef::default(),
+                i32_ty,
+            ));
+            let args = func.arg_pool.double(value, k);
+            let add = func.add_value(ValueDef::Operator(Operator::I32Sub, args, i32_ty));
+            offset_base_const.insert(value, k);
+            offset_base.insert(value, add);
+            log::trace!(
+                "created common base {} (and const {}) associated with offset-from value {}",
+                k,
+                add,
+                value
+            );
+        } else {
+            offset_base.insert(value, value);
+        }
     }
 
     // Now, for each value that's an Offset, rewrite it to an add
@@ -273,9 +278,9 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
 
         for (_, param) in &block_def.params {
             // Insert the common-base computations where needed.
-            if let Some(common_base) = offset_base.get(&param) {
-                new_insts.push(*offset_base_const.get(&param).unwrap());
-                new_insts.push(*common_base);
+            if let Some(common_base_const) = offset_base_const.get(&param) {
+                new_insts.push(*common_base_const);
+                new_insts.push(*offset_base.get(&param).unwrap());
             }
         }
 
@@ -343,9 +348,9 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
             }
 
             // Insert the common-base computations where needed.
-            if let Some(common_base) = offset_base.get(&inst) {
-                new_insts.push(*offset_base_const.get(&inst).unwrap());
-                new_insts.push(*common_base);
+            if let Some(common_base_const) = offset_base_const.get(&inst) {
+                new_insts.push(*common_base_const);
+                new_insts.push(*offset_base.get(&inst).unwrap());
             }
         }
         block_def.insts = new_insts;
