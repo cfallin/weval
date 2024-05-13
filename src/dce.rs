@@ -1,7 +1,33 @@
 //! Dead-code elimination pass.
 
 use fxhash::FxHashSet;
-use waffle::{cfg::CFGInfo, Block, FunctionBody, Terminator, Value, ValueDef};
+use waffle::{cfg::CFGInfo, Block, FunctionBody, Operator, Terminator, Value, ValueDef};
+
+fn op_can_be_removed(op: &Operator) -> bool {
+    // Pure ops, and also we allow loads and table.gets to be removed
+    // too, because we do not need to uphold Wasm trap semantics at
+    // this point (we assume the interpreter is a well-behaved
+    // non-trapping program). Also allow global.gets to be removed if
+    // unused (they technically have a read side-effect but really
+    // should be considered pure).
+    match op {
+        Operator::I32Load { .. }
+        | Operator::I32Load8S { .. }
+        | Operator::I32Load8U { .. }
+        | Operator::I32Load16S { .. }
+        | Operator::I32Load16U { .. }
+        | Operator::I64Load { .. }
+        | Operator::I64Load8S { .. }
+        | Operator::I64Load8U { .. }
+        | Operator::I64Load16S { .. }
+        | Operator::I64Load16U { .. }
+        | Operator::I64Load32S { .. }
+        | Operator::I64Load32U { .. } => true,
+        Operator::GlobalGet { .. } | Operator::TableGet { .. } => true,
+        op if op.is_pure() => true,
+        _ => false,
+    }
+}
 
 /// Scan backwards over a block, marking as used the inputs to any
 /// instruction that itself is used (or for a branch arg, for which
@@ -67,7 +93,7 @@ fn scan_block(func: &FunctionBody, block: Block, used: &mut FxHashSet<Value>) ->
                 }
             }
             ValueDef::Operator(op, args, _) => {
-                if !op.is_pure() {
+                if !op_can_be_removed(op) {
                     changed |= used.insert(inst);
                 }
                 if used.contains(&inst) {
