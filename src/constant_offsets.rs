@@ -162,6 +162,11 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                                 (_, AbsValue::Constant(k)) => {
                                     AbsValue::Offset(x, 0u32.wrapping_sub(k))
                                 }
+                                (AbsValue::Offset(base1, k1), AbsValue::Offset(base2, k2))
+                                    if base1 == base2 =>
+                                {
+                                    AbsValue::Constant(k1.wrapping_sub(k2))
+                                }
                                 _ => AbsValue::Bottom,
                             };
                         }
@@ -313,6 +318,22 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                         let args = func.arg_pool.from_iter(args.into_iter());
                         func.values[inst] = ValueDef::Operator(op, args, tys);
                     }
+                }
+            }
+
+            // If this value is a constant according to analysis above
+            // (perhaps because it is the difference between x+k1 and
+            // x+k2) but not an I32Const then make it so.
+            if let AbsValue::Constant(k) = values[inst] {
+                if !matches!(
+                    func.values[inst],
+                    ValueDef::Operator(Operator::I32Const { .. }, _, _)
+                ) {
+                    func.values[inst] = ValueDef::Operator(
+                        Operator::I32Const { value: k },
+                        ListRef::default(),
+                        i32_ty,
+                    );
                 }
             }
 
