@@ -88,6 +88,7 @@ fn update_load_or_store_memarg<F: Fn(&mut MemoryArg)>(op: &mut Operator, f: F) {
 }
 
 pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
+    waffle::passes::resolve_aliases::run(func);
     log::trace!(
         "constant_offsets pass running on:\n{}",
         func.display_verbose("| ", None)
@@ -131,8 +132,8 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                             values[inst] = AbsValue::Constant(*value);
                         }
                         Operator::I32Add => {
-                            let x = func.resolve_alias(args[0]);
-                            let y = func.resolve_alias(args[1]);
+                            let x = args[0];
+                            let y = args[1];
                             values[inst] = match (values[x], values[y]) {
                                 (AbsValue::Top, _) | (_, AbsValue::Top) => AbsValue::Top,
                                 (AbsValue::Constant(k1), AbsValue::Constant(k2)) => {
@@ -149,8 +150,8 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                         }
                         Operator::I32Sub => {
                             // Like the addition case, but no commutativity.
-                            let x = func.resolve_alias(args[0]);
-                            let y = func.resolve_alias(args[1]);
+                            let x = args[0];
+                            let y = args[1];
                             values[inst] = match (values[x], values[y]) {
                                 (AbsValue::Top, _) | (_, AbsValue::Top) => AbsValue::Top,
                                 (AbsValue::Constant(k1), AbsValue::Constant(k2)) => {
@@ -167,7 +168,7 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                                 {
                                     AbsValue::Constant(k1.wrapping_sub(k2))
                                 }
-                                (_, AbsValue::Offset(base, k)) if func.resolve_alias(base) == x => {
+                                (_, AbsValue::Offset(base, k)) if base == x => {
                                     AbsValue::Constant(0u32.wrapping_sub(k))
                                 }
                                 _ => AbsValue::Bottom,
@@ -186,18 +187,10 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
             log::trace!(" -> values[{}] = {:?}", inst, values[inst]);
         }
 
-        for value in func.values.iter() {
-            let resolved = func.resolve_alias(value);
-            if resolved != value {
-                values[value] = values[resolved];
-            }
-        }
-
         func.blocks[block].terminator.visit_targets(|target| {
             let mut changed = false;
             let succ_params = &func.blocks[target.block].params;
             for (&arg, &(_, blockparam)) in target.args.iter().zip(succ_params.iter()) {
-                let arg = func.resolve_alias(arg);
                 let new = AbsValue::meet(values[arg], values[blockparam]);
                 log::trace!(" -> block {} target {}: arg {} to blockparam {}: value {:?} -> {:?}",
                             block, target.block, arg, blockparam, values[blockparam], new);
