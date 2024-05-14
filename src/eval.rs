@@ -168,7 +168,12 @@ pub fn partially_evaluate<'a>(
                     let mut s = String::new();
                     writeln!(&mut s, "# Liveness:").unwrap();
                     for (block, _) in body.blocks.entries() {
-                        writeln!(&mut s, "# {}: {:?}", block, liveness.block_start[block]).unwrap();
+                        let mut live = liveness.block_start[block]
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        live.sort();
+                        writeln!(&mut s, "# {}: {:?}", block, live).unwrap();
                     }
                     writeln!(&mut s, "").unwrap();
                     writeln!(&mut s, "{}", body.display_verbose("", Some(&module))).unwrap();
