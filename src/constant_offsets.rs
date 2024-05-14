@@ -167,6 +167,9 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                                 {
                                     AbsValue::Constant(k1.wrapping_sub(k2))
                                 }
+                                (_, AbsValue::Offset(base, k)) if func.resolve_alias(base) == x => {
+                                    AbsValue::Constant(0u32.wrapping_sub(k))
+                                }
                                 _ => AbsValue::Bottom,
                             };
                         }
@@ -357,6 +360,8 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                         new_insts.push(k);
                         let args = func.arg_pool.double(base, k);
                         let add = func.values.push(ValueDef::Operator(op, args, i32_ty));
+                        func.source_locs[k] = func.source_locs[inst];
+                        func.source_locs[add] = func.source_locs[inst];
                         log::trace!(" -> recomputed as {}", add);
                         new_insts.push(add);
                         add
