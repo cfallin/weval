@@ -5,8 +5,8 @@
 use fxhash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, VecDeque};
 use waffle::{
-    cfg::CFGInfo, entity::PerEntity, pool::ListRef, Block, FunctionBody, MemoryArg, Operator, Type,
-    Value, ValueDef,
+    cfg::CFGInfo, entity::PerEntity, pool::ListRef, Block, FunctionBody, MemoryArg, Operator,
+    Terminator, Type, Value, ValueDef,
 };
 
 /// Dataflow analysis lattice: a value is either some original SSA
@@ -208,6 +208,27 @@ pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
                 }
             }
         });
+    }
+
+    // Constant-fold conditional branches.
+    for &block in cfg.rpo.values() {
+        // If the terminator is a CondBr and has a constant input now,
+        // const-fold that.
+        if let Terminator::CondBr {
+            cond,
+            if_true,
+            if_false,
+        } = &func.blocks[block].terminator
+        {
+            if let AbsValue::Constant(k) = values[*cond] {
+                let target = if k != 0 {
+                    if_true.clone()
+                } else {
+                    if_false.clone()
+                };
+                func.blocks[block].terminator = Terminator::Br { target };
+            }
+        }
     }
 
     // Find the set of all values used as addresses to loads/stores.
