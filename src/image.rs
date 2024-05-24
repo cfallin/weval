@@ -25,12 +25,12 @@ impl MemImage {
     }
 }
 
-pub fn build_image(module: &Module) -> anyhow::Result<Image> {
+pub fn build_image(module: &Module, snapshot_bytes: Option<&[u8]>) -> anyhow::Result<Image> {
     Ok(Image {
         memories: module
             .memories
             .entries()
-            .flat_map(|(id, mem)| maybe_mem_image(mem).map(|image| (id, image)))
+            .flat_map(|(id, mem)| maybe_mem_image(mem, snapshot_bytes).map(|image| (id, image)))
             .collect(),
         globals: module
             .globals
@@ -56,7 +56,11 @@ pub fn build_image(module: &Module) -> anyhow::Result<Image> {
 
 const WASM_PAGE: usize = 1 << 16;
 
-fn maybe_mem_image(mem: &MemoryData) -> Option<MemImage> {
+fn maybe_mem_image(mem: &MemoryData, snapshot_bytes: Option<&[u8]>) -> Option<MemImage> {
+    if let Some(b) = snapshot_bytes {
+        return Some(MemImage { image: b.to_vec() });
+    }
+
     let len = mem.initial_pages * WASM_PAGE;
     let mut image = vec![0; len];
 

@@ -48,12 +48,29 @@ pub enum Command {
         output_ir: Option<PathBuf>,
     },
 
+    /// Pre-compile a Wasm module for weval request collection, using
+    /// the appropriate version and configuration of the internal
+    /// Wasmtime engine.
+    Precompile {
+        /// The input Wasm module.
+        #[structopt(short = "i")]
+        input_module: PathBuf,
+
+        /// The output precompiled Wasm module path.
+        #[structopt(short = "o")]
+        output_precompiled: PathBuf,
+    },
+
     /// Run a Wasm module normally, collecting all weval requests at
     /// the end.
     Collect {
         /// The input Wasm module.
         #[structopt(short = "i")]
         input_module: PathBuf,
+
+        /// The input Wasm module precompiled, if available, to make instantiation faster.
+        #[structopt(short = "p")]
+        input_precompiled: Option<PathBuf>,
 
         /// The output weval request collection.
         #[structopt(short = "o")]
@@ -63,6 +80,10 @@ pub enum Command {
         /// integers.
         #[structopt(short = "s")]
         site: Vec<u32>,
+
+        /// The rest of the arguments for the program we're running.
+        #[structopt(last = true)]
+        args: Vec<String>,
     },
 }
 
@@ -86,11 +107,17 @@ fn main() -> anyhow::Result<()> {
             show_stats,
             output_ir,
         ),
+        Command::Precompile {
+            input_module,
+            output_precompiled,
+        } => precompile(input_module, output_precompiled),
         Command::Collect {
             input_module,
+            input_precompiled,
             output_requests,
             site,
-        } => collect(input_module, output_requests, site),
+            args,
+        } => collect(input_module, input_precompiled, output_requests, site, args),
     }
 }
 
@@ -128,7 +155,7 @@ fn weval(
     let module = waffle::Module::from_wasm_bytes(&module_bytes[..], &frontend_opts)?;
 
     // Build module image.
-    let mut im = image::build_image(&module)?;
+    let mut im = image::build_image(&module, None)?;
 
     // Collect directives.
     let directives = directive::collect(&module, &mut im)?;
@@ -208,13 +235,66 @@ fn weval(
     Ok(())
 }
 
-fn collect(input_module: PathBuf, output_requests: PathBuf, site: Vec<u32>) -> anyhow::Result<()> {
+fn precompile(input_module: PathBuf, output_precompiled: PathBuf) -> anyhow::Result<()> {
+    let engine = wasmtime::Engine::new(&wasmtime::Config::default())?;
+    let module = wasmtime::Module::from_file(&engine, &input_module)?;
+    let bytes = module.serialize()?;
+    std::fs::write(&output_precompiled, &bytes[..])?;
+    Ok(())
+}
+
+fn collect(
+    input_module: PathBuf,
+    input_precompiled: Option<PathBuf>,
+    output_requests: PathBuf,
+    site: Vec<u32>,
+    args: Vec<String>,
+) -> anyhow::Result<()> {
     let raw_bytes = std::fs::read(&input_module)?;
-    let module_bytes = wizen(raw_bytes)?;
+    let engine = wasmtime::Engine::new(&wasmtime::Config::default())?;
+    let module = if let Some(p) = &input_precompiled {
+        unsafe { wasmtime::Module::deserialize_file(&engine, p)? }
+    } else {
+        wasmtime::Module::from_file(&engine, &input_module)?
+    };
+
+    let mut wasi = wasmtime_wasi::WasiCtxBuilder::new();
+    wasi.inherit_stdin()
+        .inherit_stdout()
+        .inherit_stderr()
+        .inherit_env()
+        .preopened_dir(
+            ".",
+            ".",
+            wasmtime_wasi::DirPerms::READ,
+            wasmtime_wasi::FilePerms::READ,
+        )
+        .unwrap();
+    for arg in &args {
+        wasi.arg(arg);
+    }
+    let wasi = wasi.build_p1();
+
+    let mut linker = wasmtime::Linker::new(&engine);
+    let mut store = wasmtime::Store::new(&engine, wasi);
+    wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |s| s)?;
+    let stubs_module = wasmtime::Module::new(&engine, STUBS.as_bytes())?;
+    let stubs = wasmtime::Instance::new(&mut store, &stubs_module, &[])?;
+    linker.instance(&mut store, "weval", stubs)?;
+    let instance = linker.instantiate(&mut store, &module)?;
+    let func = instance.get_typed_func::<(), ()>(&mut store, "_start")?;
+    func.call(&mut store, ())?;
+    let memory = instance
+        .exports(&mut store)
+        .filter_map(|e| e.into_memory())
+        .next()
+        .expect("no exported memory");
+    let bytes = memory.data(&store)[..].to_vec();
+
     let mut frontend_opts = waffle::FrontendOptions::default();
     frontend_opts.debug = true;
-    let module = waffle::Module::from_wasm_bytes(&module_bytes[..], &frontend_opts)?;
-    let mut im = image::build_image(&module)?;
+    let module = waffle::Module::from_wasm_bytes(&raw_bytes[..], &frontend_opts)?;
+    let mut im = image::build_image(&module, Some(&bytes[..]))?;
     let mut directives = directive::collect(&module, &mut im)?;
     log::debug!("Directives: {:?}", directives);
 
