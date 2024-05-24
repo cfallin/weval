@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
@@ -85,6 +86,17 @@ pub enum Command {
         #[structopt(last = true)]
         args: Vec<String>,
     },
+
+    /// Merge collected weval requests into one corpus.
+    Merge {
+        /// The output file to produce.
+        #[structopt(short = "o")]
+        output: PathBuf,
+
+        /// The input corpus files from `weval collect`.
+        #[structopt(last = true)]
+        inputs: Vec<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -118,6 +130,7 @@ fn main() -> anyhow::Result<()> {
             site,
             args,
         } => collect(input_module, input_precompiled, output_requests, site, args),
+        Command::Merge { output, inputs } => merge(output, inputs),
     }
 }
 
@@ -313,6 +326,20 @@ fn collect(
     // Bincode the result and dump it to a file.
     let dump = bincode::serialize(&directives)?;
     std::fs::write(&output_requests, dump)?;
+
+    Ok(())
+}
+
+fn merge(output: PathBuf, inputs: Vec<PathBuf>) -> anyhow::Result<()> {
+    // Deserialize all of the input files.
+    let mut input_directives = BTreeSet::new();
+    for input in &inputs {
+        let directives: Vec<directive::Directive> = bincode::deserialize(&std::fs::read(input)?)?;
+        input_directives.extend(directives.into_iter());
+    }
+    let output_directives = input_directives.into_iter().collect::<Vec<_>>();
+    let dump = bincode::serialize(&output_directives)?;
+    std::fs::write(&output, dump)?;
 
     Ok(())
 }
