@@ -82,6 +82,11 @@ pub enum Command {
         #[structopt(short = "s")]
         site: Vec<u32>,
 
+        /// Directories to preopen (under their own names) for the
+        /// WASI program.
+        #[structopt(short = "d")]
+        preopens: Vec<PathBuf>,
+
         /// The rest of the arguments for the program we're running.
         #[structopt(last = true)]
         args: Vec<String>,
@@ -128,8 +133,16 @@ fn main() -> anyhow::Result<()> {
             input_precompiled,
             output_requests,
             site,
+            preopens,
             args,
-        } => collect(input_module, input_precompiled, output_requests, site, args),
+        } => collect(
+            input_module,
+            input_precompiled,
+            output_requests,
+            site,
+            preopens,
+            args,
+        ),
         Command::Merge { output, inputs } => merge(output, inputs),
     }
 }
@@ -261,6 +274,7 @@ fn collect(
     input_precompiled: Option<PathBuf>,
     output_requests: PathBuf,
     site: Vec<u32>,
+    preopens: Vec<PathBuf>,
     args: Vec<String>,
 ) -> anyhow::Result<()> {
     let raw_bytes = std::fs::read(&input_module)?;
@@ -275,14 +289,16 @@ fn collect(
     wasi.inherit_stdin()
         .inherit_stdout()
         .inherit_stderr()
-        .inherit_env()
-        .preopened_dir(
-            ".",
-            ".",
+        .inherit_env();
+    for preopen in &preopens {
+        wasi.preopened_dir(
+            preopen,
+            preopen.to_str().unwrap(),
             wasmtime_wasi::DirPerms::READ,
             wasmtime_wasi::FilePerms::READ,
         )
         .unwrap();
+    }
     for arg in &args {
         wasi.arg(arg);
     }
