@@ -87,12 +87,6 @@ extern weval_lookup_t weval_lookup_table;
   __attribute__((export_name("weval.is.wevaled"))) bool*                \
   __weval_is_wevaled() {                                                \
     return &weval_is_wevaled;                                           \
-  }                                                                     \
-                                                                        \
-  weval_lookup_t weval_lookup_table = {.entries = NULL, .nentries = 0}; \
-  __attribute__((export_name("weval.lookup.table"))) weval_lookup_t*    \
-  __weval_lookup_table() {                                              \
-    return &weval_lookup_table;                                         \
   }
 
 #define WEVAL_DEFINE_TARGET(index, func)             \
@@ -101,59 +95,9 @@ extern weval_lookup_t weval_lookup_table;
     return (weval_func_t) & (func);                  \
   }
 
-/* Compare entry to req; return -1 for less than, 1 for greater than,
- * 0 for equal. */
-static inline int __weval_binsearch_cmp(weval_req_t* req, uint32_t idx) {
-  weval_lookup_entry_t* entry = &weval_lookup_table.entries[idx];
-  if (entry->func_id < req->func_id) {
-    return -1;
-  } else if (entry->func_id > req->func_id) {
-    return 1;
-  } else {
-    uint32_t min_len =
-        req->arglen < entry->arglen ? req->arglen : entry->arglen;
-    int cmp = memcmp(entry->argbuf, req->argbuf, min_len);
-    if (cmp != 0) {
-      return cmp;
-    } else if (entry->arglen < req->arglen) {
-      return -1;
-    } else if (entry->arglen > req->arglen) {
-      return 1;
-    } else {
-      return 0;
-    }
-  }
-}
-
-static inline weval_lookup_entry_t* __weval_find(weval_req_t* req) {
-  if (weval_lookup_table.nentries == 0) {
-    return NULL;
-  }
-
-  uint32_t lo = 0;
-  uint32_t hi = weval_lookup_table.nentries;
-
-  while (hi > lo) {
-    uint32_t mid = lo + (hi - lo) / 2;
-    int cmp = __weval_binsearch_cmp(req, mid);
-    if (cmp == 0) {
-      return &weval_lookup_table.entries[mid];
-    } else if (cmp < 0) {
-      lo = mid + 1;
-    } else if (cmp > 0) {
-      hi = mid;
-    }
-  }
-
-  return NULL;
-}
-
 static inline void weval_request(weval_req_t* req) {
   if (weval_is_wevaled) {
-    weval_lookup_entry_t* entry = __weval_find(req);
-    if (entry) {
-      *req->specialized = entry->specialized;
-    }
+      /* nothing! */
   } else {
     req->next = weval_req_pending_head;
     req->prev = NULL;
