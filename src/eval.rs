@@ -664,7 +664,7 @@ impl<'a> Evaluator<'a> {
                 e.context(anyhow::anyhow!(
                     "Evaluating block body {} in func:\n{}",
                     orig_block,
-                    self.generic.display("| ", None)
+                    self.generic.display("| ", Some(self.module))
                 ))
             })?;
 
