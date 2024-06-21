@@ -204,32 +204,20 @@ uint32_t weval_specialize_value(uint32_t value, uint32_t lo, uint32_t hi)
 uint64_t weval_read_specialization_global(uint32_t index)
     WEVAL_WASM_IMPORT("read.specialization.global");
 
-/* Convenience access to several globals added to the mdoule by
- * weval. These must not take a dynamic index because they are
- * rewritten everywhere, not just in wevaled functions, and we don't
- * do a full constant-value analysis of every function. */
-uint64_t weval_read_global0()
-    WEVAL_WASM_IMPORT("read.global.0");
-void weval_write_global0(uint64_t value)
-    WEVAL_WASM_IMPORT("write.global.0");
-uint64_t weval_read_global1()
-    WEVAL_WASM_IMPORT("read.global.1");
-void weval_write_global1(uint64_t value)
-    WEVAL_WASM_IMPORT("write.global.1");
-
 /* Operand-stack virtualization */
 
 /*
  * The stack is tracked abstractly as part of block specialization
- * context, and has entries of the form (ptr, value). Values are not
- * actually written back to the corresponding memory locations until
- * "synchronized" either explicitly or on an edge into a merge point.
+ * context, and has entries of the form:
  *
- * When specialization reaches a merge-point, different stack states
- * will result in differently-specialized blocks; hence, we never have
- * to force-synchronize or merge state. This means that fastpaths can
- * keep value in registers *across opcodes*. We do have to be careful
- * not to exponentially explode state.
+ * /// Some value pushed onto stack. Not actually stored until
+ * /// state is synced.
+ * struct StackEntry {
+ *     /// The address at which the value is stored.
+ *     stackptr: Value,
+ *     /// The value to store (and return from pops/stack-reads).
+ *     value: Value,
+ * }
  */
 
 /* Push a value on the abstract stack; does not yet actually store
