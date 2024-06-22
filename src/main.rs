@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use structopt::StructOpt;
 
+mod cache;
 mod constant_offsets;
 mod dce;
 mod directive;
@@ -34,6 +35,10 @@ pub enum Command {
         #[structopt(short = "w")]
         wizen: bool,
 
+        /// Cache file to use.
+        #[structopt(long = "cache")]
+        cache: Option<PathBuf>,
+
         /// Show stats on specialization code size.
         #[structopt(long = "show-stats")]
         show_stats: bool,
@@ -53,9 +58,17 @@ fn main() -> anyhow::Result<()> {
             input_module,
             output_module,
             wizen,
+            cache,
             show_stats,
             output_ir,
-        } => weval(input_module, output_module, wizen, show_stats, output_ir),
+        } => weval(
+            input_module,
+            output_module,
+            wizen,
+            cache,
+            show_stats,
+            output_ir,
+        ),
     }
 }
 
@@ -74,10 +87,22 @@ fn weval(
     input_module: PathBuf,
     output_module: PathBuf,
     do_wizen: bool,
+    cache: Option<PathBuf>,
     show_stats: bool,
     output_ir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let raw_bytes = std::fs::read(&input_module)?;
+
+    // Open the cache, if any.
+    let cache = cache
+        .map(|path| {
+            // Compute a hash of the original module so we can cache results
+            // keyed on that hash (and weval request arg strings).
+            let input_hash = cache::compute_hash(&raw_bytes[..]);
+
+            cache::Cache::open(&path, input_hash)
+        })
+        .transpose()?;
 
     // Optionally, Wizen the module first.
     let module_bytes = if do_wizen {
@@ -105,8 +130,14 @@ fn weval(
 
     // Partially evaluate.
     let progress = indicatif::ProgressBar::new(0);
-    let mut result =
-        eval::partially_evaluate(module, &mut im, &directives[..], Some(progress), output_ir)?;
+    let mut result = eval::partially_evaluate(
+        module,
+        &mut im,
+        &directives[..],
+        Some(progress),
+        output_ir,
+        cache.as_ref(),
+    )?;
 
     // Update memories in module.
     image::update(&mut result.module, &im);

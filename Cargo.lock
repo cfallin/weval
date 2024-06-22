@@ -596,9 +596,9 @@ dependencies = [
 
 [[package]]
 name = "digest"
-version = "0.10.6"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8168378f4e5023e7218c89c891c0fd8ecdb5e5e4f18cb78f38cf245dd021e76f"
+checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
@@ -883,6 +883,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "290f1a1d9242c78d09ce40a5e87e7554ee637af1351968159f4952f028f75604"
 dependencies = [
  "ahash",
+ "serde",
 ]
 
 [[package]]
@@ -1523,9 +1524,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.10.6"
+version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82e6b795fe2e3b1e845bafcb27aa35405c4d47cdfc92af5fc8d3002f76cebdc0"
+checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
 dependencies = [
  "cfg-if",
  "cpufeatures",
@@ -1568,6 +1569,34 @@ name = "sptr"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b9b39299b249ad65f3b7e96443bad61c02ca5cd3589f46cb6d610a0fd6c0d6a"
+
+[[package]]
+name = "sqlite"
+version = "0.36.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "274e5a9a0968bc9797fd3fe75a544cbcd3e3c2a111cb1c11cb8a0290f9684cb2"
+dependencies = [
+ "sqlite3-sys",
+]
+
+[[package]]
+name = "sqlite3-src"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "174d4a6df77c27db281fb23de1a6d968f3aaaa4807c2a1afa8056b971f947b4a"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
+
+[[package]]
+name = "sqlite3-sys"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3901ada7090c3c3584dc92ec7ef1b7091868d13bfe6d7de9f0bcaffee7d0ade5"
+dependencies = [
+ "sqlite3-src",
+]
 
 [[package]]
 name = "stable_deref_trait"
@@ -1851,8 +1880,7 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 [[package]]
 name = "waffle"
 version = "0.0.36"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e578ed1a799fb634681d3767479162c62f7c5658c04d961f84280bdbb0225756"
+source = "git+https://github.com/cfallin/waffle#3ea971a5790dcfc3bd2d3e96e55c588c86bd973e"
 dependencies = [
  "addr2line",
  "anyhow",
@@ -1864,8 +1892,8 @@ dependencies = [
  "rayon",
  "smallvec",
  "structopt",
- "wasm-encoder 0.202.0",
- "wasmparser 0.202.0",
+ "wasm-encoder 0.211.1",
+ "wasmparser 0.211.1",
 ]
 
 [[package]]
@@ -1991,6 +2019,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-encoder"
+version = "0.211.1"
+source = "git+https://github.com/cfallin/wasm-tools?branch=func-into-raw-body#ad6d593b26367f50a98742d4f124f913c98459e6"
+dependencies = [
+ "leb128",
+]
+
+[[package]]
 name = "wasmparser"
 version = "0.121.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2021,6 +2057,19 @@ dependencies = [
  "bitflags 2.4.2",
  "indexmap",
  "semver",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.211.1"
+source = "git+https://github.com/cfallin/wasm-tools?branch=func-into-raw-body#ad6d593b26367f50a98742d4f124f913c98459e6"
+dependencies = [
+ "ahash",
+ "bitflags 2.4.2",
+ "hashbrown 0.14.3",
+ "indexmap",
+ "semver",
+ "serde",
 ]
 
 [[package]]
@@ -2397,6 +2446,8 @@ dependencies = [
  "log",
  "rayon",
  "serde",
+ "sha2",
+ "sqlite",
  "structopt",
  "waffle",
  "wasm-encoder 0.202.0",

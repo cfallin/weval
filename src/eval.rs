@@ -1,5 +1,6 @@
 //! Partial evaluation.
 
+use crate::cache::{Cache, CacheData};
 use crate::directive::{Directive, DirectiveArgs};
 use crate::image::Image;
 use crate::intrinsics::{find_global_data_by_exported_func, Intrinsics};
@@ -10,6 +11,7 @@ use crate::value::{AbstractValue, WasmVal};
 use fxhash::FxHashMap as HashMap;
 use fxhash::FxHashSet as HashSet;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::{hash_map::Entry as HashEntry, BTreeSet, VecDeque};
 use std::sync::Mutex;
 use waffle::{
@@ -74,6 +76,7 @@ pub fn partially_evaluate<'a>(
     directives: &[Directive],
     mut progress: Option<indicatif::ProgressBar>,
     output_ir: Option<std::path::PathBuf>,
+    cache: Option<&Cache>,
 ) -> anyhow::Result<PartialEvalResult<'a>> {
     let intrinsics = Intrinsics::find(&module);
     log::trace!("intrinsics: {:?}", intrinsics);
@@ -82,6 +85,28 @@ pub fn partially_evaluate<'a>(
     let mut directives = directives.to_vec();
     directives.sort_by_key(|d| d.func_index_out_addr);
     directives.dedup_by_key(|d| d.func_index_out_addr);
+
+    // Result of compilation.
+    let mut bodies: Vec<(Cow<Directive>, FuncDecl, String)> = vec![];
+
+    // Filter out directives that can be directly fulfilled by the cache.
+    let mut cache_ctx = cache.map(|c| c.thread()).transpose()?;
+    if let Some(cache) = cache_ctx.as_mut() {
+        let mut remaining_directives = vec![];
+        for directive in directives {
+            let key = bincode::serialize(&directive).unwrap();
+            if let Some(data) = cache.lookup(&key)? {
+                bodies.push((
+                    Cow::Owned(directive),
+                    FuncDecl::Compiled(Signature::new(data.sig as usize), data.name, data.body),
+                    String::new(),
+                ));
+            } else {
+                remaining_directives.push(directive);
+            }
+        }
+        directives = remaining_directives;
+    }
 
     // Expand function bodies of any function named in a directive.
     let mut funcs = HashMap::default();
@@ -120,59 +145,82 @@ pub fn partially_evaluate<'a>(
     let global_base = module.globals.len();
 
     let progress_ref = progress.as_ref();
-    let bodies = directives
-        .par_iter()
-        .flat_map(|directive| {
-            let (generic, cfg, stats) = funcs.get(&directive.func).unwrap();
-            let result =
-                match partially_evaluate_func(&module, generic, cfg, im, &intrinsics, directive) {
+    bodies.extend(
+        directives
+            .par_iter()
+            .flat_map(|directive| {
+                let (generic, cfg, stats) = funcs.get(&directive.func).unwrap();
+                let result = match partially_evaluate_func(
+                    &module,
+                    generic,
+                    cfg,
+                    im,
+                    &intrinsics,
+                    directive,
+                ) {
                     Ok(result) => result,
                     Err(e) => return Some(Err(e)),
                 };
 
-            if let Some(p) = progress_ref {
-                p.inc(1);
-            }
-            if let Some((body, sig, name, spec_stats)) = result {
-                stats.lock().unwrap().add_specialization(&spec_stats);
-                let ir = if output_ir.is_some() {
-                    use std::fmt::Write;
-                    let cfg = CFGInfo::new(&body);
-                    let liveness = Liveness::new(&body, &cfg);
-                    let mut s = String::new();
-                    writeln!(&mut s, "# Liveness:").unwrap();
-                    for (block, _) in body.blocks.entries() {
-                        let mut live = liveness.block_start[block]
-                            .iter()
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        live.sort();
-                        writeln!(&mut s, "# {}: {:?}", block, live).unwrap();
-                    }
-                    writeln!(&mut s, "").unwrap();
-                    writeln!(&mut s, "{}", body.display_verbose("", Some(&module))).unwrap();
-                    s
-                } else {
-                    String::new()
-                };
-                let decl = {
-                    let body = match body.compile() {
-                        Ok(body) => body,
-                        Err(e) => return Some(Err(e)),
+                if let Some(p) = progress_ref {
+                    p.inc(1);
+                }
+                if let Some((body, sig, name, spec_stats)) = result {
+                    stats.lock().unwrap().add_specialization(&spec_stats);
+                    let ir = if output_ir.is_some() {
+                        use std::fmt::Write;
+                        let cfg = CFGInfo::new(&body);
+                        let liveness = Liveness::new(&body, &cfg);
+                        let mut s = String::new();
+                        writeln!(&mut s, "# Liveness:").unwrap();
+                        for (block, _) in body.blocks.entries() {
+                            let mut live = liveness.block_start[block]
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            live.sort();
+                            writeln!(&mut s, "# {}: {:?}", block, live).unwrap();
+                        }
+                        writeln!(&mut s, "").unwrap();
+                        writeln!(&mut s, "{}", body.display_verbose("", Some(&module))).unwrap();
+                        s
+                    } else {
+                        String::new()
                     };
-                    FuncDecl::Compiled(sig, name, body)
-                };
-                Some(Ok((directive, decl, ir)))
-            } else {
-                log::warn!("Failed to weval for directive {:?}", directive);
-                None
-            }
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+                    let decl = {
+                        let body = match body.compile() {
+                            Ok(body) => body,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        FuncDecl::Compiled(sig, name, body.into_raw_body())
+                    };
+                    Some(Ok((Cow::Borrowed(directive), decl, ir)))
+                } else {
+                    log::warn!("Failed to weval for directive {:?}", directive);
+                    None
+                }
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    );
 
     // Compute memory updates and the pre-weval lookup table.
     let mut mem_updates = HashMap::default();
     for (directive, decl, ir) in bodies {
+        // Add to cache.
+        if let Some(cache) = cache_ctx.as_mut() {
+            let key = bincode::serialize(&directive)?;
+            let (sig, name, body) = match &decl {
+                FuncDecl::Compiled(sig, name, body) => (sig, name, body),
+                _ => unreachable!(),
+            };
+            let data = CacheData {
+                sig: sig.index() as u32,
+                name: name.clone(),
+                body: body.clone(),
+            };
+            cache.insert(&key, data)?;
+        }
+
         // Add function to module.
         let func = module.funcs.push(decl);
         // Append to table.
@@ -182,7 +230,7 @@ pub fn partially_evaluate<'a>(
             let table_idx = func_table_elts.len();
             func_table_elts.push(func);
             table_idx
-        } as u32;
+        } as u64;
         func_table.initial = std::cmp::max(func_table.initial, table_idx + 1);
         if func_table.max.is_some() && table_idx >= func_table.max.unwrap() {
             func_table.max = Some(table_idx + 1);
@@ -203,7 +251,7 @@ pub fn partially_evaluate<'a>(
     // Update memory.
     let heap = im.main_heap()?;
     for (addr, value) in mem_updates {
-        im.write_u32(heap, addr, value)?;
+        im.write_u32(heap, addr, value as u32)?;
     }
 
     // Update the `weval_is_wevaled` flag, if it exists and is exported.
