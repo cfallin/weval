@@ -91,6 +91,7 @@ fn weval(
     show_stats: bool,
     output_ir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    eprintln!("Reading raw module bytes...");
     let raw_bytes = std::fs::read(&input_module)?;
 
     // Open the cache, if any.
@@ -106,17 +107,20 @@ fn weval(
 
     // Optionally, Wizen the module first.
     let module_bytes = if do_wizen {
+        eprintln!("Wizening the module with its input...");
         wizen(raw_bytes)?
     } else {
         raw_bytes
     };
 
     // Load module.
+    eprintln!("Parsing the module...");
     let mut frontend_opts = waffle::FrontendOptions::default();
     frontend_opts.debug = true;
     let module = waffle::Module::from_wasm_bytes(&module_bytes[..], &frontend_opts)?;
 
     // Build module image.
+    eprintln!("Building memory image...");
     let mut im = image::build_image(&module, None)?;
 
     // Collect directives.
@@ -129,6 +133,7 @@ fn weval(
     }
 
     // Partially evaluate.
+    eprintln!("Specializing functions...");
     let progress = indicatif::ProgressBar::new(0);
     let mut result = eval::partially_evaluate(
         module,
@@ -140,6 +145,7 @@ fn weval(
     )?;
 
     // Update memories in module.
+    eprintln!("Updatimg memory image...");
     image::update(&mut result.module, &im);
 
     log::debug!("Final module:\n{}", result.module.display());
@@ -176,11 +182,15 @@ fn weval(
         }
     }
 
+    eprintln!("Serializing back to binary form...");
     let bytes = result.module.to_wasm_bytes()?;
 
+    eprintln!("Performing post-filter pass to remove intrinsics...");
     let bytes = filter::filter(&bytes[..])?;
 
+    eprintln!("Writing output file...");
     std::fs::write(&output_module, &bytes[..])?;
 
+    eprintln!("Done.");
     Ok(())
 }

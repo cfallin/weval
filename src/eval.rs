@@ -86,8 +86,12 @@ pub fn partially_evaluate<'a>(
     directives.sort_by_key(|d| d.func_index_out_addr);
     directives.dedup_by_key(|d| d.func_index_out_addr);
 
+    if let Some(p) = progress.as_mut() {
+        p.set_length(directives.len() as u64);
+    }
+
     // Result of compilation.
-    let mut bodies: Vec<(Cow<Directive>, FuncDecl, String)> = vec![];
+    let mut bodies: Vec<(Cow<Directive>, FuncDecl, String, bool)> = vec![];
 
     // Filter out directives that can be directly fulfilled by the cache.
     let mut cache_ctx = cache.map(|c| c.thread()).transpose()?;
@@ -100,12 +104,21 @@ pub fn partially_evaluate<'a>(
                     Cow::Owned(directive),
                     FuncDecl::Compiled(Signature::new(data.sig as usize), data.name, data.body),
                     String::new(),
+                    true,
                 ));
+
+                if let Some(progress) = progress.as_ref() {
+                    progress.inc(1);
+                }
             } else {
                 remaining_directives.push(directive);
             }
         }
         directives = remaining_directives;
+    }
+
+    if let Some(p) = progress.as_mut() {
+        p.tick();
     }
 
     // Expand function bodies of any function named in a directive.
@@ -136,10 +149,6 @@ pub fn partially_evaluate<'a>(
 
             funcs.insert(directive.func, (f, cfg, stats));
         }
-    }
-
-    if let Some(p) = progress.as_mut() {
-        p.set_length(directives.len() as u64);
     }
 
     let global_base = module.globals.len();
@@ -194,7 +203,7 @@ pub fn partially_evaluate<'a>(
                         };
                         FuncDecl::Compiled(sig, name, body.into_raw_body())
                     };
-                    Some(Ok((Cow::Borrowed(directive), decl, ir)))
+                    Some(Ok((Cow::Borrowed(directive), decl, ir, false)))
                 } else {
                     log::warn!("Failed to weval for directive {:?}", directive);
                     None
@@ -203,22 +212,32 @@ pub fn partially_evaluate<'a>(
             .collect::<anyhow::Result<Vec<_>>>()?,
     );
 
-    // Compute memory updates and the pre-weval lookup table.
+    if let Some(p) = progress.as_mut() {
+        p.finish_and_clear();
+    }
+
+    if cache_ctx.is_some() {
+        eprintln!("Inserting results into cache...");
+    }
+
+    // Compute memory updates.
     let mut mem_updates = HashMap::default();
-    for (directive, decl, ir) in bodies {
+    for (directive, decl, ir, cache_hit) in bodies {
         // Add to cache.
-        if let Some(cache) = cache_ctx.as_mut() {
-            let key = bincode::serialize(&directive)?;
-            let (sig, name, body) = match &decl {
-                FuncDecl::Compiled(sig, name, body) => (sig, name, body),
-                _ => unreachable!(),
-            };
-            let data = CacheData {
-                sig: sig.index() as u32,
-                name: name.clone(),
-                body: body.clone(),
-            };
-            cache.insert(&key, data)?;
+        if !cache_hit {
+            if let Some(cache) = cache_ctx.as_mut() {
+                let key = bincode::serialize(&directive)?;
+                let (sig, name, body) = match &decl {
+                    FuncDecl::Compiled(sig, name, body) => (sig, name, body),
+                    _ => unreachable!(),
+                };
+                let data = CacheData {
+                    sig: sig.index() as u32,
+                    name: name.clone(),
+                    body: body.clone(),
+                };
+                cache.insert(&key, data)?;
+            }
         }
 
         // Add function to module.
