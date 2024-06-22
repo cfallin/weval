@@ -39,6 +39,10 @@ pub enum Command {
         #[structopt(long = "cache")]
         cache: Option<PathBuf>,
 
+        /// Read-only cache file to query.
+        #[structopt(long = "cache-ro")]
+        cache_ro: Option<PathBuf>,
+
         /// Show stats on specialization code size.
         #[structopt(long = "show-stats")]
         show_stats: bool,
@@ -59,6 +63,7 @@ fn main() -> anyhow::Result<()> {
             output_module,
             wizen,
             cache,
+            cache_ro,
             show_stats,
             output_ir,
         } => weval(
@@ -66,6 +71,7 @@ fn main() -> anyhow::Result<()> {
             output_module,
             wizen,
             cache,
+            cache_ro,
             show_stats,
             output_ir,
         ),
@@ -88,22 +94,23 @@ fn weval(
     output_module: PathBuf,
     do_wizen: bool,
     cache: Option<PathBuf>,
+    cache_ro: Option<PathBuf>,
     show_stats: bool,
     output_ir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     eprintln!("Reading raw module bytes...");
     let raw_bytes = std::fs::read(&input_module)?;
 
-    // Open the cache, if any.
-    let cache = cache
-        .map(|path| {
-            // Compute a hash of the original module so we can cache results
-            // keyed on that hash (and weval request arg strings).
-            let input_hash = cache::compute_hash(&raw_bytes[..]);
+    // Compute a hash of the original module so we can cache results
+    // keyed on that hash (and weval request arg strings).
+    let input_hash = cache::compute_hash(&raw_bytes[..]);
 
-            cache::Cache::open(&path, input_hash)
-        })
-        .transpose()?;
+    // Open the cache and read-only cache, if any.
+    let cache = cache::Cache::open(
+        cache.as_ref().map(|p| p.as_path()),
+        cache_ro.as_ref().map(|p| p.as_path()),
+        input_hash,
+    )?;
 
     // Optionally, Wizen the module first.
     let module_bytes = if do_wizen {
@@ -141,7 +148,7 @@ fn weval(
         &directives[..],
         Some(progress),
         output_ir,
-        cache.as_ref(),
+        &cache,
     )?;
 
     // Update memories in module.

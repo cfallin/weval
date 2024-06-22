@@ -76,7 +76,7 @@ pub fn partially_evaluate<'a>(
     directives: &[Directive],
     mut progress: Option<indicatif::ProgressBar>,
     output_ir: Option<std::path::PathBuf>,
-    cache: Option<&Cache>,
+    cache: &Cache,
 ) -> anyhow::Result<PartialEvalResult<'a>> {
     let intrinsics = Intrinsics::find(&module);
     log::trace!("intrinsics: {:?}", intrinsics);
@@ -94,28 +94,26 @@ pub fn partially_evaluate<'a>(
     let mut bodies: Vec<(Cow<Directive>, FuncDecl, String, bool)> = vec![];
 
     // Filter out directives that can be directly fulfilled by the cache.
-    let mut cache_ctx = cache.map(|c| c.thread()).transpose()?;
-    if let Some(cache) = cache_ctx.as_mut() {
-        let mut remaining_directives = vec![];
-        for directive in directives {
-            let key = bincode::serialize(&directive).unwrap();
-            if let Some(data) = cache.lookup(&key)? {
-                bodies.push((
-                    Cow::Owned(directive),
-                    FuncDecl::Compiled(Signature::new(data.sig as usize), data.name, data.body),
-                    String::new(),
-                    true,
-                ));
+    let mut cache_ctx = cache.thread()?;
+    let mut remaining_directives = vec![];
+    for directive in directives {
+        let key = bincode::serialize(&directive).unwrap();
+        if let Some(data) = cache_ctx.lookup(&key)? {
+            bodies.push((
+                Cow::Owned(directive),
+                FuncDecl::Compiled(Signature::new(data.sig as usize), data.name, data.body),
+                String::new(),
+                true,
+            ));
 
-                if let Some(progress) = progress.as_ref() {
-                    progress.inc(1);
-                }
-            } else {
-                remaining_directives.push(directive);
+            if let Some(progress) = progress.as_ref() {
+                progress.inc(1);
             }
+        } else {
+            remaining_directives.push(directive);
         }
-        directives = remaining_directives;
     }
+    directives = remaining_directives;
 
     if let Some(p) = progress.as_mut() {
         p.tick();
@@ -216,28 +214,24 @@ pub fn partially_evaluate<'a>(
         p.finish_and_clear();
     }
 
-    if cache_ctx.is_some() {
-        eprintln!("Inserting results into cache...");
-    }
+    eprintln!("Inserting results into cache...");
 
     // Compute memory updates.
     let mut mem_updates = HashMap::default();
     for (directive, decl, ir, cache_hit) in bodies {
         // Add to cache.
-        if !cache_hit {
-            if let Some(cache) = cache_ctx.as_mut() {
-                let key = bincode::serialize(&directive)?;
-                let (sig, name, body) = match &decl {
-                    FuncDecl::Compiled(sig, name, body) => (sig, name, body),
-                    _ => unreachable!(),
-                };
-                let data = CacheData {
-                    sig: sig.index() as u32,
-                    name: name.clone(),
-                    body: body.clone(),
-                };
-                cache.insert(&key, data)?;
-            }
+        if !cache_hit && cache.can_insert() {
+            let key = bincode::serialize(&directive)?;
+            let (sig, name, body) = match &decl {
+                FuncDecl::Compiled(sig, name, body) => (sig, name, body),
+                _ => unreachable!(),
+            };
+            let data = CacheData {
+                sig: sig.index() as u32,
+                name: name.clone(),
+                body: body.clone(),
+            };
+            cache_ctx.insert(&key, data)?;
         }
 
         // Add function to module.
