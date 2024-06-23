@@ -1880,7 +1880,7 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 [[package]]
 name = "waffle"
 version = "0.0.36"
-source = "git+https://github.com/cfallin/waffle#3ea971a5790dcfc3bd2d3e96e55c588c86bd973e"
+source = "git+https://github.com/cfallin/waffle#79729e0e2aa8737cabce7e7986236511fefc46eb"
 dependencies = [
  "addr2line",
  "anyhow",
@@ -2021,7 +2021,7 @@ dependencies = [
 [[package]]
 name = "wasm-encoder"
 version = "0.211.1"
-source = "git+https://github.com/cfallin/wasm-tools?branch=func-into-raw-body#ad6d593b26367f50a98742d4f124f913c98459e6"
+source = "git+https://github.com/bytecodealliance/wasm-tools#a5fa1eb8dcdadf36ce6b7aca1ea00ec5457d9917"
 dependencies = [
  "leb128",
 ]
@@ -2062,7 +2062,7 @@ dependencies = [
 [[package]]
 name = "wasmparser"
 version = "0.211.1"
-source = "git+https://github.com/cfallin/wasm-tools?branch=func-into-raw-body#ad6d593b26367f50a98742d4f124f913c98459e6"
+source = "git+https://github.com/bytecodealliance/wasm-tools#a5fa1eb8dcdadf36ce6b7aca1ea00ec5457d9917"
 dependencies = [
  "ahash",
  "bitflags 2.4.2",
