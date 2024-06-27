@@ -9,7 +9,7 @@ edition = "2021"
 exclude = ["/npm", "/ci"]
 
 [dependencies]
-waffle = { git = "https://github.com/cfallin/waffle" }
+waffle = "0.0.37"
 anyhow = "1.0"
 structopt = "0.3"
 wasm-encoder = "0.202.0"

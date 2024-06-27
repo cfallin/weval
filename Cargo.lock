@@ -1879,8 +1879,9 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "waffle"
-version = "0.0.36"
-source = "git+https://github.com/cfallin/waffle#79729e0e2aa8737cabce7e7986236511fefc46eb"
+version = "0.0.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19be7a707beef265e413007b68da4e3416544f132f67bcc9bea954d2e59ff9de"
 dependencies = [
  "addr2line",
  "anyhow",
@@ -1892,8 +1893,8 @@ dependencies = [
  "rayon",
  "smallvec",
  "structopt",
- "wasm-encoder 0.211.1",
- "wasmparser 0.211.1",
+ "wasm-encoder 0.212.0",
+ "wasmparser 0.212.0",
 ]
 
 [[package]]
@@ -2020,8 +2021,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-encoder"
-version = "0.211.1"
-source = "git+https://github.com/bytecodealliance/wasm-tools#a5fa1eb8dcdadf36ce6b7aca1ea00ec5457d9917"
+version = "0.212.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "501940df4418b8929eb6d52f1aade1fdd15a5b86c92453cb696e3c906bd3fc33"
 dependencies = [
  "leb128",
 ]
@@ -2061,8 +2063,9 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
-version = "0.211.1"
-source = "git+https://github.com/bytecodealliance/wasm-tools#a5fa1eb8dcdadf36ce6b7aca1ea00ec5457d9917"
+version = "0.212.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d28bc49ba1e5c5b61ffa7a2eace10820443c4b7d1c0b144109261d14570fdf8"
 dependencies = [
  "ahash",
  "bitflags 2.4.2",
