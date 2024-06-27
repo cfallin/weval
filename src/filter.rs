@@ -14,7 +14,10 @@
 //!   - Otherwise, if any args, generate drops for all args.
 
 use fxhash::FxHashMap;
-use wasmparser::{ElementItems, ElementKind, ExternalKind, Parser, Payload, TypeRef, ValType};
+use waffle::wasmparser::{
+    ElementItems, ElementKind, ExternalKind, KnownCustom, Parser, Payload, TypeRef, ValType,
+};
+use waffle::{wasm_encoder, wasmparser};
 
 #[derive(Clone, Debug)]
 enum FuncRemap {
@@ -211,6 +214,7 @@ impl Rewrite {
                         let ty = wasm_encoder::GlobalType {
                             val_type,
                             mutable: global.ty.mutable,
+                            shared: false,
                         };
                         let reader = global.init_expr.get_operators_reader();
                         let mut init_expr = wasm_encoder::ConstExpr::empty();
@@ -245,6 +249,7 @@ impl Rewrite {
                             wasm_encoder::GlobalType {
                                 val_type: wasm_encoder::ValType::I64,
                                 mutable: true,
+                                shared: false,
                             },
                             &wasm_encoder::ConstExpr::empty().with_i64_const(0),
                         );
@@ -460,32 +465,32 @@ impl Rewrite {
                     false
                 }
 
-                Payload::CustomSection(reader) if reader.name() == "name" => {
-                    let name_reader =
-                        wasmparser::NameSectionReader::new(reader.data(), reader.data_offset());
-                    let mut names = wasm_encoder::NameSection::new();
-                    let mut func_names = wasm_encoder::NameMap::new();
-                    for subsection in name_reader {
-                        let subsection = subsection?;
-                        match subsection {
-                            wasmparser::Name::Function(names) => {
-                                for name in names {
-                                    let name = name?;
-                                    if let Some(&FuncRemap::Index(new_index)) =
-                                        self.func_remap.get(&name.index)
-                                    {
-                                        func_names.append(new_index, name.name);
+                Payload::CustomSection(reader) => match reader.as_known() {
+                    KnownCustom::Name(name_reader) => {
+                        let mut names = wasm_encoder::NameSection::new();
+                        let mut func_names = wasm_encoder::NameMap::new();
+                        for subsection in name_reader {
+                            let subsection = subsection?;
+                            match subsection {
+                                wasmparser::Name::Function(names) => {
+                                    for name in names {
+                                        let name = name?;
+                                        if let Some(&FuncRemap::Index(new_index)) =
+                                            self.func_remap.get(&name.index)
+                                        {
+                                            func_names.append(new_index, name.name);
+                                        }
                                     }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
+                        names.functions(&func_names);
+                        out.section(&names);
+                        false
                     }
-                    names.functions(&func_names);
-                    out.section(&names);
-                    false
-                }
-                Payload::CustomSection(..) => false,
+                    _ => false,
+                },
                 _ => true,
             };
 
