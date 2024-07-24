@@ -1,4 +1,4 @@
-FROM ubuntu:16.04
+FROM ubuntu:20.04
 
 RUN apt-get update -y && apt-get install -y gcc gcc-s390x-linux-gnu ca-certificates
 

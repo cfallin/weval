@@ -1,5 +1,5 @@
-name: 'Set up a CentOS 6 container to build releases in'
-description: 'Set up a CentOS 6 container to build releases in'
+name: 'Set up an AlmaLinux 8 container to build releases in'
+description: 'Set up an AlmaLinux 8 container to build releases in'
 
 runs:
   using: node12
