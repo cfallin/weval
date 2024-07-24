@@ -47,7 +47,7 @@ async function getWeval() {
     if (!existsSync(exe)) {
         await mkdir(exeDir, { recursive: true });
 
-        let tag = "v0.1.0";
+        let tag = "v0.2.1";
         let repoBaseURL = `https://api.github.com/repos/cfallin/weval`;
         let response = await getJSON(`${repoBaseURL}/releases/tags/${tag}`);
         let id = response.id;
