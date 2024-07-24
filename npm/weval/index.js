@@ -10,6 +10,8 @@ import decompressTar from 'decompress-tar';
 import xz from '@napi-rs/lzma/xz';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+const TAG = "v0.2.1";
+
 async function getWeval() {
     const knownPlatforms = {
       "win32 x64 LE": "x86_64-windows",
@@ -47,12 +49,11 @@ async function getWeval() {
     if (!existsSync(exe)) {
         await mkdir(exeDir, { recursive: true });
 
-        let tag = "v0.2.1";
         let repoBaseURL = `https://api.github.com/repos/cfallin/weval`;
-        let response = await getJSON(`${repoBaseURL}/releases/tags/${tag}`);
+        let response = await getJSON(`${repoBaseURL}/releases/tags/${TAG}`);
         let id = response.id;
         let assets = await getJSON(`${repoBaseURL}/releases/${id}/assets`);
-        let releaseAsset = `weval-${tag}-${platformName}.${assetSuffix}`;
+        let releaseAsset = `weval-${TAG}-${platformName}.${assetSuffix}`;
         let asset = assets.find(asset => asset.name === releaseAsset);
         if (!asset) {
             console.error(`Can't find an asset named ${releaseAsset}`);
