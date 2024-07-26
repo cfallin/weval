@@ -166,7 +166,10 @@ pub fn partially_evaluate<'a>(
                     directive,
                 ) {
                     Ok(result) => result,
-                    Err(e) => return Some(Err(e)),
+                    Err(e) => {
+                        log::warn!("Failed to evaluate function: {e:?}");
+                        return None;
+                    }
                 };
 
                 if let Some(p) = progress_ref {
