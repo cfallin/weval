@@ -489,7 +489,7 @@ impl Rewrite {
                         out.section(&names);
                         false
                     }
-                    _ => false,
+                    _ => true,
                 },
                 _ => true,
             };
