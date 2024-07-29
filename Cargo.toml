@@ -2,14 +2,14 @@
 name = "weval"
 description = "The WebAssembly partial evaluator"
 repository = "https://github.com/cfallin/weval"
-version = "0.2.5"
+version = "0.2.6"
 authors = ["Chris Fallin <chris@cfallin.org>"]
 license = "Apache-2.0 WITH LLVM-exception"
 edition = "2021"
 exclude = ["/npm", "/ci"]
 
 [dependencies]
-waffle = "0.0.38"
+waffle = "0.0.39"
 anyhow = "1.0"
 structopt = "0.3"
 log = "0.4"

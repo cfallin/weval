@@ -1879,9 +1879,9 @@ checksum = "49874b5167b65d7193b8aba1567f5c7d93d001cafc34600cee003eda787e483f"
 
 [[package]]
 name = "waffle"
-version = "0.0.38"
+version = "0.0.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "723eab40dfb766956b775f1f6d12cdb5be28168ce9660ff86af0cfde4260ed83"
+checksum = "9a2d855e0c210da34e40babd1de34532a70f96c07e7b58ca532900e346790999"
 dependencies = [
  "addr2line",
  "anyhow",
@@ -2419,7 +2419,7 @@ dependencies = [
 
 [[package]]
 name = "weval"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "bincode",
