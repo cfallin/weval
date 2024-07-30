@@ -54,6 +54,10 @@ pub enum Command {
         /// Output IR for generic and specialized functions to files in a directory.
         #[structopt(long = "output-ir")]
         output_ir: Option<PathBuf>,
+
+        /// Emit verbose progress messages.
+        #[structopt(short = "v", long = "verbose")]
+        verbose: bool,
     },
 }
 
@@ -71,6 +75,7 @@ fn main() -> anyhow::Result<()> {
             cache_ro,
             show_stats,
             output_ir,
+            verbose,
         } => weval(
             input_module,
             output_module,
@@ -80,6 +85,7 @@ fn main() -> anyhow::Result<()> {
             cache_ro,
             show_stats,
             output_ir,
+            verbose,
         ),
     }
 }
@@ -106,8 +112,11 @@ fn weval(
     cache_ro: Option<PathBuf>,
     show_stats: bool,
     output_ir: Option<PathBuf>,
+    verbose: bool,
 ) -> anyhow::Result<()> {
-    eprintln!("Reading raw module bytes...");
+    if verbose {
+        eprintln!("Reading raw module bytes...");
+    }
     let raw_bytes = std::fs::read(&input_module)?;
 
     // Compute a hash of the original module so we can cache results
@@ -123,20 +132,26 @@ fn weval(
 
     // Optionally, Wizen the module first.
     let module_bytes = if do_wizen {
-        eprintln!("Wizening the module with its input...");
+        if verbose {
+            eprintln!("Wizening the module with its input...");
+        }
         wizen(raw_bytes, preopens)?
     } else {
         raw_bytes
     };
 
     // Load module.
-    eprintln!("Parsing the module...");
+    if verbose {
+        eprintln!("Parsing the module...");
+    }
     let mut frontend_opts = waffle::FrontendOptions::default();
     frontend_opts.debug = true;
     let module = waffle::Module::from_wasm_bytes(&module_bytes[..], &frontend_opts)?;
 
     // Build module image.
-    eprintln!("Building memory image...");
+    if verbose {
+        eprintln!("Building memory image...");
+    }
     let mut im = image::build_image(&module, None)?;
 
     // Collect directives.
@@ -149,19 +164,27 @@ fn weval(
     }
 
     // Partially evaluate.
-    eprintln!("Specializing functions...");
-    let progress = indicatif::ProgressBar::new(0);
+    if verbose {
+        eprintln!("Specializing functions...");
+    }
+    let progress = if verbose {
+        Some(indicatif::ProgressBar::new(0))
+    } else {
+        None
+    };
     let mut result = eval::partially_evaluate(
         module,
         &mut im,
         &directives[..],
-        Some(progress),
+        progress,
         output_ir,
         &cache,
     )?;
 
     // Update memories in module.
-    eprintln!("Updatimg memory image...");
+    if verbose {
+        eprintln!("Updatimg memory image...");
+    }
     image::update(&mut result.module, &im);
 
     log::debug!("Final module:\n{}", result.module.display());
@@ -198,15 +221,23 @@ fn weval(
         }
     }
 
-    eprintln!("Serializing back to binary form...");
+    if verbose {
+        eprintln!("Serializing back to binary form...");
+    }
     let bytes = result.module.to_wasm_bytes()?;
 
-    eprintln!("Performing post-filter pass to remove intrinsics...");
+    if verbose {
+        eprintln!("Performing post-filter pass to remove intrinsics...");
+    }
     let bytes = filter::filter(&bytes[..])?;
 
-    eprintln!("Writing output file...");
+    if verbose {
+        eprintln!("Writing output file...");
+    }
     std::fs::write(&output_module, &bytes[..])?;
 
-    eprintln!("Done.");
+    if verbose {
+        eprintln!("Done.");
+    }
     Ok(())
 }

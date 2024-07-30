@@ -215,9 +215,8 @@ pub fn partially_evaluate<'a>(
 
     if let Some(p) = progress.as_mut() {
         p.finish_and_clear();
+        eprintln!("Inserting results into cache...");
     }
-
-    eprintln!("Inserting results into cache...");
 
     // Compute memory updates.
     let mut mem_updates = HashMap::default();
