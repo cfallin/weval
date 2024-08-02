@@ -1394,7 +1394,7 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.assert_const32 {
                     log::trace!("assert_const32: abs {:?} line {:?}", abs[0], abs[1]);
-                    if abs[0].as_const_u32().is_none() {
+                    if abs[0].as_const_u32_or_mem_offset().is_none() {
                         panic!(
                             "weval_assert_const32() failed: {:?}: line {:?}",
                             abs[0], abs[1]
