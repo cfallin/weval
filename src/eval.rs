@@ -409,9 +409,9 @@ fn split_blocks_at_intrinsic_calls(func: &mut FunctionBody, intrinsics: &Intrins
                         args: vec![],
                     };
                     func.blocks[block].terminator = Terminator::Br { target };
-                }
 
-                break;
+                    break;
+                }
             }
         }
     }
