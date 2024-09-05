@@ -40,12 +40,6 @@ pub fn scan_block_backward<T, Use: Fn(&mut T, Value), Def: Fn(&mut T, Value)>(
                 def_func(state, value);
                 use_func(state, arg);
             }
-            &ValueDef::Trace(_, args) => {
-                for &arg in &func.arg_pool[args] {
-                    let arg = func.resolve_alias(arg);
-                    use_func(state, arg);
-                }
-            }
             &ValueDef::Alias(_) => {}
             &ValueDef::BlockParam(..) | &ValueDef::Placeholder(_) | &ValueDef::None => {
                 unreachable!()

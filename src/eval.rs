@@ -861,19 +861,6 @@ impl<'a> Evaluator<'a> {
                         }
                     }
                 }
-                ValueDef::Trace(id, args) => {
-                    let new_args = self.func.arg_pool.allocate(args.len(), Value::invalid());
-                    let args_slice = &self.generic.arg_pool[*args];
-                    for (i, &arg) in args_slice.iter().enumerate() {
-                        let arg = self.generic.resolve_alias(arg);
-                        let (val, _abs) = self.use_value(state.context, orig_block, new_block, arg);
-                        self.func.arg_pool[new_args][i] = val;
-                    }
-                    Some((
-                        ValueDef::Trace(*id, new_args),
-                        AbstractValue::Runtime(Some(inst)),
-                    ))
-                }
                 _ => unreachable!(
                     "Invalid ValueDef in `insts` array for {} at {}",
                     orig_block, inst

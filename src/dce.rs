@@ -87,12 +87,6 @@ fn scan_block(func: &FunctionBody, block: Block, used: &mut FxHashSet<Value>) ->
                     changed |= mark_used(used, *value);
                 }
             }
-            ValueDef::Trace(_, args) => {
-                for &arg in &func.arg_pool[*args] {
-                    log::trace!(" -> marking trace arg {} used", arg);
-                    changed |= mark_used(used, arg);
-                }
-            }
             ValueDef::Operator(op, args, _) => {
                 if !op_can_be_removed(op) {
                     changed |= used.insert(inst);
