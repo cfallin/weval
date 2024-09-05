@@ -5,7 +5,7 @@ use waffle::{Block, Func, FunctionBody};
 
 /// Stats per original/generic function.
 #[derive(Clone, Debug, Default)]
-pub struct SpecializationStats {
+pub(crate) struct SpecializationStats {
     // --- stats computed once, for the generic function.
     pub generic: Func,
     pub generic_blocks: usize,
@@ -36,7 +36,7 @@ impl SpecializationStats {
         ret
     }
 
-    pub fn add_specialization(&mut self, stats: &SpecializationStats) {
+    pub(crate) fn add_specialization(&mut self, stats: &SpecializationStats) {
         self.specializations += 1;
         self.specialized_blocks += stats.specialized_blocks;
         self.specialized_insts += stats.specialized_insts;
@@ -52,7 +52,9 @@ impl SpecializationStats {
     }
 }
 
-pub fn count_reachable_blocks_and_insts(body: &FunctionBody) -> (usize, usize, FxHashSet<Block>) {
+pub(crate) fn count_reachable_blocks_and_insts(
+    body: &FunctionBody,
+) -> (usize, usize, FxHashSet<Block>) {
     let mut queue = vec![body.entry];
     let mut visited = queue.iter().cloned().collect::<FxHashSet<_>>();
     let mut insts = 0;

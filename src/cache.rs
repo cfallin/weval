@@ -6,13 +6,13 @@ use std::path::Path;
 
 pub type ModuleHash = [u8; 32]; // SHA-256 hash.
 
-pub fn compute_hash(raw_bytes: &[u8]) -> ModuleHash {
+pub(crate) fn compute_hash(raw_bytes: &[u8]) -> ModuleHash {
     Sha256::digest(raw_bytes).into()
 }
 
 /// Cache result: compiled Wasm bytecode, with signature.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CacheData {
+pub(crate) struct CacheData {
     /// Function signature index.
     pub sig: u32,
     /// Function name.
@@ -21,13 +21,13 @@ pub struct CacheData {
     pub body: Vec<u8>,
 }
 
-pub struct Cache {
+pub(crate) struct Cache {
     module_hash: ModuleHash,
     db: Option<sqlite::ConnectionThreadSafe>,
     db_ro: Option<sqlite::ConnectionThreadSafe>,
 }
 
-pub struct CacheThreadCtx<'a> {
+pub(crate) struct CacheThreadCtx<'a> {
     cache: &'a Cache,
     lookup_stmt: Option<sqlite::Statement<'a>>,
     insert_stmt: Option<sqlite::Statement<'a>>,
@@ -45,16 +45,16 @@ impl Cache {
                 let db = sqlite::Connection::open_thread_safe(path)?;
                 db.execute(
                     r#"
-                CREATE TABLE IF NOT EXISTS weval_cache(
-                    module_hash BLOB NOT NULL,
-                    key BLOB NOT NULL,
-                    result BLOB NOT NULL,
-                    created_time INTEGER NOT NULL
-                 );
-                 CREATE INDEX IF NOT EXISTS idx ON weval_cache(
-                     module_hash, key
-                 );
-            "#,
+                    CREATE TABLE IF NOT EXISTS weval_cache(
+                        module_hash BLOB NOT NULL,
+                        key BLOB NOT NULL,
+                        result BLOB NOT NULL,
+                        created_time INTEGER NOT NULL
+                     );
+                     CREATE INDEX IF NOT EXISTS idx ON weval_cache(
+                         module_hash, key
+                     );
+                     "#,
                 )?;
                 Some(db)
             }

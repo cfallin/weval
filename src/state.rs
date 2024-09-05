@@ -44,11 +44,11 @@ use waffle::{Block, FunctionBody, Global, Type, Value};
 
 waffle::declare_entity!(Context, "context");
 
-pub type PC = u32;
+pub(crate) type PC = u32;
 
 /// One element in the context stack.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ContextElem {
+pub(crate) enum ContextElem {
     Root,
     Loop(PC),
     Specialized(Value, u32),
@@ -56,14 +56,14 @@ pub enum ContextElem {
 
 /// Arena of contexts.
 #[derive(Clone, Default, Debug)]
-pub struct Contexts {
+pub(crate) struct Contexts {
     contexts: EntityVec<Context, (Context, ContextElem)>,
     pub(crate) context_bucket: PerEntity<Context, Option<u32>>,
     dedup: HashMap<(Context, ContextElem), Context>, // map from (parent, tail_elem) to ID
 }
 
 impl Contexts {
-    pub fn create(&mut self, parent: Option<Context>, elem: ContextElem) -> Context {
+    pub(crate) fn create(&mut self, parent: Option<Context>, elem: ContextElem) -> Context {
         let parent = parent.unwrap_or(Context::invalid());
         match self.dedup.entry((parent, elem.clone())) {
             Entry::Occupied(o) => *o.get(),
@@ -75,15 +75,15 @@ impl Contexts {
         }
     }
 
-    pub fn parent(&self, context: Context) -> Context {
+    pub(crate) fn parent(&self, context: Context) -> Context {
         self.contexts[context].0
     }
 
-    pub fn leaf_element(&self, context: Context) -> ContextElem {
+    pub(crate) fn leaf_element(&self, context: Context) -> ContextElem {
         self.contexts[context].1.clone()
     }
 
-    pub fn pop_one_loop(&self, mut context: Context) -> Context {
+    pub(crate) fn pop_one_loop(&self, mut context: Context) -> Context {
         loop {
             match &self.contexts[context] {
                 (parent, ContextElem::Loop(_)) => return *parent,
@@ -98,7 +98,7 @@ impl Contexts {
 
 /// The flow-sensitive part of the state.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct ProgPointState {
+pub(crate) struct ProgPointState {
     /// Specialization registers.
     pub regs: BTreeMap<RegSlot, RegValue>,
     /// Global values.
@@ -115,7 +115,7 @@ pub struct ProgPointState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum RegSlot {
+pub(crate) enum RegSlot {
     Register(u32),
     LocalAddr(u32),
     LocalData(u32),
@@ -124,7 +124,7 @@ pub enum RegSlot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum RegValue {
+pub(crate) enum RegValue {
     Value {
         data: Value,
         abs: AbstractValue,
@@ -180,14 +180,14 @@ impl RegValue {
         }
     }
 
-    pub fn value(&self) -> Option<Value> {
+    pub(crate) fn value(&self) -> Option<Value> {
         match self {
             RegValue::Value { data, .. } => Some(*data),
             _ => None,
         }
     }
 
-    pub fn ty(&self) -> Type {
+    pub(crate) fn ty(&self) -> Type {
         match self {
             RegValue::Value { ty, .. } => *ty,
             RegValue::Merge { ty, .. } => *ty,
@@ -197,7 +197,7 @@ impl RegValue {
 
 /// The state for a function body during analysis.
 #[derive(Clone, Debug, Default)]
-pub struct FunctionState {
+pub(crate) struct FunctionState {
     pub contexts: Contexts,
     /// AbstractValues in specialized function, indexed by specialized
     /// Value.
@@ -212,7 +212,7 @@ pub struct FunctionState {
 
 /// State carried during a pass through a block.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PointState {
+pub(crate) struct PointState {
     pub context: Context,
     pub pending_context: Option<Context>,
     pub pending_specialize: Option<(Value, u32, u32)>,
@@ -275,7 +275,7 @@ fn set_union<K: PartialEq + Eq + PartialOrd + Ord + Copy>(
 }
 
 impl ProgPointState {
-    pub fn entry(im: &Image) -> ProgPointState {
+    pub(crate) fn entry(im: &Image) -> ProgPointState {
         let globals: BTreeMap<Global, AbstractValue> = im
             .globals
             .iter()
@@ -300,7 +300,7 @@ impl ProgPointState {
         }
     }
 
-    pub fn meet_with(&mut self, other: &ProgPointState) -> bool {
+    pub(crate) fn meet_with(&mut self, other: &ProgPointState) -> bool {
         let mut changed = false;
         changed |= map_meet_with(&mut self.regs, &other.regs, RegValue::meet, None);
 
@@ -334,7 +334,7 @@ impl ProgPointState {
         changed
     }
 
-    pub fn update_across_edge(&mut self) {
+    pub(crate) fn update_across_edge(&mut self) {
         let create_merge = |value: &mut RegValue| {
             if let RegValue::Value { ty, abs, .. } = value {
                 // Ensure all specialization-register values become
@@ -359,7 +359,7 @@ impl ProgPointState {
         }
     }
 
-    pub fn update_at_block_entry<C, GB: FnMut(&mut C, RegSlot, Type) -> Value>(
+    pub(crate) fn update_at_block_entry<C, GB: FnMut(&mut C, RegSlot, Type) -> Value>(
         &mut self,
         ctx: &mut C,
         get_blockparam: &mut GB,
@@ -392,16 +392,16 @@ impl ProgPointState {
 }
 
 impl FunctionState {
-    pub fn new() -> FunctionState {
+    pub(crate) fn new() -> FunctionState {
         FunctionState::default()
     }
 
-    pub fn init(&mut self, im: &Image) -> (Context, ProgPointState) {
+    pub(crate) fn init(&mut self, im: &Image) -> (Context, ProgPointState) {
         let ctx = self.contexts.create(None, ContextElem::Root);
         (ctx, ProgPointState::entry(im))
     }
 
-    pub fn set_args(
+    pub(crate) fn set_args(
         &mut self,
         orig_body: &FunctionBody,
         num_globals: usize,

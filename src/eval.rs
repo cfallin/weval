@@ -62,7 +62,7 @@ struct Evaluator<'a> {
     stats: SpecializationStats,
 }
 
-pub struct PartialEvalResult<'a> {
+pub(crate) struct PartialEvalResult<'a> {
     pub module: Module<'a>,
     pub global_base: usize,
     pub stats: Vec<SpecializationStats>,
@@ -70,7 +70,7 @@ pub struct PartialEvalResult<'a> {
 
 /// Partially evaluates according to the given directives. Returns
 /// clone of original module, with tracing added.
-pub fn partially_evaluate<'a>(
+pub(crate) fn partially_evaluate<'a>(
     mut module: Module<'a>,
     im: &mut Image,
     directives: &[Directive],

@@ -114,7 +114,7 @@ fn parser_to_encoder_ty(ty: wasmparser::ValType) -> wasm_encoder::ValType {
 }
 
 impl Rewrite {
-    pub fn process(mut self, module: &[u8]) -> anyhow::Result<Vec<u8>> {
+    pub(crate) fn process(mut self, module: &[u8]) -> anyhow::Result<Vec<u8>> {
         let parser = Parser::new(0);
         let mut out = wasm_encoder::Module::new();
         let mut orig_func_idx = 0;
@@ -507,7 +507,7 @@ impl Rewrite {
     }
 }
 
-pub fn filter(module: &[u8]) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn filter(module: &[u8]) -> anyhow::Result<Vec<u8>> {
     let rewrite = Rewrite::default();
     rewrite.process(module)
 }

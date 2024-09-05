@@ -5,16 +5,16 @@ use fxhash::FxHashSet;
 use std::collections::VecDeque;
 use waffle::{cfg::CFGInfo, entity::PerEntity, Block, FunctionBody, Terminator, Value, ValueDef};
 
-pub type LiveSet = FxHashSet<Value>;
+pub(crate) type LiveSet = FxHashSet<Value>;
 
 #[derive(Clone, Debug)]
-pub struct Liveness<'a> {
+pub(crate) struct Liveness<'a> {
     pub func: &'a FunctionBody,
     pub block_start: PerEntity<Block, LiveSet>,
     pub block_end: PerEntity<Block, LiveSet>,
 }
 
-pub fn scan_block_backward<T, Use: Fn(&mut T, Value), Def: Fn(&mut T, Value)>(
+pub(crate) fn scan_block_backward<T, Use: Fn(&mut T, Value), Def: Fn(&mut T, Value)>(
     func: &FunctionBody,
     block: Block,
     state: &mut T,
@@ -53,7 +53,7 @@ pub fn scan_block_backward<T, Use: Fn(&mut T, Value), Def: Fn(&mut T, Value)>(
 }
 
 impl<'a> Liveness<'a> {
-    pub fn new(func: &'a FunctionBody, cfg: &CFGInfo) -> Liveness<'a> {
+    pub(crate) fn new(func: &'a FunctionBody, cfg: &CFGInfo) -> Liveness<'a> {
         let mut this = Liveness {
             func,
             block_start: PerEntity::default(),

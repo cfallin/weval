@@ -1,13 +1,14 @@
+//! Shadow-stack escape analysis optimization.
+//!
+//! Determines whether pointers derived from global 0 (the shadow
+//! stack used by LLVM-generated Wasm) are actually used anywhere (by
+//! any operator other than another update to the stack pointer); if
+//! not, deletes all global.sets and then does DCE to remove all
+//! stack-pointer manipulation. This turns out to be useful when
+//! weval'ing ICs when partial evaluation has removed all uses of some
+//! dynamic on-stack data structure, like an opcode reader.
+
 use std::collections::HashSet;
-/// Shadow-stack escape analysis optimization.
-///
-/// Determines whether pointers derived from global 0 (the shadow
-/// stack used by LLVM-generated Wasm) are actually used anywhere (by
-/// any operator other than another update to the stack pointer); if
-/// not, deletes all global.sets and then does DCE to remove all
-/// stack-pointer manipulation. This turns out to be useful when
-/// weval'ing ICs when partial evaluation has removed all uses of some
-/// dynamic on-stack data structure, like an opcode reader.
 use waffle::cfg::CFGInfo;
 use waffle::entity::EntityRef;
 use waffle::pool::ListRef;
@@ -108,7 +109,7 @@ fn shadow_stack_escapes(func: &FunctionBody, cfg: &CFGInfo) -> EscapeAnalysisRes
     EscapeAnalysisResult::NonEscaping(tainted)
 }
 
-pub fn remove_shadow_stack_if_non_escaping(func: &mut FunctionBody, cfg: &CFGInfo) {
+pub(crate) fn remove_shadow_stack_if_non_escaping(func: &mut FunctionBody, cfg: &CFGInfo) {
     if let EscapeAnalysisResult::NonEscaping(values_to_remove) = shadow_stack_escapes(func, &cfg) {
         log::trace!("removing shadow stack operations: {:?}", values_to_remove);
         let ty_u32 = func.type_pool.single(Type::I32);

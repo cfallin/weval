@@ -2,10 +2,10 @@
 
 use crate::value::WasmVal;
 use std::collections::BTreeMap;
-use waffle::{Func, Global, Memory, MemoryData, MemorySegment, Module, Table};
+use waffle::{Func, Global, Memory, MemoryData, MemorySegment, Module, Table, WASM_PAGE};
 
 #[derive(Clone, Debug)]
-pub struct Image {
+pub(crate) struct Image {
     pub memories: BTreeMap<Memory, MemImage>,
     pub globals: BTreeMap<Global, WasmVal>,
     pub tables: BTreeMap<Table, Vec<Func>>,
@@ -15,7 +15,7 @@ pub struct Image {
 }
 
 #[derive(Clone, Debug)]
-pub struct MemImage {
+pub(crate) struct MemImage {
     pub image: Vec<u8>,
 }
 
@@ -25,7 +25,7 @@ impl MemImage {
     }
 }
 
-pub fn build_image(module: &Module, snapshot_bytes: Option<&[u8]>) -> anyhow::Result<Image> {
+pub(crate) fn build_image(module: &Module, snapshot_bytes: Option<&[u8]>) -> anyhow::Result<Image> {
     Ok(Image {
         memories: module
             .memories
@@ -54,8 +54,6 @@ pub fn build_image(module: &Module, snapshot_bytes: Option<&[u8]>) -> anyhow::Re
     })
 }
 
-const WASM_PAGE: usize = 1 << 16;
-
 fn maybe_mem_image(mem: &MemoryData, snapshot_bytes: Option<&[u8]>) -> Option<MemImage> {
     if let Some(b) = snapshot_bytes {
         return Some(MemImage { image: b.to_vec() });
@@ -72,7 +70,7 @@ fn maybe_mem_image(mem: &MemoryData, snapshot_bytes: Option<&[u8]>) -> Option<Me
     Some(MemImage { image })
 }
 
-pub fn update(module: &mut Module, im: &Image) {
+pub(crate) fn update(module: &mut Module, im: &Image) {
     for (&mem_id, mem) in &im.memories {
         module.memories[mem_id].segments.clear();
         module.memories[mem_id].segments.push(MemorySegment {
@@ -86,7 +84,7 @@ pub fn update(module: &mut Module, im: &Image) {
 }
 
 impl Image {
-    pub fn can_read(&self, memory: Memory, addr: u32, size: u32) -> bool {
+    pub(crate) fn can_read(&self, memory: Memory, addr: u32, size: u32) -> bool {
         let end = match addr.checked_add(size) {
             Some(end) => end,
             None => return false,
@@ -98,12 +96,12 @@ impl Image {
         (end as usize) <= image.len()
     }
 
-    pub fn main_heap(&self) -> anyhow::Result<Memory> {
+    pub(crate) fn main_heap(&self) -> anyhow::Result<Memory> {
         self.main_heap
             .ok_or_else(|| anyhow::anyhow!("no main heap"))
     }
 
-    pub fn read_slice(&self, id: Memory, addr: u32, len: u32) -> anyhow::Result<&[u8]> {
+    pub(crate) fn read_slice(&self, id: Memory, addr: u32, len: u32) -> anyhow::Result<&[u8]> {
         let image = self.memories.get(&id).unwrap();
         let addr = usize::try_from(addr).unwrap();
         let len = usize::try_from(len).unwrap();
@@ -113,7 +111,7 @@ impl Image {
         Ok(&image.image[addr..(addr + len)])
     }
 
-    pub fn read_u8(&self, id: Memory, addr: u32) -> anyhow::Result<u8> {
+    pub(crate) fn read_u8(&self, id: Memory, addr: u32) -> anyhow::Result<u8> {
         let image = self.memories.get(&id).unwrap();
         image
             .image
@@ -122,7 +120,7 @@ impl Image {
             .ok_or_else(|| anyhow::anyhow!("Out of bounds"))
     }
 
-    pub fn read_u16(&self, id: Memory, addr: u32) -> anyhow::Result<u16> {
+    pub(crate) fn read_u16(&self, id: Memory, addr: u32) -> anyhow::Result<u16> {
         let image = self.memories.get(&id).unwrap();
         let addr = addr as usize;
         if (addr + 2) > image.len() {
@@ -132,7 +130,7 @@ impl Image {
         Ok(u16::from_le_bytes([slice[0], slice[1]]))
     }
 
-    pub fn read_u32(&self, id: Memory, addr: u32) -> anyhow::Result<u32> {
+    pub(crate) fn read_u32(&self, id: Memory, addr: u32) -> anyhow::Result<u32> {
         let image = self.memories.get(&id).unwrap();
         let addr = addr as usize;
         if (addr + 4) > image.len() {
@@ -142,19 +140,19 @@ impl Image {
         Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
     }
 
-    pub fn read_u64(&self, id: Memory, addr: u32) -> anyhow::Result<u64> {
+    pub(crate) fn read_u64(&self, id: Memory, addr: u32) -> anyhow::Result<u64> {
         let low = self.read_u32(id, addr)?;
         let high = self.read_u32(id, addr + 4)?;
         Ok((high as u64) << 32 | (low as u64))
     }
 
-    pub fn read_u128(&self, id: Memory, addr: u32) -> anyhow::Result<u128> {
+    pub(crate) fn read_u128(&self, id: Memory, addr: u32) -> anyhow::Result<u128> {
         let low = self.read_u64(id, addr)?;
         let high = self.read_u64(id, addr + 8)?;
         Ok((high as u128) << 64 | (low as u128))
     }
 
-    pub fn read_size(&self, id: Memory, addr: u32, size: u8) -> anyhow::Result<u64> {
+    pub(crate) fn read_size(&self, id: Memory, addr: u32, size: u8) -> anyhow::Result<u64> {
         match size {
             1 => self.read_u8(id, addr).map(|x| x as u64),
             2 => self.read_u16(id, addr).map(|x| x as u64),
@@ -164,7 +162,7 @@ impl Image {
         }
     }
 
-    pub fn read_str(&self, id: Memory, mut addr: u32) -> anyhow::Result<String> {
+    pub(crate) fn read_str(&self, id: Memory, mut addr: u32) -> anyhow::Result<String> {
         let mut bytes = vec![];
         loop {
             let byte = self.read_u8(id, addr)?;
@@ -177,7 +175,7 @@ impl Image {
         Ok(std::str::from_utf8(&bytes[..])?.to_owned())
     }
 
-    pub fn write_u8(&mut self, id: Memory, addr: u32, value: u8) -> anyhow::Result<()> {
+    pub(crate) fn write_u8(&mut self, id: Memory, addr: u32, value: u8) -> anyhow::Result<()> {
         let image = self.memories.get_mut(&id).unwrap();
         *image
             .image
@@ -186,7 +184,7 @@ impl Image {
         Ok(())
     }
 
-    pub fn write_u32(&mut self, id: Memory, addr: u32, value: u32) -> anyhow::Result<()> {
+    pub(crate) fn write_u32(&mut self, id: Memory, addr: u32, value: u32) -> anyhow::Result<()> {
         let image = self.memories.get_mut(&id).unwrap();
         let addr = addr as usize;
         if (addr + 4) > image.len() {
@@ -197,7 +195,7 @@ impl Image {
         Ok(())
     }
 
-    pub fn func_ptr(&self, idx: u32) -> anyhow::Result<Func> {
+    pub(crate) fn func_ptr(&self, idx: u32) -> anyhow::Result<Func> {
         let table = self
             .main_table
             .ok_or_else(|| anyhow::anyhow!("no main table"))?;
@@ -210,7 +208,7 @@ impl Image {
             .ok_or_else(|| anyhow::anyhow!("func ptr out of bounds"))?)
     }
 
-    pub fn append_data(&mut self, id: Memory, data: Vec<u8>) {
+    pub(crate) fn append_data(&mut self, id: Memory, data: Vec<u8>) {
         let image = self.memories.get_mut(&id).unwrap();
         let orig_len = image.len();
         let data_len = data.len();

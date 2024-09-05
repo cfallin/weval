@@ -3,7 +3,7 @@
 use waffle::{ExportKind, Func, ImportKind, Module, Operator, Terminator, Type, ValueDef};
 
 #[derive(Clone, Debug)]
-pub struct Intrinsics {
+pub(crate) struct Intrinsics {
     pub read_reg: Option<Func>,
     pub write_reg: Option<Func>,
     pub push_context: Option<Func>,
@@ -26,7 +26,7 @@ pub struct Intrinsics {
 }
 
 impl Intrinsics {
-    pub fn find(module: &Module) -> Intrinsics {
+    pub(crate) fn find(module: &Module) -> Intrinsics {
         Intrinsics {
             read_reg: find_imported_intrinsic(module, "read.reg", &[Type::I64], &[Type::I64]),
             write_reg: find_imported_intrinsic(module, "write.reg", &[Type::I64, Type::I64], &[]),
@@ -103,7 +103,7 @@ fn sig_matches(module: &Module, f: Func, in_tys: &[Type], out_tys: &[Type]) -> b
     &sig.params[..] == in_tys && &sig.returns[..] == out_tys
 }
 
-pub fn find_imported_intrinsic(
+pub(crate) fn find_imported_intrinsic(
     module: &Module,
     name: &str,
     in_tys: &[Type],
@@ -119,7 +119,7 @@ pub fn find_imported_intrinsic(
         })
 }
 
-pub fn find_exported_func(
+pub(crate) fn find_exported_func(
     module: &Module,
     name: &str,
     in_tys: &[Type],
@@ -135,7 +135,7 @@ pub fn find_exported_func(
         })
 }
 
-pub fn find_global_data_by_exported_func(module: &Module, name: &str) -> Option<u32> {
+pub(crate) fn find_global_data_by_exported_func(module: &Module, name: &str) -> Option<u32> {
     let f = find_exported_func(module, name, &[], &[Type::I32])?;
     let mut body = module.funcs[f].clone();
     body.parse(module).unwrap();

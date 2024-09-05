@@ -1,7 +1,7 @@
 //! Symbolic and concrete values.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum WasmVal {
+pub(crate) enum WasmVal {
     I32(u32),
     I64(u64),
     F32(u32),
@@ -10,7 +10,7 @@ pub enum WasmVal {
 }
 
 impl WasmVal {
-    pub fn is_truthy(self) -> bool {
+    pub(crate) fn is_truthy(self) -> bool {
         match self {
             WasmVal::I32(i) => i != 0,
             // Only boolean-ish types (i32) can be evaluated for
@@ -19,7 +19,7 @@ impl WasmVal {
         }
     }
 
-    pub fn integer_value(self) -> Option<u64> {
+    pub(crate) fn integer_value(self) -> Option<u64> {
         match self {
             WasmVal::I32(i) => Some(i as u64),
             WasmVal::I64(i) => Some(i),
@@ -27,7 +27,7 @@ impl WasmVal {
         }
     }
 
-    pub fn from_bits(ty: waffle::Type, bits: u64) -> Option<Self> {
+    pub(crate) fn from_bits(ty: waffle::Type, bits: u64) -> Option<Self> {
         match ty {
             waffle::Type::I32 => Some(WasmVal::I32(bits as u32)),
             waffle::Type::I64 => Some(WasmVal::I64(bits)),
@@ -53,7 +53,7 @@ impl std::convert::TryFrom<waffle::Operator> for WasmVal {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum AbstractValue {
+pub(crate) enum AbstractValue {
     /// "top" default value; undefined.
     #[default]
     Top,
@@ -72,10 +72,10 @@ pub enum AbstractValue {
 /// Memory pointed to by one of the incoming arguments to a
 /// specialized function.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MemoryBufferIndex(pub u32);
+pub(crate) struct MemoryBufferIndex(pub u32);
 
 impl AbstractValue {
-    pub fn meet(a: &AbstractValue, b: &AbstractValue) -> AbstractValue {
+    pub(crate) fn meet(a: &AbstractValue, b: &AbstractValue) -> AbstractValue {
         match (a, b) {
             (AbstractValue::Top, x) | (x, AbstractValue::Top) => x.clone(),
             (x, y) if x == y => x.clone(),
@@ -98,7 +98,7 @@ impl AbstractValue {
         }
     }
 
-    pub fn as_const_u32(&self) -> Option<u32> {
+    pub(crate) fn as_const_u32(&self) -> Option<u32> {
         match self {
             &AbstractValue::Concrete(WasmVal::I32(k)) => Some(k),
             &AbstractValue::StaticMemory(addr) => Some(addr),
@@ -106,7 +106,7 @@ impl AbstractValue {
         }
     }
 
-    pub fn as_const_u32_or_mem_offset(&self) -> Option<u32> {
+    pub(crate) fn as_const_u32_or_mem_offset(&self) -> Option<u32> {
         match self {
             &AbstractValue::Concrete(WasmVal::I32(k)) => Some(k),
             &AbstractValue::ConcreteMemory(_, off) => Some(off),
@@ -114,7 +114,7 @@ impl AbstractValue {
         }
     }
 
-    pub fn as_const_u64(&self) -> Option<u64> {
+    pub(crate) fn as_const_u64(&self) -> Option<u64> {
         match self {
             &AbstractValue::Concrete(WasmVal::I64(k)) => Some(k),
             &AbstractValue::StaticMemory(addr) => Some(u64::from(addr)),
@@ -122,7 +122,7 @@ impl AbstractValue {
         }
     }
 
-    pub fn as_const_truthy(&self) -> Option<bool> {
+    pub(crate) fn as_const_truthy(&self) -> Option<bool> {
         self.as_const_u32().map(|k| k != 0)
     }
 }

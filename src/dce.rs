@@ -107,7 +107,7 @@ fn scan_block(func: &FunctionBody, block: Block, used: &mut FxHashSet<Value>) ->
     changed
 }
 
-pub fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
+pub(crate) fn run(func: &mut FunctionBody, cfg: &CFGInfo) {
     // For any unreachable blocks, empty their contents and
     // terminators, and remove all blockparams (and there will then be
     // no targets with branch args to adjust because only an

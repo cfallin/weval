@@ -8,7 +8,7 @@ use std::sync::Arc;
 use waffle::{Func, Memory, Module};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Directive {
+pub(crate) struct Directive {
     /// User-given ID for the weval'd function.
     pub user_id: u32,
     /// Evaluate the given function.
@@ -25,7 +25,7 @@ pub struct Directive {
 }
 
 #[derive(Clone, Debug)]
-pub struct DirectiveArgs {
+pub(crate) struct DirectiveArgs {
     /// Evaluate with the given parameter values fixed.
     pub const_params: Vec<AbstractValue>,
     /// Evaluate with the given symbolic memory buffers.
@@ -37,13 +37,13 @@ pub struct DirectiveArgs {
 /// *contents* (but not necessarily a constant pointer value), this
 /// allows us to give the backing data directly.
 #[derive(Clone, Debug)]
-pub struct MemoryBuffer {
+pub(crate) struct MemoryBuffer {
     /// The bytes in memory at this pointer.
     data: Arc<Vec<u8>>,
 }
 
 impl MemoryBuffer {
-    pub fn read_size(&self, offset: u32, size: u32) -> anyhow::Result<u64> {
+    pub(crate) fn read_size(&self, offset: u32, size: u32) -> anyhow::Result<u64> {
         let offset = usize::try_from(offset).unwrap();
         let size = usize::try_from(size).unwrap();
         if offset + size > self.data.len() {
@@ -62,7 +62,7 @@ impl MemoryBuffer {
     }
 }
 
-pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>> {
+pub(crate) fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>> {
     // Is there a function called "weval.pending.head"?  If so, is the
     // function body a simple constant? This provides the address of a
     // doubly-linked list; we process requests and unlink them.
@@ -104,6 +104,8 @@ pub fn collect(module: &Module, im: &mut Image) -> anyhow::Result<Vec<Directive>
 }
 
 fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Directive> {
+    // Keep these offsets in sync with the struct definition in
+    // `include/weval.h`.
     let user_id = im.read_u32(heap, head + 8)?;
     let num_globals = im.read_u32(heap, head + 12)?;
     let func_table_index = im.read_u32(heap, head + 16)?;
@@ -126,7 +128,7 @@ fn decode_weval_req(im: &Image, heap: Memory, head: u32) -> anyhow::Result<Direc
 
 impl DirectiveArgs {
     /// Decode an argument-request bytestring.
-    pub fn decode(bytes: &[u8]) -> anyhow::Result<DirectiveArgs> {
+    pub(crate) fn decode(bytes: &[u8]) -> anyhow::Result<DirectiveArgs> {
         let mut const_params = vec![];
         let mut const_memory = vec![];
         let mut arg_ptr = 0;
