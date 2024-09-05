@@ -1400,13 +1400,12 @@ impl<'a> Evaluator<'a> {
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.read_specialization_global {
                     let index = abs[0].as_const_u32().unwrap() as usize;
-                    let i64_ty = self.func.single_type_list(Type::I64);
-                    let value = self.func.add_value(ValueDef::Operator(
+                    let value = self.func.add_op(
+                        new_block,
                         Operator::I64Const { value: 0 },
-                        ListRef::default(),
-                        i64_ty,
-                    ));
-                    self.func.blocks[new_block].insts.push(value);
+                        &[],
+                        &[Type::I64],
+                    );
                     let state = self.state.specialization_globals[index].clone();
                     log::trace!(
                         "read_specialization_global: index {}: state = {:?}",
@@ -1452,9 +1451,8 @@ impl<'a> Evaluator<'a> {
                         EvalResult::Alias(abs, value)
                     } else {
                         let ptr = self.func.arg_pool[values][0];
-                        let i64_ty = self.func.single_type_list(Type::I64);
-                        let args = self.func.arg_pool.single(ptr);
-                        let load = self.func.add_value(ValueDef::Operator(
+                        let load = self.func.add_op(
+                            new_block,
                             Operator::I64Load {
                                 memory: MemoryArg {
                                     align: 1,
@@ -1462,11 +1460,10 @@ impl<'a> Evaluator<'a> {
                                     memory: self.image.main_heap().unwrap(),
                                 },
                             },
-                            args,
-                            i64_ty,
-                        ));
+                            &[ptr],
+                            &[Type::I64],
+                        );
                         self.stats.virtstack_reads_mem += 1;
-                        self.func.blocks[new_block].insts.push(load);
                         EvalResult::Alias(AbstractValue::Runtime(None), load)
                     }
                 } else if Some(function_index) == self.intrinsics.read_stack {
@@ -1485,9 +1482,8 @@ impl<'a> Evaluator<'a> {
                         EvalResult::Alias(abs, value)
                     } else {
                         let ptr = self.func.arg_pool[values][0];
-                        let i64_ty = self.func.single_type_list(Type::I64);
-                        let args = self.func.arg_pool.single(ptr);
-                        let load = self.func.add_value(ValueDef::Operator(
+                        let load = self.func.add_op(
+                            new_block,
                             Operator::I64Load {
                                 memory: MemoryArg {
                                     align: 1,
@@ -1495,10 +1491,9 @@ impl<'a> Evaluator<'a> {
                                     memory: self.image.main_heap().unwrap(),
                                 },
                             },
-                            args,
-                            i64_ty,
-                        ));
-                        self.func.blocks[new_block].insts.push(load);
+                            &[ptr],
+                            &[Type::I64],
+                        );
                         self.stats.virtstack_reads_mem += 1;
                         EvalResult::Alias(AbstractValue::Runtime(None), load)
                     }
@@ -1530,8 +1525,8 @@ impl<'a> Evaluator<'a> {
                     } else if idx == 0 && state.flow.stack.is_empty() {
                         state.flow.stack.push((addr_value, data_value));
                     } else {
-                        let args = self.func.arg_pool.double(stackptr, value);
-                        let store = self.func.add_value(ValueDef::Operator(
+                        self.func.add_op(
+                            new_block,
                             Operator::I64Store {
                                 memory: MemoryArg {
                                     align: 1,
@@ -1539,11 +1534,10 @@ impl<'a> Evaluator<'a> {
                                     memory: self.image.main_heap().unwrap(),
                                 },
                             },
-                            args,
-                            ListRef::default(),
-                        ));
+                            &[stackptr, value],
+                            &[],
+                        );
                         self.stats.virtstack_writes_mem += 1;
-                        self.func.blocks[new_block].insts.push(store);
                     }
                     EvalResult::Elide
                 } else if Some(function_index) == self.intrinsics.sync_stack {
@@ -1553,8 +1547,8 @@ impl<'a> Evaluator<'a> {
                         let addr = addr.value().unwrap();
                         let data = data.value().unwrap();
                         log::trace!("sync_stack: value {} stackptr {}", addr, data);
-                        let args = self.func.arg_pool.double(addr, data);
-                        let store = self.func.add_value(ValueDef::Operator(
+                        self.func.add_op(
+                            new_block,
                             Operator::I64Store {
                                 memory: MemoryArg {
                                     align: 1,
@@ -1562,10 +1556,9 @@ impl<'a> Evaluator<'a> {
                                     memory: self.image.main_heap().unwrap(),
                                 },
                             },
-                            args,
-                            ListRef::default(),
-                        ));
-                        self.func.blocks[new_block].insts.push(store);
+                            &[addr, data],
+                            &[],
+                        );
                         self.stats.virtstack_writes_mem += 1;
                     }
 
@@ -1573,8 +1566,8 @@ impl<'a> Evaluator<'a> {
                         let addr = addr.value().unwrap();
                         let data = data.value().unwrap();
                         log::trace!("sync_stack: local addr {} data {}", addr, data);
-                        let args = self.func.arg_pool.double(addr, data);
-                        let store = self.func.add_value(ValueDef::Operator(
+                        self.func.add_op(
+                            new_block,
                             Operator::I64Store {
                                 memory: MemoryArg {
                                     align: 1,
@@ -1582,10 +1575,9 @@ impl<'a> Evaluator<'a> {
                                     memory: self.image.main_heap().unwrap(),
                                 },
                             },
-                            args,
-                            ListRef::default(),
-                        ));
-                        self.func.blocks[new_block].insts.push(store);
+                            &[addr, data],
+                            &[],
+                        );
                         self.stats.local_writes_mem += 1;
                     }
                     EvalResult::Elide
@@ -1595,9 +1587,8 @@ impl<'a> Evaluator<'a> {
                     let idx = abs[1].as_const_u32().unwrap();
                     match state.flow.locals.get(&idx) {
                         None => {
-                            let args = self.func.arg_pool.single(ptr);
-                            let i64_ty = self.func.single_type_list(Type::I64);
-                            let load = self.func.add_value(ValueDef::Operator(
+                            let load = self.func.add_op(
+                                new_block,
                                 Operator::I64Load {
                                     memory: MemoryArg {
                                         align: 1,
@@ -1605,10 +1596,9 @@ impl<'a> Evaluator<'a> {
                                         memory: self.image.main_heap().unwrap(),
                                     },
                                 },
-                                args,
-                                i64_ty,
-                            ));
-                            self.func.blocks[new_block].insts.push(load);
+                                &[ptr],
+                                &[Type::I64],
+                            );
                             self.stats.local_reads_mem += 1;
                             EvalResult::Alias(AbstractValue::Runtime(None), load)
                         }
@@ -2291,8 +2281,8 @@ impl<'a> Evaluator<'a> {
                     addr,
                     data
                 );
-                let args = self.func.arg_pool.double(addr, data);
-                let store = self.func.add_value(ValueDef::Operator(
+                self.func.add_op(
+                    block,
                     Operator::I64Store {
                         memory: MemoryArg {
                             align: 1,
@@ -2300,10 +2290,9 @@ impl<'a> Evaluator<'a> {
                             memory: self.image.main_heap().unwrap(),
                         },
                     },
-                    args,
-                    ListRef::default(),
-                ));
-                self.func.blocks[block].insts.push(store);
+                    &[addr, data],
+                    &[],
+                );
             }
 
             let locals_to_sync = pred_state
@@ -2327,8 +2316,8 @@ impl<'a> Evaluator<'a> {
                     addr,
                     data
                 );
-                let args = self.func.arg_pool.double(addr, data);
-                let store = self.func.add_value(ValueDef::Operator(
+                self.func.add_op(
+                    block,
                     Operator::I64Store {
                         memory: MemoryArg {
                             align: 1,
@@ -2336,10 +2325,9 @@ impl<'a> Evaluator<'a> {
                             memory: self.image.main_heap().unwrap(),
                         },
                     },
-                    args,
-                    ListRef::default(),
-                ));
-                self.func.blocks[block].insts.push(store);
+                    &[addr, data],
+                    &[],
+                );
             }
         }
     }
@@ -2367,25 +2355,23 @@ impl<'a> Evaluator<'a> {
             match ty {
                 Type::I32 => {
                     if let Some(value) = abs.as_const_u32() {
-                        let tys = self.func.single_type_list(Type::I32);
-                        let const_op = self.func.add_value(ValueDef::Operator(
+                        let const_op = self.func.add_op(
+                            pre_entry,
                             Operator::I32Const { value },
-                            ListRef::default(),
-                            tys,
-                        ));
-                        self.func.append_to_block(pre_entry, const_op);
+                            &[],
+                            &[Type::I32],
+                        );
                         pre_entry_args[i] = const_op;
                     }
                 }
                 Type::I64 => {
                     if let Some(value) = abs.as_const_u64() {
-                        let tys = self.func.single_type_list(Type::I64);
-                        let const_op = self.func.add_value(ValueDef::Operator(
+                        let const_op = self.func.add_op(
+                            pre_entry,
                             Operator::I64Const { value },
-                            ListRef::default(),
-                            tys,
-                        ));
-                        self.func.append_to_block(pre_entry, const_op);
+                            &[],
+                            &[Type::I64],
+                        );
                         pre_entry_args[i] = const_op;
                     }
                 }
