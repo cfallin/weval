@@ -1,6 +1,0 @@
-target/
-*~
-.*.swp
-*.wasm
-*.js
-cache.db
